@@ -1,0 +1,30 @@
+# Traefik Static Configuration
+
+api:
+  insecure: false
+  dashboard: false
+
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: ${TRAEFIK_EMAIL:-admin@example.com}
+      storage: /letsencrypt/acme.json
+      tlsChallenge: {}
+
+providers:
+  docker:
+    exposedByDefault: false
+    network: isli
+
+log:
+  level: INFO
+  format: json
+
+accessLog:
+  format: json

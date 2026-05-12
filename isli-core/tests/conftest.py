@@ -1,0 +1,46 @@
+"""Pytest fixtures for isli-core integration tests."""
+
+import asyncio
+from typing import AsyncGenerator
+
+import pytest
+from fastapi import FastAPI
+from httpx import AsyncClient, ASGITransport
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+
+from isli_core.main import app
+from isli_core.db import init_db, close_db
+from isli_core.models import Base
+
+
+# Use in-memory SQLite for tests
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+
+@pytest.fixture(scope="session")
+def event_loop():
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest.fixture(scope="session", autouse=True)
+async def _setup_test_db():
+    await init_db(TEST_DATABASE_URL)
+    yield
+    await close_db()
+
+
+@pytest.fixture
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    from isli_core.db import async_session
+    if async_session is None:
+        raise RuntimeError("Database not initialized")
+    async with async_session() as session:
+        yield session
+
+
+@pytest.fixture
+async def client() -> AsyncGenerator[AsyncClient, None]:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac

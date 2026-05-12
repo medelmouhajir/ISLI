@@ -1,0 +1,211 @@
+import asyncio
+import os
+import signal
+import structlog
+from contextlib import asynccontextmanager
+from importlib.metadata import version, PackageNotFoundError
+
+from fastapi import FastAPI, APIRouter, Response
+from fastapi.middleware.cors import CORSMiddleware
+
+from .config import get_settings
+from .db import init_db, close_db, engine
+from .redis_client import get_redis
+from .startup_validation import validate_startup_secrets
+from .telemetry import instrument_fastapi, get_trace_id
+from .routers import agents, tasks, skills, channels, system
+
+SERVICE_NAME = "isli-core"
+
+logger = structlog.get_logger()
+
+
+def _app_version() -> str:
+    try:
+        return version("isli-core")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
+def _git_sha() -> str:
+    return os.getenv("GIT_SHA", "unknown")
+
+
+def _handle_sigterm():
+    logger.info("core.sigterm_received", service=SERVICE_NAME)
+    _shutdown_event.set()
+
+
+_shutdown_event = asyncio.Event()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    validate_startup_secrets()
+    settings = get_settings()
+    await init_db(settings.database_url)
+    loop = asyncio.get_running_loop()
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, _handle_sigterm)
+    except NotImplementedError:
+        # Windows does not support add_signal_handler in ProactorEventLoop
+        pass
+    logger.info("core.startup", service=SERVICE_NAME)
+    yield
+    logger.info("core.shutdown.drain", service=SERVICE_NAME)
+    await asyncio.wait_for(_shutdown_event.wait(), timeout=30.0)
+    await close_db()
+    logger.info("core.shutdown", service=SERVICE_NAME)
+
+
+app = FastAPI(
+    title="ISLI Core API",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+instrument_fastapi(app, SERVICE_NAME)
+
+cors_origins = [o.strip() for o in (get_settings().cors_origins or "").split(",") if o.strip()]
+if not cors_origins:
+    cors_origins = ["http://localhost:5173", "http://localhost:3000"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# v1 API router
+v1 = APIRouter(prefix="/v1")
+
+v1.include_router(agents.router)
+v1.include_router(tasks.router)
+v1.include_router(skills.router)
+v1.include_router(channels.router)
+v1.include_router(system.router)
+
+
+@v1.get("/metrics")
+async def metrics_v1():
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@v1.get("/health")
+async def health_v1():
+    trace_id = get_trace_id()
+    return {
+        "status": "ok",
+        "service": SERVICE_NAME,
+        "version": _app_version(),
+        "git_sha": _git_sha(),
+        "trace_id": trace_id,
+    }
+
+
+@v1.get("/ready")
+async def ready_v1():
+    db_ok = False
+    redis_ok = False
+    try:
+        from sqlalchemy import text
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            db_ok = True
+    except Exception as exc:
+        logger.warning("core.ready.db_failed", error=str(exc))
+
+    try:
+        redis = await get_redis()
+        await redis.ping()
+        redis_ok = True
+    except Exception as exc:
+        logger.warning("core.ready.redis_failed", error=str(exc))
+
+    if db_ok and redis_ok:
+        return {
+            "status": "ready",
+            "service": SERVICE_NAME,
+            "version": _app_version(),
+            "git_sha": _git_sha(),
+            "database": "ok",
+            "redis": "ok",
+        }
+    return {
+        "status": "not_ready",
+        "service": SERVICE_NAME,
+        "version": _app_version(),
+        "git_sha": _git_sha(),
+        "database": "ok" if db_ok else "fail",
+        "redis": "ok" if redis_ok else "fail",
+    }
+
+
+@v1.get("/live")
+async def live_v1():
+    return {"status": "alive", "service": SERVICE_NAME, "version": _app_version()}
+
+
+app.include_router(v1)
+
+# Legacy unversioned endpoints
+@app.get("/metrics")
+async def metrics():
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/health")
+async def health():
+    trace_id = get_trace_id()
+    return {
+        "status": "ok",
+        "service": SERVICE_NAME,
+        "version": _app_version(),
+        "git_sha": _git_sha(),
+        "trace_id": trace_id,
+    }
+
+
+@app.get("/ready")
+async def ready():
+    db_ok = False
+    redis_ok = False
+    try:
+        from sqlalchemy import text
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            db_ok = True
+    except Exception as exc:
+        logger.warning("core.ready.db_failed", error=str(exc))
+
+    try:
+        redis = await get_redis()
+        await redis.ping()
+        redis_ok = True
+    except Exception as exc:
+        logger.warning("core.ready.redis_failed", error=str(exc))
+
+    if db_ok and redis_ok:
+        return {
+            "status": "ready",
+            "service": SERVICE_NAME,
+            "database": "ok",
+            "redis": "ok",
+        }
+    return {
+        "status": "not_ready",
+        "service": SERVICE_NAME,
+        "database": "ok" if db_ok else "fail",
+        "redis": "ok" if redis_ok else "fail",
+    }
+
+
+@app.get("/live")
+async def live():
+    return {"status": "alive", "service": SERVICE_NAME}

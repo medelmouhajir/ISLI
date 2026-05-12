@@ -1,0 +1,73 @@
+"""Rate-card calculator with per-agent monthly projections."""
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass
+class ModelRate:
+    model_id: str
+    provider: str
+    input_per_1k: float  # USD per 1K input tokens
+    output_per_1k: float  # USD per 1K output tokens
+    is_local: bool = False
+
+
+# ISLI rate card (2026-05-11)
+RATE_CARD: dict[str, ModelRate] = {
+    "claude-sonnet-4-6": ModelRate("claude-sonnet-4-6", "anthropic", 3.00, 15.00),
+    "claude-haiku-4-5": ModelRate("claude-haiku-4-5", "anthropic", 0.80, 4.00),
+    "gpt-4o": ModelRate("gpt-4o", "openai", 2.50, 10.00),
+    "gpt-4o-mini": ModelRate("gpt-4o-mini", "openai", 0.15, 0.60),
+    "qwen3:1.7b": ModelRate("qwen3:1.7b", "ollama", 0.0, 0.0, is_local=True),
+    "qwen3:0.6b": ModelRate("qwen3:0.6b", "ollama", 0.0, 0.0, is_local=True),
+}
+
+
+class CostEstimator:
+    """Calculate token costs and monthly projections."""
+
+    @staticmethod
+    def estimate_turn(model_id: str, input_tokens: int, output_tokens: int) -> float:
+        rate = RATE_CARD.get(model_id)
+        if rate is None:
+            raise ValueError(f"Unknown model: {model_id}")
+        if rate.is_local:
+            return 0.0
+        input_cost = (input_tokens / 1000) * rate.input_per_1k
+        output_cost = (output_tokens / 1000) * rate.output_per_1k
+        return input_cost + output_cost
+
+    @staticmethod
+    def monthly_projection(
+        model_id: str,
+        turns_per_day: int,
+        avg_input_tokens: int,
+        avg_output_tokens: int,
+    ) -> dict[str, Any]:
+        daily = CostEstimator.estimate_turn(model_id, avg_input_tokens, avg_output_tokens) * turns_per_day
+        monthly = daily * 30
+        return {
+            "model_id": model_id,
+            "turns_per_day": turns_per_day,
+            "daily_cost_usd": round(daily, 4),
+            "monthly_cost_usd": round(monthly, 2),
+            "yearly_cost_usd": round(monthly * 12, 2),
+        }
+
+    @staticmethod
+    def compare_tiers(
+        turns_per_day: int,
+        avg_input_tokens: int,
+        avg_output_tokens: int,
+    ) -> list[dict[str, Any]]:
+        results = []
+        for model_id, rate in RATE_CARD.items():
+            if rate.is_local:
+                continue
+            proj = CostEstimator.monthly_projection(
+                model_id, turns_per_day, avg_input_tokens, avg_output_tokens
+            )
+            results.append(proj)
+        results.sort(key=lambda x: x["monthly_cost_usd"])
+        return results
