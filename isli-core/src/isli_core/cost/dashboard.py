@@ -22,6 +22,7 @@ class CostDashboard:
             select(
                 func.sum(CostLedger.input_tokens),
                 func.sum(CostLedger.output_tokens),
+                func.sum(CostLedger.reasoning_tokens),
                 func.sum(CostLedger.cost_usd),
                 func.count(CostLedger.id),
             ).where(
@@ -35,9 +36,10 @@ class CostDashboard:
             "period_days": days,
             "input_tokens": int(row[0] or 0),
             "output_tokens": int(row[1] or 0),
-            "cost_usd": float(row[2] or 0.0),
-            "turns": int(row[3] or 0),
-            "avg_cost_per_turn": round(float(row[2] or 0.0) / max(row[3] or 1, 1), 6),
+            "reasoning_tokens": int(row[2] or 0),
+            "cost_usd": float(row[3] or 0.0),
+            "turns": int(row[4] or 0),
+            "avg_cost_per_turn": round(float(row[3] or 0.0) / max(row[4] or 1, 1), 6),
         }
 
     @staticmethod
@@ -48,6 +50,7 @@ class CostDashboard:
                 CostLedger.agent_id,
                 func.sum(CostLedger.input_tokens),
                 func.sum(CostLedger.output_tokens),
+                func.sum(CostLedger.reasoning_tokens),
                 func.sum(CostLedger.cost_usd),
                 func.count(CostLedger.id),
             )
@@ -61,8 +64,9 @@ class CostDashboard:
                 "agent_id": row[0],
                 "input_tokens": int(row[1] or 0),
                 "output_tokens": int(row[2] or 0),
-                "cost_usd": float(row[3] or 0.0),
-                "turns": int(row[4] or 0),
+                "reasoning_tokens": int(row[3] or 0),
+                "cost_usd": float(row[4] or 0.0),
+                "turns": int(row[5] or 0),
             }
             for row in rows
         ]
@@ -75,20 +79,22 @@ class CostDashboard:
         model_id: str,
         input_tokens: int,
         output_tokens: int,
+        reasoning_tokens: int = 0,
         tier: str = "standard",
     ) -> CostLedger:
         from isli_core.cost.rate_card import CostEstimator
-        cost = CostEstimator.estimate_turn(model_id, input_tokens, output_tokens)
+        cost = CostEstimator.estimate_turn(model_id, input_tokens, output_tokens, reasoning_tokens)
         entry = CostLedger(
             agent_id=agent_id,
             task_id=task_id,
             model_id=model_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
             cost_usd=cost,
             tier=tier,
         )
         session.add(entry)
         await session.flush()
-        logger.info("cost.recorded", agent_id=agent_id, cost_usd=cost, model=model_id)
+        logger.info("cost.recorded", agent_id=agent_id, cost_usd=cost, model=model_id, reasoning_tokens=reasoning_tokens)
         return entry

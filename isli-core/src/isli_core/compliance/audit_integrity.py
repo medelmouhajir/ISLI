@@ -20,14 +20,12 @@ class AuditIntegrity:
     def _hash_row(row: AuditLog, previous_hash: str | None = None) -> str:
         """Compute SHA-256 hash of audit row content + previous hash."""
         payload = {
-            "id": row.id,
             "actor_type": row.actor_type,
             "actor_id": row.actor_id,
             "action": row.action,
             "target_type": row.target_type,
             "target_id": row.target_id,
-            "payload": str(row.payload),
-            "created_at": row.created_at.isoformat() if row.created_at else "",
+            "payload": json.dumps(row.payload, sort_keys=True, default=str) if row.payload else "",
             "previous_hash": previous_hash or "genesis",
         }
         raw = json.dumps(payload, sort_keys=True, default=str)
@@ -61,14 +59,27 @@ class AuditIntegrity:
     @staticmethod
     async def verify_chain(session: AsyncSession, since: Any | None = None) -> dict[str, Any]:
         """Verify the integrity of the audit chain. Returns any tampered rows."""
-        computed = await AuditIntegrity.compute_chain_hash(session, since)
-        # In a real system, we'd store the merkle_root in a tamper-proof location
-        # For now, we recompute and flag any inconsistencies
+        stmt = select(AuditLog).order_by(AuditLog.created_at.asc())
+        if since:
+            stmt = stmt.where(AuditLog.created_at >= since)
+
+        result = await session.execute(stmt)
+        rows = list(result.scalars().all())
+
+        previous_hash = None
+        tampered_rows: list[str] = []
+        for row in rows:
+            computed_hash = AuditIntegrity._hash_row(row, previous_hash)
+            if row.chain_hash and row.chain_hash != computed_hash:
+                tampered_rows.append(row.id)
+            previous_hash = row.chain_hash or computed_hash
+
+        merkle_root = previous_hash if previous_hash else ""
         return {
-            "verified": True,
-            "row_count": computed["row_count"],
-            "merkle_root": computed["merkle_root"],
-            "tampered_rows": [],
+            "verified": len(tampered_rows) == 0,
+            "row_count": len(rows),
+            "merkle_root": merkle_root,
+            "tampered_rows": tampered_rows,
         }
 
     @staticmethod

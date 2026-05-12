@@ -29,6 +29,9 @@ class Agent(Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     token_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reasoning_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(64))
+    org_id: Mapped[str | None] = mapped_column(String(64))
     fallback_agent_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agents.id"), nullable=True)
     max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -40,7 +43,11 @@ class Agent(Base):
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    __table_args__ = (Index("ix_agents_status", "status"),)
+    __table_args__ = (
+        Index("ix_agents_status", "status"),
+        Index("ix_agents_user_id", "user_id"),
+        Index("ix_agents_org_id", "org_id"),
+    )
 
 
 class Task(Base):
@@ -74,6 +81,8 @@ class Task(Base):
     depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     blocked_reason: Mapped[str | None] = mapped_column(Text)
     token_usage: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    task_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reasoning_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     trace_id: Mapped[str | None] = mapped_column(String(64))
@@ -86,6 +95,52 @@ class Task(Base):
         Index("ix_tasks_agent_id", "agent_id"),
         Index("ix_tasks_created_at", "created_at"),
         Index("ix_tasks_parent_task_id", "parent_task_id"),
+    )
+
+
+class UserBudget(Base):
+    __tablename__ = "user_budgets"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    monthly_usd_cap: Mapped[float | None] = mapped_column(Float)
+    monthly_token_cap: Mapped[int | None] = mapped_column(Integer)
+    alert_threshold_pct: Mapped[float] = mapped_column(Float, default=80.0, nullable=False)
+    slack_webhook_url: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_user_budgets_user_id", "user_id"),
+    )
+
+
+class OrgBudget(Base):
+    __tablename__ = "org_budgets"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    org_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    monthly_usd_cap: Mapped[float | None] = mapped_column(Float)
+    monthly_token_cap: Mapped[int | None] = mapped_column(Integer)
+    alert_threshold_pct: Mapped[float] = mapped_column(Float, default=80.0, nullable=False)
+    slack_webhook_url: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_org_budgets_org_id", "org_id"),
     )
 
 
@@ -129,12 +184,14 @@ class Session(Base):
         DateTime(timezone=True), default=now_utc, nullable=False
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     compacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index("ix_sessions_agent_id", "agent_id"),
         Index("ix_sessions_expires_at", "expires_at"),
+        Index("ix_sessions_last_activity_at", "last_activity_at"),
     )
 
 
@@ -150,6 +207,7 @@ class AuditLog(Base):
     target_type: Mapped[str] = mapped_column(String(32), nullable=False)
     target_id: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    chain_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False
     )
@@ -171,6 +229,7 @@ class CostLedger(Base):
     model_id: Mapped[str] = mapped_column(String(128), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     tier: Mapped[str] = mapped_column(String(16), default="standard", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -276,6 +335,28 @@ class ChannelMessage(Base):
     )
 
 
+class PolicyOverride(Base):
+    __tablename__ = "policy_overrides"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    rule: Mapped[str] = mapped_column(String(64), nullable=False)
+    context_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    granted: Mapped[bool] = mapped_column(default=False, nullable=False)
+    granted_by: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_policy_overrides_user_rule", "user_id", "rule"),
+        Index("ix_policy_overrides_context_hash", "context_hash"),
+    )
+
+
 class CheckPoint(Base):
     __tablename__ = "checkpoints"
 
@@ -286,6 +367,8 @@ class CheckPoint(Base):
     turn_number: Mapped[int] = mapped_column(Integer, nullable=False)
     messages: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     tool_calls: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    recovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recovery_turn_number: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False
     )

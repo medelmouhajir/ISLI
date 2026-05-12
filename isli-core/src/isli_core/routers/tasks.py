@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from isli_core.db import get_db
 from isli_core.models import Task
 from isli_core.locking import increment_task_version
+from isli_core.audit_writer import AuditWriter
+from isli_core.security.content_scanner import ContentScanner
+from isli_core.security.policy_engine import PolicyEngine
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -90,6 +93,34 @@ async def list_tasks(
 
 @router.post("", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
 async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
+    # Security scan and policy check
+    scan = ContentScanner.scan(payload.input)
+    decision = await PolicyEngine.evaluate(
+        db,
+        user_id=payload.created_by,
+        input_text=payload.input,
+        agent_id=payload.agent_id,
+        skill_name=None,
+        model_id=None,
+        budget_exceeded=False,
+        estop_active=False,
+    )
+    if not decision.allow:
+        detail: dict[str, Any] = {
+            "detail": f"Policy block: {decision.reason}",
+            "policy_decision": {
+                "allow": decision.allow,
+                "reason": decision.reason,
+                "risk_score": decision.risk_score,
+                "overrideable": decision.overrideable,
+                "rule": decision.rule,
+                "context_hash": decision.context_hash,
+            },
+        }
+        if decision.overrideable:
+            detail["override_request_url"] = "/v1/security/override-request"
+        raise HTTPException(status_code=403, detail=detail)
+
     if payload.idempotency_key:
         existing = await db.execute(
             select(Task).where(Task.idempotency_key == payload.idempotency_key)
@@ -133,6 +164,12 @@ async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
 
     from isli_core.telemetry import get_task_creation_counter
     get_task_creation_counter().add(1)
+    await AuditWriter.write(
+        db, actor_type="user", actor_id=payload.created_by, action="create_task",
+        target_type="task", target_id=task.id,
+        payload={"title": task.title, "agent_id": task.agent_id},
+    )
+    await db.commit()
     return task
 
 
@@ -154,12 +191,19 @@ async def update_task(task_id: str, payload: TaskUpdate, db: AsyncSession = Depe
 
     await increment_task_version(db, task_id, task.version)
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
         setattr(task, field, value)
     task.updated_at = datetime.now(timezone.utc)
     task.version += 1
     await db.commit()
     await db.refresh(task)
+    await AuditWriter.write(
+        db, actor_type="system", actor_id="core-api", action="update_task",
+        target_type="task", target_id=task.id,
+        payload=changes,
+    )
+    await db.commit()
     return task
 
 
@@ -181,6 +225,12 @@ async def move_task(task_id: str, new_status: str, db: AsyncSession = Depends(ge
         task.completed_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(task)
+    await AuditWriter.write(
+        db, actor_type="system", actor_id="core-api", action="move_task",
+        target_type="task", target_id=task.id,
+        payload={"new_status": new_status},
+    )
+    await db.commit()
     return task
 
 
@@ -191,5 +241,10 @@ async def delete_task(task_id: str, db: AsyncSession = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     task.deleted_at = datetime.now(timezone.utc)
+    await db.commit()
+    await AuditWriter.write(
+        db, actor_type="system", actor_id="core-api", action="delete_task",
+        target_type="task", target_id=task_id,
+    )
     await db.commit()
     return

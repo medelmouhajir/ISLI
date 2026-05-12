@@ -10,7 +10,7 @@ logger = structlog.get_logger()
 TIER_ORDER = ["premium", "standard", "local"]
 
 TIER_MODELS: dict[str, list[str]] = {
-    "premium": ["claude-sonnet-4-6", "gpt-4o"],
+    "premium": ["claude-opus-4-7-thinking", "claude-sonnet-4-6", "gpt-4o"],
     "standard": ["claude-haiku-4-5", "gpt-4o-mini"],
     "local": ["qwen3:1.7b", "qwen3:0.6b"],
 }
@@ -53,6 +53,16 @@ class ModelTiering:
         while tier:
             model = ModelTiering.resolve_model(agent_config, tier)
             rate = RATE_CARD.get(model)
+
+            # Downgrade if reasoning budget is low and model is a reasoning model
+            from isli_core.cost.reasoning_detector import ReasoningDetector
+            reasoning_budget = agent_config.get("reasoning_budget")
+            if reasoning_budget is not None and ReasoningDetector.is_reasoning_model(model):
+                if reasoning_budget < 5000:  # heuristic: low reasoning budget threshold
+                    logger.warning("tiering.low_reasoning_budget", model=model, reasoning_budget=reasoning_budget)
+                    tier = ModelTiering.downgrade_tier(tier)
+                    continue
+
             if rate and not rate.is_local:
                 # Rough estimate: if budget can't cover even a small turn, downgrade
                 estimated_cost = (1000 / 1000) * rate.input_per_1k + (500 / 1000) * rate.output_per_1k

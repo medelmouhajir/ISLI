@@ -55,3 +55,21 @@ class SkillProxyAuth:
                 detail="Missing X-Internal-Auth header",
             )
         return verify_internal_token(auth)
+
+
+def require_scopes(required_scopes: list[str]):
+    """Dependency factory that validates JWT scopes."""
+
+    async def _check_scopes(
+        credentials: HTTPAuthorizationCredentials = Depends(security),
+    ) -> dict[str, Any]:
+        payload = verify_internal_token(credentials.credentials)
+        token_scopes = set(payload.get("scopes", []))
+        if not all(scope in token_scopes for scope in required_scopes):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required scopes: {required_scopes}",
+            )
+        return payload
+
+    return _check_scopes

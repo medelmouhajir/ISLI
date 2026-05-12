@@ -19,31 +19,30 @@ WEAK_SECRETS = {
 
 def validate_startup_secrets() -> None:
     """Fail fast if any required production secret is missing or weak."""
-    from .config import get_settings
-    settings = get_settings()
     env = os.getenv("ISLI_ENV", "development").lower()
     is_prod = env not in ("development", "dev", "local", "test")
 
-    jwt_secret = settings.jwt_secret or os.getenv("JWT_SECRET", "")
+    # Read directly from os.environ so mutations are respected (e.g. in tests).
+    jwt_secret = os.getenv("JWT_SECRET", "")
     if not jwt_secret or len(jwt_secret) < 32 or jwt_secret.lower() in WEAK_SECRETS:
         raise RuntimeError(
             "JWT_SECRET is missing, shorter than 32 characters, or is a known weak value. "
             "Set a strong secret before starting the service."
         )
 
-    db_url = settings.database_url or os.getenv("DATABASE_URL", "")
+    db_url = os.getenv("DATABASE_URL", "")
     if is_prod and "sqlite" in db_url.lower():
         raise RuntimeError(
             "SQLite is not allowed in production. Set DATABASE_URL to a PostgreSQL connection string."
         )
 
-    redis_url = settings.redis_url or os.getenv("REDIS_URL", "")
+    redis_url = os.getenv("REDIS_URL", "")
     if is_prod and "fakeredis" in redis_url.lower():
         raise RuntimeError(
             "fakeredis is not allowed in production. Set REDIS_URL to a real Redis connection string."
         )
 
-    enc_key = settings.pii_encryption_key or os.getenv("PII_ENCRYPTION_KEY", "")
+    enc_key = os.getenv("PII_ENCRYPTION_KEY", "")
     if is_prod and not enc_key:
         raise RuntimeError("PII_ENCRYPTION_KEY must be set in production.")
     if enc_key and len(enc_key.encode()) < 32:

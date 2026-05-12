@@ -90,6 +90,14 @@ def get_skill_invocation_error_counter():
     )
 
 
+def get_verification_failure_counter():
+    return _get_core_meter().create_counter(
+        "isli.tool.verification_failures",
+        description="Number of grounding verification failures",
+        unit="1",
+    )
+
+
 def instrument_fastapi(app, service_name: str) -> trace.TracerProvider:
     configure_structlog(service_name)
     provider = configure_otel(service_name)

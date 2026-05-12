@@ -13,7 +13,7 @@ from .db import init_db, close_db, engine
 from .redis_client import get_redis
 from .startup_validation import validate_startup_secrets
 from .telemetry import instrument_fastapi, get_trace_id
-from .routers import agents, tasks, skills, channels, system
+from .routers import agents, tasks, skills, channels, system, transparency, security
 
 SERVICE_NAME = "isli-core"
 
@@ -39,6 +39,25 @@ def _handle_sigterm():
 _shutdown_event = asyncio.Event()
 
 
+async def _recovery_loop() -> None:
+    """Background loop for checkpoint recovery worker."""
+    import asyncio
+    from isli_core.db import async_session
+    from isli_core.jobs.checkpoint_recovery import CheckpointRecoveryWorker
+
+    while True:
+        await asyncio.sleep(300)  # Run every 5 minutes
+        if async_session is None:
+            continue
+        try:
+            async with async_session() as session:
+                await CheckpointRecoveryWorker.run_once(session)
+                await session.commit()
+        except Exception as exc:
+            import structlog
+            structlog.get_logger().error("recovery_loop.error", error=str(exc))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_startup_secrets()
@@ -52,8 +71,28 @@ async def lifespan(app: FastAPI):
         # Windows does not support add_signal_handler in ProactorEventLoop
         pass
     logger.info("core.startup", service=SERVICE_NAME)
+
+    # Start background workers
+    from isli_core.jobs.session_cron import SessionCronJob
+    from isli_core.jobs.checkpoint_recovery import CheckpointRecoveryWorker
+
+    cron_task = asyncio.create_task(SessionCronJob.loop())
+    recovery_task = asyncio.create_task(_recovery_loop())
+
     yield
+
     logger.info("core.shutdown.drain", service=SERVICE_NAME)
+    cron_task.cancel()
+    recovery_task.cancel()
+    try:
+        await cron_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await recovery_task
+    except asyncio.CancelledError:
+        pass
+
     await asyncio.wait_for(_shutdown_event.wait(), timeout=30.0)
     await close_db()
     logger.info("core.shutdown", service=SERVICE_NAME)
@@ -88,6 +127,8 @@ v1.include_router(tasks.router)
 v1.include_router(skills.router)
 v1.include_router(channels.router)
 v1.include_router(system.router)
+v1.include_router(transparency.router)
+v1.include_router(security.router)
 
 
 @v1.get("/metrics")
