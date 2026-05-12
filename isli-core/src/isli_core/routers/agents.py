@@ -7,9 +7,10 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from isli_core.db import get_db
-from isli_core.models import Agent
+from isli_core.models import Agent, Session
 from isli_core.budget import check_budget
 from isli_core.auth import create_internal_token
+from isli_core.audit_writer import AuditWriter
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -24,6 +25,8 @@ class AgentCreate(BaseModel):
     skills: list[str] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
     token_budget: int | None = None
+    user_id: str | None = None
+    org_id: str | None = None
     fallback_agent_id: str | None = None
     max_retries: int = 3
 
@@ -38,6 +41,8 @@ class AgentUpdate(BaseModel):
     skills: list[str] | None = None
     config: dict[str, Any] | None = None
     token_budget: int | None = None
+    user_id: str | None = None
+    org_id: str | None = None
     fallback_agent_id: str | None = None
     max_retries: int | None = None
 
@@ -53,6 +58,8 @@ class AgentOut(BaseModel):
     skills: list[str]
     token_budget: int | None
     token_used: int
+    user_id: str | None
+    org_id: str | None
     fallback_agent_id: str | None
     max_retries: int
     heartbeat_at: datetime | None
@@ -88,12 +95,20 @@ async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db))
         skills=payload.skills,
         config=payload.config,
         token_budget=payload.token_budget,
+        user_id=payload.user_id,
+        org_id=payload.org_id,
         fallback_agent_id=payload.fallback_agent_id,
         max_retries=payload.max_retries,
     )
     db.add(agent)
     await db.commit()
     await db.refresh(agent)
+    await AuditWriter.write(
+        db, actor_type="system", actor_id="core-api", action="create_agent",
+        target_type="agent", target_id=agent.id,
+        payload={"name": agent.name, "model_id": agent.model_id},
+    )
+    await db.commit()
     return agent
 
 
@@ -113,11 +128,18 @@ async def update_agent(agent_id: str, payload: AgentUpdate, db: AsyncSession = D
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
         setattr(agent, field, value)
     agent.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(agent)
+    await AuditWriter.write(
+        db, actor_type="system", actor_id="core-api", action="update_agent",
+        target_type="agent", target_id=agent.id,
+        payload=changes,
+    )
+    await db.commit()
     return agent
 
 
@@ -129,6 +151,11 @@ async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Agent not found")
     agent.deleted_at = datetime.now(timezone.utc)
     agent.status = "deleted"
+    await db.commit()
+    await AuditWriter.write(
+        db, actor_type="system", actor_id="core-api", action="delete_agent",
+        target_type="agent", target_id=agent_id,
+    )
     await db.commit()
     return
 
@@ -143,9 +170,26 @@ async def agent_heartbeat(agent_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Agent not found")
     agent.heartbeat_at = datetime.now(timezone.utc)
     agent.status = "online" if agent.status in ("registered", "offline", "paused") else agent.status
+
+    # Update any active session's last_activity_at
+    session_result = await db.execute(
+        select(Session).where(
+            Session.agent_id == agent_id,
+            Session.deleted_at.is_(None),
+        )
+    )
+    for sess in session_result.scalars().all():
+        sess.last_activity_at = datetime.now(timezone.utc)
+
     await db.commit()
     token = create_internal_token(agent_id, scopes=["agent"], expires_minutes=60)
     latency_ms = (time.perf_counter() - start) * 1000
     from isli_core.telemetry import get_heartbeat_latency_histogram
     get_heartbeat_latency_histogram().record(latency_ms)
+    await AuditWriter.write(
+        db, actor_type="agent", actor_id=agent_id, action="heartbeat",
+        target_type="agent", target_id=agent_id,
+        payload={"latency_ms": round(latency_ms, 2)},
+    )
+    await db.commit()
     return {"status": "ok", "agent_id": agent_id, "token": token}

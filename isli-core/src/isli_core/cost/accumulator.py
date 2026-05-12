@@ -45,6 +45,7 @@ class RootTaskAccumulator:
             select(
                 func.sum(CostLedger.input_tokens),
                 func.sum(CostLedger.output_tokens),
+                func.sum(CostLedger.reasoning_tokens),
                 func.sum(CostLedger.cost_usd),
             ).where(CostLedger.task_id.in_(task_ids))
         )
@@ -54,7 +55,8 @@ class RootTaskAccumulator:
             "total_tasks": len(task_ids),
             "input_tokens": int(row[0] or 0),
             "output_tokens": int(row[1] or 0),
-            "total_cost_usd": float(row[2] or 0.0),
+            "reasoning_tokens": int(row[2] or 0),
+            "total_cost_usd": float(row[3] or 0.0),
         }
         logger.info("accumulator.total", **total)
         return total

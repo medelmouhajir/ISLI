@@ -10,6 +10,7 @@ class ModelRate:
     provider: str
     input_per_1k: float  # USD per 1K input tokens
     output_per_1k: float  # USD per 1K output tokens
+    reasoning_per_1k: float = 0.0  # USD per 1K reasoning tokens
     is_local: bool = False
 
 
@@ -19,6 +20,9 @@ RATE_CARD: dict[str, ModelRate] = {
     "claude-haiku-4-5": ModelRate("claude-haiku-4-5", "anthropic", 0.80, 4.00),
     "gpt-4o": ModelRate("gpt-4o", "openai", 2.50, 10.00),
     "gpt-4o-mini": ModelRate("gpt-4o-mini", "openai", 0.15, 0.60),
+    "o1": ModelRate("o1", "openai", 5.00, 15.00, reasoning_per_1k=10.00),
+    "o3": ModelRate("o3", "openai", 5.00, 15.00, reasoning_per_1k=10.00),
+    "claude-opus-4-7-thinking": ModelRate("claude-opus-4-7-thinking", "anthropic", 7.50, 30.00, reasoning_per_1k=15.00),
     "qwen3:1.7b": ModelRate("qwen3:1.7b", "ollama", 0.0, 0.0, is_local=True),
     "qwen3:0.6b": ModelRate("qwen3:0.6b", "ollama", 0.0, 0.0, is_local=True),
 }
@@ -28,7 +32,7 @@ class CostEstimator:
     """Calculate token costs and monthly projections."""
 
     @staticmethod
-    def estimate_turn(model_id: str, input_tokens: int, output_tokens: int) -> float:
+    def estimate_turn(model_id: str, input_tokens: int, output_tokens: int, reasoning_tokens: int = 0) -> float:
         rate = RATE_CARD.get(model_id)
         if rate is None:
             raise ValueError(f"Unknown model: {model_id}")
@@ -36,7 +40,8 @@ class CostEstimator:
             return 0.0
         input_cost = (input_tokens / 1000) * rate.input_per_1k
         output_cost = (output_tokens / 1000) * rate.output_per_1k
-        return input_cost + output_cost
+        reasoning_cost = (reasoning_tokens / 1000) * rate.reasoning_per_1k
+        return input_cost + output_cost + reasoning_cost
 
     @staticmethod
     def monthly_projection(
