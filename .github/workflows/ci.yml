@@ -166,66 +166,32 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-images]
     if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_DB: isli
-          POSTGRES_USER: isli
-          POSTGRES_PASSWORD: password
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-      redis:
-        image: redis:7-alpine
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 6379:6379
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install core and start API
-        working-directory: ./isli-core
+
+      - name: Create .env for compose
         run: |
-          pip install -e ".[dev]"
-          export DATABASE_URL="postgresql+asyncpg://isli:password@localhost:5432/isli"
-          export REDIS_URL="redis://localhost:6379/0"
-          export JWT_SECRET="ci-test-secret-thirty-two-bytes-long!!"
-          export PII_ENCRYPTION_KEY="ci-test-encryption-key-32bytes!!"
-          uvicorn isli_core.main:app --host 127.0.0.1 --port 8000 &
-          sleep 5
-          curl -sf http://127.0.0.1:8000/health || exit 1
-      - name: Install keeper and start API
-        working-directory: ./isli-keeper
+          cp .env.production .env
+          sed -i 's/${JWT_SECRET:?error}/ci-test-secret-thirty-two-bytes-long!!/' .env
+          sed -i 's/${PII_ENCRYPTION_KEY:?error}/ci-test-encryption-key-32bytes!!/' .env
+          sed -i 's/${POSTGRES_PASSWORD:?error}/password/' .env
+          sed -i 's|${DATABASE_URL}|postgresql+asyncpg://isli:password@postgres:5432/isli|' .env
+          sed -i 's|${REDIS_URL}|redis://redis:6379/0|' .env
+
+      - name: Start services with Docker Compose
         run: |
-          pip install -e ".[dev]"
-          uvicorn isli_keeper.main:app --host 127.0.0.1 --port 8001 &
-          sleep 3
-          curl -sf http://127.0.0.1:8001/health || exit 1
-      - name: Install channels and start API
-        working-directory: ./isli-channels
+          docker compose up -d postgres redis core keeper channels skills board
+          sleep 15
+
+      - name: Wait for services
         run: |
-          pip install -e ".[dev]"
-          uvicorn isli_channels.main:app --host 127.0.0.1 --port 8002 &
-          sleep 3
-          curl -sf http://127.0.0.1:8002/health || exit 1
-      - name: Install skills and start API
-        working-directory: ./isli-skills
-        run: |
-          pip install -e ".[dev]"
-          uvicorn isli_skills.main:app --host 127.0.0.1 --port 8003 &
-          sleep 3
-          curl -sf http://127.0.0.1:8003/health || exit 1
+          for port in 8000 8001 8002 8003; do
+            for i in $(seq 1 30); do
+              curl -sf http://localhost:$port/health && break
+              sleep 1
+            done
+          done
+
       - name: End-to-end API checks
         run: |
           echo "=== Core API ==="
@@ -244,7 +210,13 @@ jobs:
           curl -sf http://127.0.0.1:8003/health
           curl -sf http://127.0.0.1:8003/ready
           curl -sf http://127.0.0.1:8003/live
+          echo "=== Board ==="
+          curl -sf http://127.0.0.1:80/ || true
           echo "=== Integration checks passed ==="
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
 
   security-scan:
     runs-on: ubuntu-latest

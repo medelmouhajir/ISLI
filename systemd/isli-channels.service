@@ -1,0 +1,20 @@
+[Unit]
+Description=ISLI Channels
+After=network.target redis-server.service isli-core.service
+Wants=redis-server.service
+
+[Service]
+Type=simple
+User=isli
+Group=isli
+WorkingDirectory=/opt/isli/isli-channels
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/isli/.env
+ExecStart=/opt/isli/isli-channels/.venv/bin/python -m uvicorn isli_channels.main:app --host 0.0.0.0 --port 8002
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

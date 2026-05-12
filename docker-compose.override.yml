@@ -1,0 +1,49 @@
+# ISLI — Local Development Overrides
+# Place this file next to docker-compose.yml. Docker Compose merges it automatically.
+
+version: "3.9"
+
+services:
+  core:
+    build:
+      context: ./isli-core
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+      DATABASE_URL: sqlite+aiosqlite:///./isli_dev.db
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./isli-core/src:/app/src:ro
+
+  keeper:
+    build:
+      context: ./isli-keeper
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    volumes:
+      - ./isli-keeper/src:/app/src:ro
+
+  channels:
+    build:
+      context: ./isli-channels
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+    volumes:
+      - ./isli-channels/src:/app/src:ro
+
+  skills:
+    build:
+      context: ./isli-skills
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+    volumes:
+      - ./isli-skills/src:/app/src:ro
+
+  board:
+    build:
+      context: ./isli-board
+      dockerfile: Dockerfile

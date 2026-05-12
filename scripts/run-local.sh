@@ -16,6 +16,24 @@ else
     echo "[run-local] .env.local not found, using defaults"
 fi
 
+# --- Port checks ---
+PORTS=(8000 8001 8002 8003 5173)
+for port in "${PORTS[@]}"; do
+    if command -v nc >/dev/null 2>&1; then
+        if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+            echo "[run-local] ERROR: Port $port is already in use."
+            exit 1
+        fi
+    elif command -v python >/dev/null 2>&1; then
+        if python -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',$port)); s.close()" 2>/dev/null; then
+            :
+        else
+            echo "[run-local] ERROR: Port $port is already in use."
+            exit 1
+        fi
+    fi
+done
+
 PIDS=()
 
 cleanup() {

@@ -1,5 +1,7 @@
-# ISLI — Production-Ready Docker Compose
-# Phase 0 Foundation. See Docs/10-roadmap.md for the full plan.
+# ISLI — Single-Node Docker Compose (Production)
+# Simplest deployment: one host, direct ports, no replicas.
+# Copy .env.production to .env and fill in values, then run:
+#   docker compose up -d
 
 version: "3.9"
 
@@ -7,26 +9,21 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: isli
-      POSTGRES_USER: isli
-      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ${POSTGRES_DB:-isli}
+      POSTGRES_USER: ${POSTGRES_USER:-isli}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?error}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    networks:
+      - isli
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U isli -d isli"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-isli}"]
+      interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
-        reservations:
-          memory: 512M
 
   redis:
     image: redis:7-alpine
@@ -35,19 +32,14 @@ services:
       - redis_data:/data
     ports:
       - "6379:6379"
+    networks:
+      - isli
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
+      interval: 10s
+      timeout: 5s
       retries: 5
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          memory: 128M
 
   ollama:
     image: ollama/ollama:latest
@@ -55,6 +47,8 @@ services:
       - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
+    networks:
+      - isli
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:11434/api/tags || exit 1"]
       interval: 30s
@@ -62,50 +56,17 @@ services:
       retries: 3
       start_period: 60s
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '4.0'
-          memory: 8G
-        reservations:
-          memory: 2G
-    # Uncomment for GPU support:
-    # runtime: nvidia
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
 
-  # Init container: pre-pull Ollama models before services start
-  ollama-init:
-    image: ollama/ollama:latest
+  core:
+    image: ${CORE_API_IMAGE:-ghcr.io/medelmouhajir/isli-core:latest}
     environment:
-      OLLAMA_HOST: http://ollama:11434
-    entrypoint: >
-      sh -c "
-        echo 'Waiting for Ollama...';
-        sleep 5;
-        for model in qwen3:1.7b nomic-embed-text; do
-          echo \"Pulling $$model...\";
-          ollama pull $$model || true;
-        done;
-        echo 'Model pull complete.'
-      "
-    depends_on:
-      ollama:
-        condition: service_healthy
-    restart: "no"
-
-  isli-core:
-    build:
-      context: ./isli-core
-      dockerfile: Dockerfile
-    env_file: .env.docker
-    environment:
-      - OTEL_SERVICE_NAME=isli-core
+      ISLI_ENV: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?error}
+      PII_ENCRYPTION_KEY: ${PII_ENCRYPTION_KEY:?error}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     ports:
       - "8000:8000"
     depends_on:
@@ -113,95 +74,97 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+    networks:
+      - isli
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 1G
-        reservations:
-          memory: 256M
 
-  isli-keeper:
-    build:
-      context: ./isli-keeper
-      dockerfile: Dockerfile
-    env_file: .env.docker
+  keeper:
+    image: ${KEEPER_IMAGE:-ghcr.io/medelmouhajir/isli-keeper:latest}
     environment:
-      - OTEL_SERVICE_NAME=isli-keeper
+      ISLI_ENV: production
+      OLLAMA_HOST: http://ollama:11434
+      REDIS_URL: redis://redis:6379/1
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     ports:
       - "8001:8001"
     depends_on:
       ollama:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
-      ollama-init:
-        condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+    networks:
+      - isli
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
-        reservations:
-          memory: 512M
 
-  isli-board:
-    build:
-      context: ./isli-board
-      dockerfile: Dockerfile
+  channels:
+    image: ${CHANNELS_IMAGE:-ghcr.io/medelmouhajir/isli-channels:latest}
+    environment:
+      ISLI_ENV: production
+      REDIS_URL: redis://redis:6379/2
+      CORE_API_URL: http://core:8000
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     ports:
-      - "5173:5173"
+      - "8002:8002"
     depends_on:
-      isli-core:
+      redis:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:5173 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
+      core:
+        condition: service_started
+    networks:
+      - isli
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          memory: 128M
 
-  # Jaeger for OpenTelemetry tracing (Phase 0 observability)
+  skills:
+    image: ${SKILLS_IMAGE:-ghcr.io/medelmouhajir/isli-skills:latest}
+    environment:
+      ISLI_ENV: production
+      REDIS_URL: redis://redis:6379/3
+      CORE_API_URL: http://core:8000
+      SKILL_REGISTRY_TOKEN: ${SKILL_REGISTRY_TOKEN}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    ports:
+      - "8003:8003"
+    depends_on:
+      redis:
+        condition: service_healthy
+      core:
+        condition: service_started
+    networks:
+      - isli
+    restart: unless-stopped
+
+  board:
+    image: ${BOARD_IMAGE:-ghcr.io/medelmouhajir/isli-board:latest}
+    ports:
+      - "80:80"
+    depends_on:
+      - core
+    networks:
+      - isli
+    restart: unless-stopped
+
   jaeger:
     image: jaegertracing/all-in-one:1.60
     environment:
-      - COLLECTOR_OTLP_ENABLED=true
+      COLLECTOR_OTLP_ENABLED: "true"
     ports:
       - "16686:16686"
       - "4317:4317"
       - "4318:4318"
+    networks:
+      - isli
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
 
 volumes:
   postgres_data:
   redis_data:
   ollama_data:
+
+networks:
+  isli:
+    driver: bridge

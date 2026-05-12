@@ -5,8 +5,10 @@ terraform {
       version = "~> 5.0"
     }
   }
-  backend "local" {
-    path = "terraform.tfstate"
+  backend "s3" {
+    bucket = "isli-terraform-state"
+    key    = "isli/terraform.tfstate"
+    region = "eu-west-1"
   }
 }
 
