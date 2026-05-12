@@ -2,56 +2,81 @@
 
 ## Scenario
 
-A bad release has caused degraded service. You need to revert ECS task definitions to the previous stable image.
+A bad release has caused degraded service. You need to revert to the previous stable Docker image.
 
-## Quick Rollback (ECS)
+## Docker Compose Rollback
 
-### 1. Identify Previous Task Definition
+### 1. Identify the Previous Image Tag
+
+If you use explicit SHA tags:
 
 ```bash
-aws ecs describe-task-definition \
-  --task-definition isli-core-api \
-  --query 'taskDefinition.previousRevision'
+docker images ghcr.io/medelmouhajir/isli-core
+# Find the previous stable SHA tag
 ```
 
-### 2. Update Service to Previous Revision
+If you use `latest` and need to pull an older version:
 
 ```bash
-aws ecs update-service \
-  --cluster isli-cluster \
-  --service isli-core-api \
-  --task-definition isli-core-api:<PREVIOUS_REVISION>
+# Pull the previous known-good image explicitly
+docker pull ghcr.io/medelmouhajir/isli-core:<previous-sha>
 ```
 
-Repeat for each affected service (`isli-keeper`, `isli-channels`, `isli-skills`, `isli-board`).
+### 2. Update docker-compose.yml
 
-### 3. Wait for Stabilization
+Edit `docker-compose.yml` and pin the image for the affected service(s):
 
-```bash
-aws ecs wait services-stable \
-  --cluster isli-cluster \
-  --services isli-core-api isli-keeper isli-channels isli-skills isli-board
+```yaml
+services:
+  core:
+    image: ghcr.io/medelmouhajir/isli-core:<previous-sha>
 ```
 
-## Terraform Rollback
-
-If the Terraform apply introduced breaking infrastructure changes:
+Or use an environment variable override in `.env`:
 
 ```bash
-cd infra/terraform
-terraform plan -var-file="terraform.tfvars" -out=tfplan
-tfenv use 1.8.0  # ensure correct version
-terraform apply tfplan
+CORE_API_IMAGE=ghcr.io/medelmouhajir/isli-core:<previous-sha>
+```
+
+### 3. Restart the Service
+
+```bash
+docker compose up -d core
+```
+
+Or restart all services:
+
+```bash
+docker compose up -d
+```
+
+### 4. Verify
+
+```bash
+curl -sf http://localhost:8000/health
+curl -sf http://localhost:8000/ready
+```
+
+## Full Stack Revert
+
+If the entire release is bad, revert the Compose file and re-deploy:
+
+```bash
+git checkout HEAD~1 -- docker-compose.yml
+docker compose up -d
+```
+
+## Native Deployment Rollback
+
+For native (non-Docker) deployments:
+
+```bash
+cd /opt/isli
+git checkout <previous-tag>
+./scripts/install-native.sh
+systemctl restart isli-core isli-keeper isli-channels isli-skills isli-board
 ```
 
 ## Post-Rollback Verification
 
 Run the same smoke tests from [deploy.md](deploy.md).
-
-## Root Cause
-
-After service is stable, investigate the failure via:
-
-- CloudWatch Logs (`/ecs/isli-*`)
-- OpenTelemetry traces (Jaeger/Tempo)
-- ECS service events (`aws ecs describe-services`)

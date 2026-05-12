@@ -2,64 +2,58 @@
 
 ## Prerequisites
 
-- AWS CLI configured with appropriate credentials
-- Terraform >= 1.8.0 installed
-- Access to the `isli-terraform-state` S3 bucket
-- Docker images pushed to GHCR (`ghcr.io/isli-ai/*`)
+- Docker Engine >= 24.0 and Docker Compose plugin installed
+- At least 4 CPU cores and 8 GB RAM (16 GB recommended)
+- Linux or Windows host with Docker Desktop (Windows) or Docker Engine (Linux)
+- Internet access to pull images from GHCR, or an offline release tarball
 
-## Steps
-
-### 1. Validate Terraform
+## Quick Start (Online — GHCR)
 
 ```bash
-cd infra/terraform
-terraform init
-terraform validate
-terraform plan
+# 1. Clone or download the release
+git clone https://github.com/medelmouhajir/ISLI.git
+cd ISLI
+
+# 2. Create .env from template and fill in secrets
+cp .env.production .env
+nano .env   # or vim / notepad
+
+# 3. Start all services
+docker compose up -d
+
+# 4. Verify
+curl http://localhost:8000/health
+curl http://localhost:8001/health
+curl http://localhost:8002/health
+curl http://localhost:8003/health
 ```
 
-### 2. Set Required Variables
+## Offline Deployment (Air-Gapped PC)
 
-Create or update `terraform.tfvars`:
+If the target machine has no internet access:
 
-```hcl
-aws_region         = "eu-west-1"
-db_password        = "YOUR_STRONG_PASSWORD"
-core_api_image     = "ghcr.io/isli-ai/isli-core:SHA"
-keeper_image       = "ghcr.io/isli-ai/isli-keeper:SHA"
-channels_image     = "ghcr.io/isli-ai/isli-channels:SHA"
-skills_image       = "ghcr.io/isli-ai/isli-skills:SHA"
-board_image        = "ghcr.io/isli-ai/isli-board:SHA"
-```
-
-### 3. Apply Infrastructure
+1. Download `isli-release-<sha>.tar.gz` from GitHub Releases on a machine with internet.
+2. Copy the tarball to the target machine via USB.
+3. Extract and run the included installer:
 
 ```bash
-terraform apply -var-file="terraform.tfvars"
+tar -xzf isli-release-<sha>.tar.gz
+cd isli-release-<sha>
+./install.sh
 ```
 
-### 4. Verify Deployment
+The installer will:
+- Load Docker images from the bundled `images/*.tar.gz` files
+- Create `.env` from the template
+- Start `docker compose up -d`
+- Wait for health checks
 
-Wait for ECS services to stabilize:
+## Native Deployment (No Docker)
 
-```bash
-aws ecs wait services-stable \
-  --cluster isli-cluster \
-  --services $(aws ecs list-services --cluster isli-cluster --query 'serviceArns[*]' --output text)
-```
+See [native-deploy.md](native-deploy.md) for running all services directly on the host OS without containers.
 
-### 5. Smoke Tests
+## Post-Deployment
 
-```bash
-ALB_DNS=$(terraform output -raw alb_dns_name)
-curl -sf http://${ALB_DNS}/health
-curl -sf http://${ALB_DNS}/ready
-curl -sf http://${ALB_DNS}/api/health
-curl -sf http://${ALB_DNS}/keeper/health
-curl -sf http://${ALB_DNS}/channels/health
-curl -sf http://${ALB_DNS}/skills/health
-```
-
-## Rollback
-
-See [rollback.md](rollback.md).
+- Board UI: http://localhost (or http://server-ip)
+- Core API docs: http://localhost:8000/docs
+- Jaeger traces: http://localhost:16686

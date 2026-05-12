@@ -1,0 +1,19 @@
+[Unit]
+Description=ISLI Board
+After=network.target isli-core.service
+
+[Service]
+Type=simple
+User=isli
+Group=isli
+WorkingDirectory=/opt/isli/isli-board
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/isli/.env
+ExecStart=/usr/bin/node serve dist
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
