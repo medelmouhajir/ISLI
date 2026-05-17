@@ -13,7 +13,7 @@ from .db import init_db, close_db, engine
 from .redis_client import get_redis
 from .startup_validation import validate_startup_secrets
 from .telemetry import instrument_fastapi, get_trace_id
-from .routers import agents, tasks, skills, channels, system, transparency, security
+from .routers import agents, tasks, skills, channels, system, transparency, security, ws, memory
 
 SERVICE_NAME = "isli-core"
 
@@ -75,15 +75,27 @@ async def lifespan(app: FastAPI):
     # Start background workers
     from isli_core.jobs.session_cron import SessionCronJob
     from isli_core.jobs.checkpoint_recovery import CheckpointRecoveryWorker
+    from isli_core.jobs.context_injector import ContextInjectorWorker
+    from isli_core.jobs.journal_worker import JournalWorker
+    from isli_core.routers.ws import redis_listener
+    from isli_core.jobs.heartbeat_validator import heartbeat_validator_worker
 
     cron_task = asyncio.create_task(SessionCronJob.loop())
     recovery_task = asyncio.create_task(_recovery_loop())
+    context_task = asyncio.create_task(ContextInjectorWorker.loop())
+    journal_task = asyncio.create_task(JournalWorker.loop())
+    ws_task = asyncio.create_task(redis_listener())
+    heartbeat_task = asyncio.create_task(heartbeat_validator_worker())
 
     yield
 
     logger.info("core.shutdown.drain", service=SERVICE_NAME)
     cron_task.cancel()
     recovery_task.cancel()
+    context_task.cancel()
+    journal_task.cancel()
+    ws_task.cancel()
+    heartbeat_task.cancel()
     try:
         await cron_task
     except asyncio.CancelledError:
@@ -125,10 +137,12 @@ v1 = APIRouter(prefix="/v1")
 v1.include_router(agents.router)
 v1.include_router(tasks.router)
 v1.include_router(skills.router)
+v1.include_router(memory.router)
 v1.include_router(channels.router)
 v1.include_router(system.router)
 v1.include_router(transparency.router)
 v1.include_router(security.router)
+v1.include_router(ws.router)
 
 
 @v1.get("/metrics")

@@ -1,6 +1,8 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
+import useWebSocket from 'react-use-websocket'
 
 const API_BASE = '/api'
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws/board`
 
 interface Agent {
   id: string
@@ -36,7 +38,7 @@ interface CostDashboard {
   agent_costs: { agent_id: string; cost_usd: number; tokens: number }[]
 }
 
-const COLUMNS = ['inbox', 'doing', 'review', 'done', 'failed']
+const COLUMNS = ['pending_context', 'inbox', 'doing', 'review', 'done', 'failed']
 
 function usePoll<T>(fetcher: () => Promise<T>, interval = 2000) {
   const [data, setData] = useState<T | null>(null)
@@ -149,16 +151,55 @@ function TaskCard({ task, onMove, agents }: { task: Task; onMove: (id: string, s
 }
 
 export default function App() {
-  const { data: agents, refresh: refreshAgents } = usePoll<Agent[]>(() => getJSON('/v1/agents'), 3000)
-  const { data: tasks, refresh: refreshTasks } = usePoll<Task[]>(() => getJSON('/v1/tasks'), 2000)
-  const { data: cost } = usePoll<CostDashboard>(() => getJSON('/v1/system/cost/dashboard'), 5000)
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [cost, setCost] = useState<CostDashboard | null>(null)
+
+  const fetchInitialData = useCallback(async () => {
+    const [a, t, c] = await Promise.all([
+      getJSON('/v1/agents'),
+      getJSON('/v1/tasks'),
+      getJSON('/v1/system/cost/dashboard')
+    ])
+    setAgents(a)
+    setTasks(t)
+    setCost(c)
+  }, [])
+
+  useEffect(() => {
+    fetchInitialData()
+  }, [fetchInitialData])
+
+  const { lastJsonMessage } = useWebSocket(WS_URL, {
+    shouldReconnect: () => true,
+    reconnectInterval: 3000,
+  })
+
+  useEffect(() => {
+    if (!lastJsonMessage) return
+    const { type, payload } = lastJsonMessage as any
+
+    switch (type) {
+      case 'task:created':
+        setTasks((prev) => [payload.task, ...prev])
+        break
+      case 'task:updated':
+      case 'task:moved':
+        setTasks((prev) => prev.map((t) => (t.id === payload.task_id ? { ...t, ...payload.task } : t)))
+        break
+      case 'agent:heartbeat':
+      case 'agent:online':
+        setAgents((prev) => prev.map((a) => (a.id === payload.agent_id ? { ...a, ...payload } : a)))
+        break
+    }
+  }, [lastJsonMessage])
 
   const [showTaskModal, setShowTaskModal] = useState(false)
   const [showAgentModal, setShowAgentModal] = useState(false)
 
   const moveTask = async (id: string, newStatus: string) => {
     await postJSON(`/v1/tasks/${id}/move?new_status=${newStatus}`, {})
-    refreshTasks()
+    // Task update will come back via WebSocket
   }
 
   const createTask = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -173,7 +214,7 @@ export default function App() {
       type: 'task',
     })
     setShowTaskModal(false)
-    refreshTasks()
+    // Task created will come back via WebSocket
   }
 
   const createAgent = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -188,17 +229,18 @@ export default function App() {
       token_budget: fd.get('token_budget') ? Number(fd.get('token_budget')) : null,
     })
     setShowAgentModal(false)
-    refreshAgents()
+    // Agent update will come back via WebSocket or polling fallback
+    fetchInitialData() // for agents specifically, simple refetch is fine on creation
   }
 
   const deleteTask = async (id: string) => {
     if (!confirm('Delete task?')) return
     await deleteJSON(`/v1/tasks/${id}`)
-    refreshTasks()
+    setTasks((prev) => prev.filter((t) => t.id !== id))
   }
 
-  const agentsList = agents || []
-  const tasksList = tasks || []
+  const agentsList = agents
+  const tasksList = tasks
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col">

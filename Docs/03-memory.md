@@ -37,33 +37,34 @@ ISLI's memory system is built on three lessons from existing systems:
 
 ## Tier 1 — Session Memory
 
-**Purpose**: Holds the active conversation context for a running session.
+**Purpose**: Holds the active conversation context and the pre-computed structured journal for a running session.
 
-**Storage**: Redis (in-memory, fast, TTL-controlled)
+**Storage**: Redis (for hot messages) + PostgreSQL `sessions` table (for journal and full buffer).
 
 **Structure**:
 ```json
 {
   "session_id": "sess_abc123",
   "agent_id": "agent_sales",
+  "journal": "[Context]\n...\n[Decisions]\n...\n[Last State]\n...",
+  "journal_updated_at": "2026-05-17T01:30:00Z",
   "messages": [
     { "role": "user", "content": "...", "ts": 1715300000 },
-    { "role": "agent", "content": "...", "ts": 1715300010 }
+    ...
   ],
-  "token_count": 1840,
-  "created_at": 1715299900,
-  "expires_at": 1715385900
+  "token_count": 1840
 }
 ```
 
 **Write discipline**:
-- Every user message appended immediately
-- Every agent response appended immediately
-- Keeper trims buffer when `token_count > compaction_threshold`
+- Every message appended immediately.
+- **JournalWorker** (background) triggers on `task:done` event.
+- Keeper updates the `journal` incrementally using the last 10 messages.
+- Buffer is truncated to the **last 10 messages** after a successful journal update.
 
 **Read discipline**:
-- Always read last N messages (configurable, default 20)
-- Keeper reads full buffer for compaction
+- `context/inject` reads the `journal` + the **last 3 messages**.
+- **JournalWorker** reads the **last 10 messages** for incremental compacting.
 
 ---
 
@@ -93,9 +94,10 @@ CREATE TABLE episodic_memories (
 - Importance score set by Keeper based on outcome (success, error, user feedback)
 
 **Read discipline**:
-- Semantic search via embedding similarity (top-K retrieval)
-- Filtered by `agent_id` to avoid cross-agent pollution
-- Used in Keeper's `context/inject` pre-turn call
+- Semantic search via `pgvector` cosine similarity (`<=>`) in Keeper.
+- Triggered when `task_description` is provided to `context/inject`.
+- Filtered by `agent_id` to avoid cross-agent pollution.
+- Falls back to `ORDER BY created_at` if search fails or no query vector exists.
 
 ---
 
@@ -179,18 +181,19 @@ CREATE TABLE message_archive (
 Task arrives at Agent X
       │
       ▼
-Keeper.context/inject(agent_id, session_id, task_description)
+Keeper.context/inject(agent_id, session_id)
       │
-      ├─ Fetch last 20 messages from Session Memory (Tier 1)
+      ├─ Fast-fetch Journal from Session (Tier 1)
+      ├─ Fast-fetch last 3 messages from Session (Tier 1)
       ├─ Vector search Episodic Memory (Tier 2) → top 5 relevant
       ├─ Vector search Semantic Memory (Tier 3) → top 3 relevant
       │
       ▼
-Keeper summarizes into injection block (≤ 500 tokens)
+Keeper assembles Fast-Path Block (Zero LLM Latency)
       │
       ▼
-Agent prepends injection to system prompt
-Agent calls its model API with: [injection] + [agent persona] + [task]
+Agent prepends block to system prompt
+Agent calls its model API with: [block] + [agent persona] + [task]
 ```
 
 ---
@@ -243,4 +246,4 @@ The following gaps were identified during a parallel 12-agent research review:
 - **Hardcoded vector dimension without guard** — `VECTOR(768)` is fixed with no runtime model-size check.
 - **Archival tables lack performance indexes** — no composite indexes on `(agent_id, created_at)`.
 
-> See `Memory/ISLI-Research-Report.md` for full details and recommendations.
+> See `Memory/ISLI-Research-Report.md` for full details and recommendations.etails and recommendations.

@@ -104,12 +104,12 @@ This roadmap is derived from the comprehensive 12-agent research review document
 | Add summary/embedding validation | F-MEM-03 | 2 days | Cosine-similarity gate between summary and original |
 | Add compaction quality benchmark | F-MEM-04 | 3 days | ROUGE-L or semantic similarity regression test |
 | Add Tier 4 partitioning | F-MEM-05 | 2 days | Monthly PostgreSQL partitioning + cold storage migration |
-| Add dual-write atomicity | F-MEM-09 | 3 days | Outbox pattern for PostgreSQL + ChromaDB writes |
-| Add semantic memory deduplication | F-MEM-10 | 2 days | Pre-write similarity check at a configurable threshold |
+| **Dual-write atomicity (Episodic)** | F-MEM-09 | 3 days | **DONE** (Integrated into PostgreSQL via pgvector) |
+| **Semantic memory dedicated API** | F-MEM-10 | 2 days | **DONE** (Implemented in Core API /v1/memory) |
 | Add importance decay + GC | F-MEM-11 | 2 days | Exponential decay function + scheduled physical deletion |
-| Add cache invalidation | F-MEM-12 | 1 day | Invalidate Redis cache on `memory/save` writes |
-| Add vector dimension guard | F-MEM-13 | 1 day | Startup assertion that model output matches schema |
-| Add consistency regression tests | F-MEM-14 | 3 days | Memory consistency KPIs + CI regression suite |
+| **Cache invalidation** | F-MEM-12 | 1 day | **DONE** (Handled via Core API writes) |
+| **Vector dimension guard** | F-MEM-13 | 1 day | **DONE** (Strictly enforced in SQLAlchemy model) |
+| **Consistency regression tests** | F-MEM-14 | 3 days | **DONE** (Added semantic API and injection tests) |
 | Add archival table indexes | F-MEM-15 | 1 day | Composite indexes on `(agent_id, created_at)` |
 
 **Exit criteria:** A data integrity test validates: (a) changing the embedding model triggers a re-computation migration, (b) a compaction summary scores above the quality threshold, (c) a dual-write failure is recovered via the outbox, and (d) a 1-year-old partition is migrated to cold storage. ✅

@@ -12,10 +12,13 @@ from isli_core.locking import increment_task_version
 from isli_core.audit_writer import AuditWriter
 from isli_core.security.content_scanner import ContentScanner
 from isli_core.security.policy_engine import PolicyEngine
+from isli_core.memory.keeper_client import KeeperClient
+from isli_core.event_manager import EventManager
+from isli_core.checkpoint import CheckpointManager
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
-VALID_STATUSES = {"inbox", "doing", "review", "done", "failed", "blocked"}
+VALID_STATUSES = {"pending_context", "inbox", "doing", "review", "done", "failed", "blocked"}
 
 
 class TaskCreate(BaseModel):
@@ -27,6 +30,8 @@ class TaskCreate(BaseModel):
     created_by: str
     input: str = ""
     channel: str | None = None
+    session_id: str | None = None
+    payload: dict[str, Any] | None = None
     parent_task_id: str | None = None
     tags: list[str] = Field(default_factory=list)
     idempotency_key: str | None = None
@@ -40,9 +45,12 @@ class TaskUpdate(BaseModel):
     agent_id: str | None = None
     input: str | None = None
     output: str | None = None
+    session_id: str | None = None
+    payload: dict[str, Any] | None = None
     blocked_reason: str | None = None
     tags: list[str] | None = None
     token_usage: dict[str, Any] | None = None
+    saga_log: list[dict[str, Any]] | None = None
 
 
 class TaskOut(BaseModel):
@@ -60,11 +68,15 @@ class TaskOut(BaseModel):
     completed_at: datetime | None
     input: str
     output: str | None
+    context_summary: str | None
+    payload: dict[str, Any] | None
+    session_id: str | None
     channel: str | None
     parent_task_id: str | None
     child_task_ids: list[str]
     depth: int
     blocked_reason: str | None
+    saga_log: list[dict[str, Any]]
     token_usage: dict[str, Any] | None
     tags: list[str]
     version: int
@@ -144,16 +156,20 @@ async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
         title=payload.title,
         description=payload.description,
         type=payload.type,
+        status="pending_context" if payload.agent_id else "inbox",
         priority=payload.priority,
         agent_id=payload.agent_id,
         created_by=payload.created_by,
         input=payload.input,
         channel=payload.channel,
+        session_id=payload.session_id,
+        payload=payload.payload,
         parent_task_id=payload.parent_task_id,
         depth=depth,
         tags=payload.tags,
         idempotency_key=payload.idempotency_key,
     )
+    
     db.add(task)
     await db.commit()
     await db.refresh(task)
@@ -170,6 +186,9 @@ async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
         payload={"title": task.title, "agent_id": task.agent_id},
     )
     await db.commit()
+    
+    await EventManager.emit("task:created", {"task": TaskOut.model_validate(task).model_dump(mode="json")})
+    
     return task
 
 
@@ -192,6 +211,7 @@ async def update_task(task_id: str, payload: TaskUpdate, db: AsyncSession = Depe
     await increment_task_version(db, task_id, task.version)
 
     changes = payload.model_dump(exclude_unset=True)
+    
     for field, value in changes.items():
         setattr(task, field, value)
     task.updated_at = datetime.now(timezone.utc)
@@ -204,6 +224,13 @@ async def update_task(task_id: str, payload: TaskUpdate, db: AsyncSession = Depe
         payload=changes,
     )
     await db.commit()
+    
+    await EventManager.emit("task:updated", {
+        "task_id": task_id,
+        "changes": changes,
+        "task": TaskOut.model_validate(task).model_dump(mode="json")
+    })
+    
     return task
 
 
@@ -231,7 +258,67 @@ async def move_task(task_id: str, new_status: str, db: AsyncSession = Depends(ge
         payload={"new_status": new_status},
     )
     await db.commit()
+    
+    await EventManager.emit("task:moved", {
+        "task_id": task_id,
+        "from": task.status,
+        "to": new_status,
+        "task": TaskOut.model_validate(task).model_dump(mode="json")
+    })
+    
     return task
+
+
+@router.post("/{task_id}/saga", response_model=dict)
+async def append_saga_entry(
+    task_id: str,
+    entry: dict[str, Any],
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    # Append to saga log (SQLAlchemy JSON mutation detection helper)
+    current_log = list(task.saga_log or [])
+    current_log.append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **entry
+    })
+    task.saga_log = current_log
+    task.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    
+    return {"status": "ok", "log_size": len(current_log)}
+
+
+@router.post("/{task_id}/checkpoint", response_model=dict)
+async def save_checkpoint(
+    task_id: str,
+    turn_number: int,
+    messages: list[dict[str, Any]],
+    tool_calls: list[dict[str, Any]] | None = None,
+    db: AsyncSession = Depends(get_db)
+):
+    cp = await CheckpointManager.save(db, task_id, turn_number, messages, tool_calls)
+    await db.commit()
+    return {"status": "ok", "checkpoint_id": cp.id}
+
+
+@router.get("/{task_id}/checkpoint/latest", response_model=dict | None)
+async def get_latest_checkpoint(task_id: str, db: AsyncSession = Depends(get_db)):
+    cp = await CheckpointManager.load_latest(db, task_id)
+    if not cp:
+        return None
+    return {
+        "id": cp.id,
+        "task_id": cp.task_id,
+        "turn_number": cp.turn_number,
+        "messages": cp.messages,
+        "tool_calls": cp.tool_calls,
+        "created_at": cp.created_at.isoformat() if cp.created_at else None
+    }
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -20,12 +20,21 @@ class SessionLifecycleManager:
 
     @staticmethod
     async def expire_sessions(session: AsyncSession, cutoff: datetime | None = None) -> int:
-        """Soft-delete sessions whose expires_at has passed."""
+        """Soft-delete sessions whose expires_at has passed, unless they have active tasks."""
         now = cutoff or datetime.now(timezone.utc)
+        from sqlalchemy import exists
+        
+        active_task_exists = exists().where(
+            Task.session_id == Session.id,
+            Task.status.in_(["doing", "review"]),
+            Task.deleted_at.is_(None)
+        )
+        
         result = await session.execute(
             select(Session).where(
                 Session.expires_at < now,
                 Session.deleted_at.is_(None),
+                ~active_task_exists
             )
         )
         expired = list(result.scalars().all())
@@ -73,12 +82,21 @@ class SessionLifecycleManager:
         session: AsyncSession,
         idle_timeout_minutes: int = DEFAULT_IDLE_TIMEOUT_MINUTES,
     ) -> int:
-        """Soft-delete sessions idle longer than the threshold."""
+        """Soft-delete sessions idle longer than the threshold, unless they have active tasks."""
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=idle_timeout_minutes)
+        from sqlalchemy import exists
+        
+        active_task_exists = exists().where(
+            Task.session_id == Session.id,
+            Task.status.in_(["doing", "review"]),
+            Task.deleted_at.is_(None)
+        )
+        
         result = await session.execute(
             select(Session).where(
                 Session.last_activity_at < cutoff,
                 Session.deleted_at.is_(None),
+                ~active_task_exists
             )
         )
         idle = list(result.scalars().all())

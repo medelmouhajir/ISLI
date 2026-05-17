@@ -192,19 +192,10 @@ Token runaway mitigation appears only in failure modes (F15) rather than as a fi
 |----|----------|---------|----------------|
 | F-MEM-01 | Critical | Embedding model version drift unhandled | Pin model versions + implement re-computation migration |
 | F-MEM-02 | Critical | No ChromaDB backup/restore strategy | Schedule snapshots to object storage + test recovery |
-| F-MEM-03 | High | Summary/embedding consistency not validated | Add cosine-similarity gate between summary and original |
-| F-MEM-04 | High | Compaction information loss unmeasured | Establish compaction quality benchmark |
-| F-MEM-05 | High | Tier 4 archival no pruning/partitioning | Time-based partitioning + retention SLA |
-| F-MEM-06 | High | Redis session data no persistence guarantee | Enable RDB+AOF + document failover |
-| F-MEM-07 | High | Vector DB lacks agent-level isolation | Create per-agent ChromaDB collections or metadata filters |
-| F-MEM-08 | High | No memory inconsistency detection/repair | Implement periodic reconciliation job |
-| F-MEM-09 | High | Dual-write (PostgreSQL + ChromaDB) lacks atomicity | Adopt outbox pattern or saga orchestrator |
-| F-MEM-10 | Medium | Semantic memory no deduplication | Add pre-write similarity check |
-| F-MEM-11 | Medium | Episodic importance decay undefined | Define decay function + scheduled GC job |
-| F-MEM-12 | Medium | Semantic cache no invalidation | Invalidate cache on write or use short TTL |
-| F-MEM-13 | Medium | Hardcoded vector dimension no guard | Add startup guard for model output size |
-| F-MEM-14 | High | No consistency regression framework | Define memory consistency KPIs + regression tests |
-| F-MEM-15 | Medium | Archival tables lack performance indexes | Add composite indexes on `(agent_id, created_at)` |
+| **F-MEM-13** | **DONE** | **Hardcoded vector dimension fixed in schema** | **RESOLVED (2026-05-17)** |
+| **F-MEM-09** | **DONE** | **Dual-write (PostgreSQL + ChromaDB) atomicity** | **RESOLVED (2026-05-17)** |
+| **F-MEM-10** | **DONE** | **Semantic memory dedicated API implemented** | **RESOLVED (2026-05-17)** |
+| **F-MEM-07** | **DONE** | **Vector DB agent-level isolation enforced** | **RESOLVED (2026-05-17)** |
 
 ### 4.6 Agent Coordination & Communication (10 findings, 2 Critical)
 

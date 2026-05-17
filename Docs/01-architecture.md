@@ -88,10 +88,11 @@ Core API
          │
          ▼
 Keeper (pre-turn)
-  → pulls last N messages from session memory
+  → fetches pre-computed **Structured Session Journal** from Tier 1 memory
+  → fetches last 3 raw messages for immediate context
   → fetches relevant episodic/semantic memories via vector search
-  → summarizes context into a compact injection block
-  → returns: { context_injection, token_budget }
+  → assembles the **Fast-Path Context Block** (no LLM latency)
+  → returns: { context_injection, relevant_memories }
          │
          ▼
 Agent (e.g., Agent B)
@@ -103,7 +104,10 @@ Agent (e.g., Agent B)
          ▼
 Core API
   → task status → Done
-  → Keeper stores result summary in episodic memory
+  → **JournalWorker** (background) triggers on task completion:
+    → calls Keeper to update structured journal incrementally
+    → truncates session messages to last 10 turns
+  → Keeper stores result summary in episodic memory (Tier 2)
   → Kanban card updated (real-time)
          │
          ▼

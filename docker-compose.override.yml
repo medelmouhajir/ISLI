@@ -43,6 +43,18 @@ services:
     volumes:
       - ./isli-skills/src:/app/src:ro
 
+  workspace:
+    build:
+      context: ./isli-workspace
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+      WORKSPACE_BASE_PATH: ./workspaces
+      REDIS_URL: redis://redis:6379/4
+    volumes:
+      - ./isli-workspace/src:/app/src:ro
+      - ./workspaces:/workspaces
+
   board:
     build:
       context: ./isli-board

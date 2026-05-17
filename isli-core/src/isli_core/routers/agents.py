@@ -6,11 +6,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import os
+from pathlib import Path
+
 from isli_core.db import get_db
 from isli_core.models import Agent, Session
 from isli_core.budget import check_budget
-from isli_core.auth import create_internal_token
+from isli_core.auth import create_internal_token, require_admin_auth, require_internal_auth
 from isli_core.audit_writer import AuditWriter
+from isli_core.config import get_settings
+from isli_core.event_manager import EventManager
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -69,6 +74,10 @@ class AgentOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AgentRegistrationOut(AgentOut):
+    token: str
+
+
 @router.get("", response_model=list[AgentOut])
 async def list_agents(status: str | None = None, db: AsyncSession = Depends(get_db)):
     stmt = select(Agent).where(Agent.deleted_at.is_(None))
@@ -78,8 +87,12 @@ async def list_agents(status: str | None = None, db: AsyncSession = Depends(get_
     return result.scalars().all()
 
 
-@router.post("", response_model=AgentOut, status_code=status.HTTP_201_CREATED)
-async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db)):
+@router.post("", response_model=AgentRegistrationOut, status_code=status.HTTP_201_CREATED)
+async def create_agent(
+    payload: AgentCreate, 
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     agent_id = payload.id or f"agent-{payload.name.lower().replace(' ', '-')}"
     existing = await db.execute(select(Agent).where(Agent.id == agent_id))
     if existing.scalar_one_or_none():
@@ -103,13 +116,22 @@ async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db))
     db.add(agent)
     await db.commit()
     await db.refresh(agent)
+
+    token = create_internal_token(agent.id, scopes=["agent"], expires_minutes=525600)
+
+    settings = get_settings()
+    ws_path = Path(settings.workspace_base_path) / agent.id
+    ws_path.mkdir(parents=True, exist_ok=True)
     await AuditWriter.write(
         db, actor_type="system", actor_id="core-api", action="create_agent",
         target_type="agent", target_id=agent.id,
-        payload={"name": agent.name, "model_id": agent.model_id},
+        payload={"name": agent.name, "model_id": agent.model_id, "workspace_path": str(ws_path)},
     )
     await db.commit()
-    return agent
+    
+    out = AgentRegistrationOut.model_validate(agent)
+    out.token = token
+    return out
 
 
 @router.get("/{agent_id}", response_model=AgentOut)
@@ -152,6 +174,20 @@ async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
     agent.deleted_at = datetime.now(timezone.utc)
     agent.status = "deleted"
     await db.commit()
+
+    settings = get_settings()
+    ws_path = Path(settings.workspace_base_path) / agent_id
+    if ws_path.exists():
+        archive_name = f"{agent_id}.deleted.{agent.deleted_at.strftime('%Y%m%d%H%M%S')}"
+        archive_path = Path(settings.workspace_base_path) / archive_name
+        ws_path.rename(archive_path)
+        await AuditWriter.write(
+            db, actor_type="system", actor_id="core-api", action="archive_workspace",
+            target_type="agent", target_id=agent_id,
+            payload={"archive_path": str(archive_path)},
+        )
+        await db.commit()
+
     await AuditWriter.write(
         db, actor_type="system", actor_id="core-api", action="delete_agent",
         target_type="agent", target_id=agent_id,
@@ -161,15 +197,27 @@ async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{agent_id}/heartbeat", response_model=dict)
-async def agent_heartbeat(agent_id: str, db: AsyncSession = Depends(get_db)):
+async def agent_heartbeat(
+    agent_id: str, 
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_internal_auth)
+):
+    if auth["sub"] != agent_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this agent")
+
     import time
     start = time.perf_counter()
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    
+    old_status = agent.status
     agent.heartbeat_at = datetime.now(timezone.utc)
     agent.status = "online" if agent.status in ("registered", "offline", "paused") else agent.status
+
+    if old_status != agent.status and agent.status == "online":
+        await EventManager.emit("agent:online", {"agent_id": agent_id, "status": agent.status})
 
     # Update any active session's last_activity_at
     session_result = await db.execute(
@@ -192,4 +240,32 @@ async def agent_heartbeat(agent_id: str, db: AsyncSession = Depends(get_db)):
         payload={"latency_ms": round(latency_ms, 2)},
     )
     await db.commit()
+    
+    await EventManager.emit("agent:heartbeat", {
+        "agent_id": agent_id,
+        "status": agent.status,
+        "heartbeat_at": agent.heartbeat_at.isoformat() if agent.heartbeat_at else None
+    })
+    
     return {"status": "ok", "agent_id": agent_id, "token": token}
+
+
+@router.post("/{agent_id}/context", response_model=dict)
+async def get_agent_context(
+    agent_id: str, 
+    task_description: str | None = None, 
+    session_id: str | None = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """Proxy context injection from Keeper through Core API."""
+    from isli_core.memory.keeper_client import KeeperClient
+    result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Agent not found")
+        
+    context_summary = await KeeperClient.get_context_injection(
+        agent_id=agent_id,
+        task_description=task_description,
+        session_id=session_id
+    )
+    return {"context_summary": context_summary}

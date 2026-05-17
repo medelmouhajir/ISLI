@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "isli-agent-sdk"
+version = "0.1.0"
+description = "Opinionated ISLI Agent Framework SDK"
+authors = [
+    {name = "ISLI Team"}
+]
+dependencies = [
+    "httpx",
+    "websockets",
+    "pydantic",
+    "structlog",
+    "litellm",
+    "python-dotenv"
+]
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]

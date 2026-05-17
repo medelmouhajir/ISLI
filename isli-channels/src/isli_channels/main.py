@@ -14,10 +14,12 @@ from .rate_limit import RateLimiter
 from .offline_queue import OfflineMessageQueue
 from .webhook_validation import WebhookValidator
 from .identity import CrossChannelIdentity
+from .adapters.telegram import TelegramAdapter
 
 SERVICE_NAME = "isli-channels"
 
 logger = structlog.get_logger()
+adapters = {}
 
 
 try:
@@ -41,10 +43,21 @@ redis_client = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global redis_client
+    global redis_client, adapters
     logger.info("channels.startup", service=SERVICE_NAME)
     redis_client = _get_redis()
+    
+    # Initialize Adapters
+    tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    core_url = os.getenv("CORE_API_URL", "http://localhost:8000")
+    if tg_token:
+        tg_adapter = TelegramAdapter(tg_token, core_url)
+        await tg_adapter.start()
+        adapters["telegram"] = tg_adapter
+        
     yield
+    for adapter in adapters.values():
+        await adapter.stop()
     logger.info("channels.shutdown", service=SERVICE_NAME)
 
 
@@ -129,3 +142,29 @@ async def drain_offline_queue(payload: dict[str, Any]):
     size_before = await queue.size(channel)
     # Note: sender function would be injected in production
     return {"channel": channel, "size_before": size_before, "note": "drain requires a sender callback"}
+
+
+@app.post("/webhook/telegram/{agent_id}")
+async def telegram_webhook(agent_id: str, request: Request):
+    if "telegram" not in adapters:
+        raise HTTPException(status_code=501, detail="Telegram adapter not initialized")
+    
+    raw_update = await request.json()
+    return await adapters["telegram"].handle_webhook(raw_update, agent_id)
+
+
+class SendMessageRequest(BaseModel):
+    channel: str
+    channel_user_id: str
+    text: str
+    metadata: dict[str, Any] = {}
+
+
+@app.post("/send")
+async def send_message(req: SendMessageRequest):
+    adapter = adapters.get(req.channel)
+    if not adapter:
+        raise HTTPException(status_code=400, detail=f"No adapter for channel: {req.channel}")
+    
+    success = await adapter.send_message(req.channel_user_id, req.text)
+    return {"success": success}
