@@ -13,7 +13,24 @@
       "Bash(pytest tests/ -v)",
       "Bash(python -c \"from opentelemetry.sdk.metrics import MeterProvider; print\\('metrics ok'\\)\")",
       "Bash(docker build *)",
-      "Bash(python /x/Projects/ISLI_AI/scripts/chaos.py --base-url http://127.0.0.1:8000)"
+      "Bash(python /x/Projects/ISLI_AI/scripts/chaos.py --base-url http://127.0.0.1:8000)",
+      "WebFetch(domain:www.reddit.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:hermes-agent.ai)",
+      "WebFetch(domain:georgelarson.me)",
+      "WebFetch(domain:virtualuncle.com)",
+      "Bash(Get-ChildItem -Path \"X:\\\\Projects\\\\ISLI_AI\" -Directory -Depth 1)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(python -m pytest tests/test_api_budgets.py -v)",
+      "Bash(python -m pytest tests/test_api_sessions.py -v)",
+      "Bash(python *)",
+      "Bash(pytest *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(Get-ChildItem -Path \"X:\\\\Projects\\\\ISLI_AI\" -Depth 0)",
+      "Bash(Select-Object Name, Mode, LastWriteTime)"
     ]
   }
 }

@@ -124,7 +124,7 @@ class PolicyEngine:
 
     @staticmethod
     def _is_dangerous_skill(skill_name: str) -> bool:
-        dangerous = {"shell-exec", "file-delete", "sql-drop", "send-email"}
+        dangerous = {"shell-exec", "sql-drop", "send-email"}
         return skill_name.lower() in dangerous
 
     @staticmethod

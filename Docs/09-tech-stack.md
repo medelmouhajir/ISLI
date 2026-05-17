@@ -42,11 +42,11 @@ Channels            | python-telegram-bot, Twilio SDK, smtplib
 - **Reason**: Embedded mode (no server needed). Python-native. Excellent for local deployment. Supports cosine similarity + metadata filtering.
 - **Why not Weaviate/Qdrant?**: Overkill for a personal/small-team assistant. ChromaDB runs in the same process.
 - **Why not PostgreSQL pgvector only?**: pgvector is good for archival but ChromaDB gives better ANN performance for real-time retrieval.
-
+Primary Database    | PostgreSQL 16 (pgvector 0.4.x)
+...
 ### PostgreSQL 16 (Primary Database)
 - **Reason**: The proven choice for durable state in AI agent systems. JSON/JSONB support for flexible task payloads. `pgvector` extension for storing dense embeddings alongside relational data (episodic memory).
-- **Why not SQLite?**: ISLI may run multiple concurrent agents. PostgreSQL handles concurrent writes correctly.
-- **pgvector**: Used for episodic memory semantic search (Tier 2). Offloads from ChromaDB for long-term.
+- **pgvector**: Used for episodic memory semantic search (Tier 2). Implemented using cosine similarity (`<=>`) retrieval.
 
 ### Redis (Cache + Event Bus)
 - **Reason**: Session memory (Tier 1) needs sub-millisecond reads. Pub/Sub for real-time Kanban events. Stream for task queue.
@@ -225,3 +225,4 @@ The following production-grade infrastructure items are documented in this file 
 | Exact semver lockfiles | **Missing** | Critical | Wildcard minors (`fastapi==0.115.x`) allow breaking changes |
 
 > **Research finding:** The `docker-compose.yml` skeleton above uses `localhost` for inter-service URLs in `.env`, which will break container-to-container networking. In Docker mode, use Compose service names (`postgres`, `redis`, `isli-keeper`) instead of `localhost`. Provide separate `.env.dev` and `.env.prod` templates.
+li-keeper`) instead of `localhost`. Provide separate `.env.dev` and `.env.prod` templates.

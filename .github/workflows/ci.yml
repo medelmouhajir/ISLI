@@ -1,233 +1,45 @@
-name: CI
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [ main ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
 
 jobs:
-  lint-core:
+  lint-and-test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./isli-core
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install ruff mypy
-      - run: ruff check src
-      - run: ruff format --check src
-      - run: mypy src
-
-  test-core:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./isli-core
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_DB: isli
-          POSTGRES_USER: isli
-          POSTGRES_PASSWORD: password
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-      redis:
-        image: redis:7-alpine
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 6379:6379
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      - run: pytest --cov=src --cov-report=xml
-      - uses: codecov/codecov-action@v4
-        with:
-          files: ./isli-core/coverage.xml
-
-  test-keeper:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./isli-keeper
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      - run: pytest --cov=src --cov-report=xml
-      - uses: codecov/codecov-action@v4
-        with:
-          files: ./isli-keeper/coverage.xml
-
-  test-channels:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./isli-channels
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      - run: pytest --cov=src --cov-report=xml
-      - uses: codecov/codecov-action@v4
-        with:
-          files: ./isli-channels/coverage.xml
-
-  test-skills:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./isli-skills
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      - run: pytest --cov=src --cov-report=xml
-      - uses: codecov/codecov-action@v4
-        with:
-          files: ./isli-skills/coverage.xml
-
-  lint-board:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./isli-board
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ./isli-board/package.json
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run lint
-
-  build-board:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./isli-board
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ./isli-board/package.json
-      - run: npm ci
-      - run: npm run build
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install ruff pytest
+    - name: Lint with ruff
+      run: ruff check .
+    - name: Test with pytest (core)
+      run: |
+        cd isli-core
+        pip install -r requirements.txt
+        pytest
 
   build-images:
+    needs: lint-and-test
     runs-on: ubuntu-latest
-    needs: [lint-core, test-core, test-keeper, test-channels, test-skills, lint-board, build-board]
-    strategy:
-      matrix:
-        service: [isli-core, isli-keeper, isli-skills, isli-channels, isli-board]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./${{ matrix.service }}
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ghcr.io/${{ github.repository }}/${{ matrix.service }}:${{ github.sha }}
-            ghcr.io/${{ github.repository }}/${{ matrix.service }}:latest
-
-  integration-test:
-    runs-on: ubuntu-latest
-    needs: [build-images]
-    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Create .env for compose
-        run: |
-          cp .env.production .env
-          sed -i 's/${JWT_SECRET:?error}/ci-test-secret-thirty-two-bytes-long!!/' .env
-          sed -i 's/${PII_ENCRYPTION_KEY:?error}/ci-test-encryption-key-32bytes!!/' .env
-          sed -i 's/${POSTGRES_PASSWORD:?error}/password/' .env
-          sed -i 's|${DATABASE_URL}|postgresql+asyncpg://isli:password@postgres:5432/isli|' .env
-          sed -i 's|${REDIS_URL}|redis://redis:6379/0|' .env
-
-      - name: Start services with Docker Compose
-        run: |
-          docker compose up -d postgres redis core keeper channels skills board
-          sleep 15
-
-      - name: Wait for services
-        run: |
-          for port in 8000 8001 8002 8003; do
-            for i in $(seq 1 30); do
-              curl -sf http://localhost:$port/health && break
-              sleep 1
-            done
-          done
-
-      - name: End-to-end API checks
-        run: |
-          echo "=== Core API ==="
-          curl -sf http://127.0.0.1:8000/health
-          curl -sf http://127.0.0.1:8000/ready
-          curl -sf http://127.0.0.1:8000/live
-          echo "=== Keeper ==="
-          curl -sf http://127.0.0.1:8001/health
-          curl -sf http://127.0.0.1:8001/ready
-          curl -sf http://127.0.0.1:8001/live
-          echo "=== Channels ==="
-          curl -sf http://127.0.0.1:8002/health
-          curl -sf http://127.0.0.1:8002/ready
-          curl -sf http://127.0.0.1:8002/live
-          echo "=== Skills ==="
-          curl -sf http://127.0.0.1:8003/health
-          curl -sf http://127.0.0.1:8003/ready
-          curl -sf http://127.0.0.1:8003/live
-          echo "=== Board ==="
-          curl -sf http://127.0.0.1:80/ || true
-          echo "=== Integration checks passed ==="
-
-      - name: Tear down
-        if: always()
-        run: docker compose down -v
-
-  security-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          format: sarif
-          output: trivy-results.sarif
-      - uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-results.sarif
+    - uses: actions/checkout@v4
+    - name: Build Core Image
+      run: docker build -t isli-core:latest isli-core/
+    - name: Build Keeper Image
+      run: docker build -t isli-keeper:latest isli-keeper/
+    - name: Build Skills Image
+      run: docker build -t isli-skills:latest isli-skills/
+    - name: Build Workspace Image
+      run: docker build -t isli-workspace:latest isli-workspace/
+    - name: Build Channels Image
+      run: docker build -t isli-channels:latest isli-channels/

@@ -9,7 +9,7 @@ description = "ISLI Channel Gateway — Telegram, WhatsApp, Web, Email adapters"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi==0.115.12",
+    "fastapi==0.116.1",
     "uvicorn[standard]==0.34.2",
     "httpx==0.28.1",
     "structlog==25.1.0",

@@ -49,6 +49,10 @@ services:
       - "11434:11434"
     networks:
       - isli
+    deploy:
+      resources:
+        limits:
+          memory: 4G
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:11434/api/tags || exit 1"]
       interval: 30s
@@ -76,6 +80,15 @@ services:
         condition: service_healthy
     networks:
       - isli
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
 
   keeper:
@@ -83,6 +96,8 @@ services:
     environment:
       ISLI_ENV: production
       OLLAMA_HOST: http://ollama:11434
+      OLLAMA_GEN_MODEL: qwen2.5:7b
+      DATABASE_URL: postgresql://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
       REDIS_URL: redis://redis:6379/1
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -96,6 +111,15 @@ services:
         condition: service_healthy
     networks:
       - isli
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
 
   channels:
@@ -109,7 +133,7 @@ services:
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     ports:
-      - "8002:8002"
+      - "8002:8200"
     depends_on:
       redis:
         condition: service_healthy
@@ -117,6 +141,15 @@ services:
         condition: service_started
     networks:
       - isli
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
 
   skills:
@@ -125,10 +158,12 @@ services:
       ISLI_ENV: production
       REDIS_URL: redis://redis:6379/3
       CORE_API_URL: http://core:8000
+      KEEPER_URL: http://keeper:8001
+      WORKSPACE_URL: http://workspace:8300
       SKILL_REGISTRY_TOKEN: ${SKILL_REGISTRY_TOKEN}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     ports:
-      - "8003:8003"
+      - "8003:8100"
     depends_on:
       redis:
         condition: service_healthy
@@ -136,6 +171,41 @@ services:
         condition: service_started
     networks:
       - isli
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  workspace:
+    image: ${WORKSPACE_IMAGE:-ghcr.io/medelmouhajir/isli-workspace:latest}
+    environment:
+      ISLI_ENV: production
+      WORKSPACE_BASE_PATH: /workspaces
+      REDIS_URL: redis://redis:6379/4
+    volumes:
+      - workspace_data:/workspaces
+    ports:
+      - "8300:8300"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - isli
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8300/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
 
   board:
@@ -146,6 +216,10 @@ services:
       - core
     networks:
       - isli
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     restart: unless-stopped
 
   jaeger:
@@ -158,12 +232,17 @@ services:
       - "4318:4318"
     networks:
       - isli
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     restart: unless-stopped
 
 volumes:
   postgres_data:
   redis_data:
   ollama_data:
+  workspace_data:
 
 networks:
   isli:

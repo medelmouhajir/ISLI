@@ -20,6 +20,10 @@ SKILL_REGISTRY = {
     "summarize": os.getenv("SKILL_SUMMARIZE_URL", "http://localhost:8101"),
     "translate": os.getenv("SKILL_TRANSLATE_URL", "http://localhost:8102"),
     "shell-exec": os.getenv("SKILL_SHELL_EXEC_URL", "http://localhost:8103"),
+    "file-read": os.getenv("SKILL_FILE_READ_URL", "http://localhost:8300"),
+    "file-write": os.getenv("SKILL_FILE_WRITE_URL", "http://localhost:8300"),
+    "file-list": os.getenv("SKILL_FILE_LIST_URL", "http://localhost:8300"),
+    "file-delete": os.getenv("SKILL_FILE_DELETE_URL", "http://localhost:8300"),
 }
 
 
@@ -104,6 +108,18 @@ async def skill_proxy(
         raw, result = await GroundingVerifier.verify_with_retry(
             skill_name, _call_skill, max_retries=3
         )
+        
+        # Phase 2: Local Skill Cleaning (Signal Harvesting)
+        HEAVY_SKILLS = {"web-fetch", "shell-exec"}
+        if result.is_valid and skill_name in HEAVY_SKILLS:
+            logger.info("skills.harvesting.cleaning", skill=skill_name)
+            # Use the action or a generic goal for cleaning
+            cleaned = await KeeperClient.clean_skill_output(
+                str(raw), 
+                goal=f"Extract relevant data for action '{action}'"
+            )
+            return {"status": "ok", "skill": skill_name, "action": action, "result": cleaned}
+
     except httpx.HTTPStatusError as exc:
         from isli_core.telemetry import get_skill_invocation_error_counter
         get_skill_invocation_error_counter().add(1, {"skill": skill_name, "reason": "http_error"})

@@ -48,30 +48,53 @@ POST http://localhost:11434/api/embeddings
 }
 ```
 
-### 2. Context Summarization (Pre-turn Injection)
+### 2. Context Injection (Fast-Path)
 
-Before any agent executes a task, the Keeper is called to produce a **context injection block**. This is a compact summary the agent receives alongside the user message.
+Before any agent executes a task, the Keeper is called to produce a **context injection block**. Unlike standard RAG, ISLI uses a **pre-computed fast-path** to eliminate LLM latency during the injection phase.
 
 **Input to Keeper:**
-- Last N raw messages from session memory (sliding window)
+- Current **Structured Session Journal** (from Session Tier 1)
+- Last 3 raw messages (for immediate verbatim context)
 - Top-K relevant episodic memories (retrieved by vector similarity)
-- Agent's current task description
 
-**Output from Keeper:**
-```json
-{
-  "context_summary": "...",
-  "relevant_memories": ["...", "..."],
-  "token_estimate": 420,
-  "confidence": 0.87
-}
+**Output from Keeper (Immediate):**
+```text
+=== SESSION JOURNAL ===
+[Context]
+...
+[Decisions]
+...
+[Last State]
+...
+
+=== RECENT MESSAGES ===
+User: ...
+Agent: ...
+
+=== HISTORICAL MEMORIES ===
+- ...
 ```
 
-The agent then injects `context_summary` into its system prompt prefix.
+The agent then injects this block into its system prompt prefix. **This is a zero-LLM-call operation for the Keeper, ensuring agents start reasoning instantly.**
 
-**This means even agents using expensive models like GPT-4o or Claude Opus only consume tokens for actual reasoning, not for reconstructing context from scratch.**
+### 3. Journal Maintenance (Incremental Compacting)
 
-### 3. Agent Heartbeats
+Instead of generic summarization, the Keeper maintains an incremental **Structured Session Journal**. This happens in the background via the `JournalWorker` whenever a task is completed.
+
+**Input to Keeper (`/journal/update`):**
+- Old Journal content
+- Last 10 raw messages
+
+**Keeper Logic:**
+The Keeper uses its 7B model to extract new facts and update the structured sections:
+- **[Context]**: Environment, active versions, user preferences.
+- **[Decisions]**: Key decisions, agreed-upon constraints.
+- **[Last State]**: What was being done most recently.
+
+**Output from Keeper:**
+The updated structured journal string, which is then persisted to the `sessions` table in Tier 1 memory.
+
+### 4. Agent Heartbeats
 
 Each registered agent sends a heartbeat signal to the Core API every N seconds. Instead of a simple `200 OK` ping, ISLI uses **intelligent heartbeats**:
 
@@ -113,10 +136,10 @@ The Keeper exposes a minimal internal HTTP API on `localhost:8001`:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/embed` | POST | Embed text, return vector |
-| `/summarize` | POST | Summarize text to N tokens |
-| `/heartbeat/validate` | POST | Validate an agent heartbeat |
-| `/context/inject` | POST | Build context injection for agent pre-turn |
-| `/compact` | POST | Compact a session's message buffer |
+| `/journal/update` | POST | Update the structured session journal |
+| `/context/inject` | POST | Fast-path: Build context block (pre-computed) |
+| `/summarize` | POST | Summarize arbitrary text |
+| `/heartbeat` | POST | Validate an agent heartbeat |
 | `/health` | GET | Keeper health check |
 
 ---
@@ -129,27 +152,16 @@ keeper:
 
   models:
     embedding: nomic-embed-text
-    summarization: qwen3:1.7b
-    heartbeat: qwen3:0.6b
+    generation: qwen3:1.7b  # Used for /journal/update and /summarize
 
-  heartbeat:
-    interval_seconds: 30
-    stuck_threshold_seconds: 300
-    loop_detection_max_revisits: 3
+  journal:
+    trigger: task_completion
+    lookback_messages: 10     # messages used to update journal
+    injection_last_messages: 3 # messages injected into raw context
 
   context:
-    max_session_messages: 20     # raw messages to include
     top_k_episodic: 5            # episodic memories to retrieve
-    max_injection_tokens: 500    # cap on injection block size
-
-  compaction:
-    trigger_message_count: 40    # compact after N messages
-    summary_max_tokens: 200
-
-  vector_store:
-    provider: chromadb
-    path: ./data/vectors
-    collection_prefix: isli_
+    max_injection_tokens: 1000   # total context block cap
 ```
 
 ---

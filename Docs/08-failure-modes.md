@@ -49,10 +49,10 @@ The **MAST (Multi-Agent System Failure Taxonomy)** from UC Berkeley (NeurIPS 202
 **What it is**: In long sessions, the agent forgets what was decided hours ago because it was pushed out of the context window.
 
 **ISLI mitigation**:
-- Keeper runs **automatic compaction** when session buffer > threshold
-- Compaction summary is re-injected at session start (like CLAUDE.md re-injection after `/compact`)
-- 4-tier memory ensures critical decisions persist in Episodic memory (Tier 2), never lost to window compression
-- Keeper's `context_inject` always retrieves top-5 relevant episodic memories, even across days
+- **Structured Session Journal**: Keeper maintains a persistent, lightly structured state (`[Context]`, `[Decisions]`, `[Last State]`) that is updated after every task.
+- **Fast-Path Injection**: The journal is always injected into the agent's prompt, regardless of session length.
+- 4-tier memory ensures critical decisions persist in the Journal and Episodic memory (Tier 2), never lost to window compression.
+- Keeper's `context_inject` also retrieves top-5 relevant episodic memories to bridge gaps between sessions.
 
 ---
 
@@ -92,10 +92,10 @@ The **MAST (Multi-Agent System Failure Taxonomy)** from UC Berkeley (NeurIPS 202
 **What it is**: Agent loses all context mid-session — as if the conversation never happened.
 
 **ISLI mitigation**:
-- Session memory in Redis with TTL — never lost mid-session
-- Keeper compaction summary survives Redis flushes (written to PostgreSQL)
-- On agent restart, Keeper re-injects the last compaction summary
-- 4-tier memory ensures nothing critical is stored only in RAM
+- **Structured Session Journal** survives restarts: The pre-computed journal is stored in the PostgreSQL `sessions` table.
+- **Incremental Updates**: The journal is updated after every successful task completion.
+- On agent restart, the Keeper re-injects the last journal state and the most recent raw messages.
+- 4-tier memory ensures nothing critical is stored only in RAM.
 
 ---
 

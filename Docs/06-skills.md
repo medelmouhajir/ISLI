@@ -2,16 +2,16 @@
 
 ## Design Philosophy
 
-> **Skills are dumb. Agents are smart.**
+> **Skills are smart. Agents are smarter.**
 
-A Skill in ISLI is a **pure utility microservice**:
-- No AI, no LLM calls
-- No API keys (or only service-specific ones, never the agent's model key)
-- Returns structured JSON
-- Minimal, predictable, testable
-- Optimized for fast execution and minimal token consumption
+A Skill in ISLI is a **functional capability microservice**:
+- **Smart Skills**: Can contain their own AI/LLM loops for domain-specific reasoning.
+- **Dumb Skills**: Pure utility microservices (regex, math, formatters).
+- Returns structured JSON.
+- Minimal, predictable, testable.
+- Optimized for fast execution and minimal token consumption.
 
-This is deliberately different from OpenClaw skills, which can contain complex LLM prompts and business logic. ISLI skills are closer to functions in a standard library.
+This allows ISLI to rival frameworks like OpenClaw by permitting skills to handle complex, ambiguous tasks that require internal reasoning before returning a result to the agent.
 
 ---
 
@@ -23,12 +23,14 @@ Every skill is defined by a manifest file:
 skill:
   id: web-search
   name: "Web Search"
-  version: "1.0.0"
-  description: "Search the web and return top N results as structured JSON"
+  version: "1.1.0"
+  description: "Search the web and return top N results with smart relevance filtering"
   author: system
 
   endpoint: http://localhost:8101
   health_check: /health
+  is_smart: true  # Indicates this skill uses internal AI reasoning
+```
 
   inputs:
     - name: query

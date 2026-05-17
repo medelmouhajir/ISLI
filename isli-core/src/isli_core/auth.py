@@ -8,6 +8,7 @@ from jose import JWTError, jwt
 from isli_core.config import get_settings
 
 security = HTTPBearer()
+security_admin = HTTPBearer()
 
 
 def create_internal_token(agent_id: str, scopes: list[str], expires_minutes: int = 60) -> str:
@@ -41,6 +42,18 @@ async def require_internal_auth(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict[str, Any]:
     return verify_internal_token(credentials.credentials)
+
+
+async def require_admin_auth(
+    credentials: HTTPAuthorizationCredentials = Depends(security_admin),
+) -> str:
+    settings = get_settings()
+    if credentials.credentials != settings.admin_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Admin API Key",
+        )
+    return credentials.credentials
 
 
 class SkillProxyAuth:

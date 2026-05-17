@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import JSON, Float, Integer, String, Text, ForeignKey, DateTime, Index, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -73,6 +74,9 @@ class Task(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     input: Mapped[str] = mapped_column(Text, default="", nullable=False)
     output: Mapped[str | None] = mapped_column(Text)
+    context_summary: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    session_id: Mapped[str | None] = mapped_column(String(64))
     channel: Mapped[str | None] = mapped_column(String(32))
     parent_task_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("tasks.id"), nullable=True
@@ -80,6 +84,7 @@ class Task(Base):
     child_task_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     blocked_reason: Mapped[str | None] = mapped_column(Text)
+    saga_log: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     token_usage: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     task_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reasoning_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -93,6 +98,7 @@ class Task(Base):
     __table_args__ = (
         Index("ix_tasks_status", "status"),
         Index("ix_tasks_agent_id", "agent_id"),
+        Index("ix_tasks_session_id", "session_id"),
         Index("ix_tasks_created_at", "created_at"),
         Index("ix_tasks_parent_task_id", "parent_task_id"),
     )
@@ -155,7 +161,7 @@ class EpisodicMemory(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     importance: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
-    embedding: Mapped[list[float] | None] = mapped_column(JSON)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(768))
     embedding_model: Mapped[str] = mapped_column(String(64), default="nomic-embed-text", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False
@@ -186,6 +192,8 @@ class Session(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     compacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    journal: Mapped[str | None] = mapped_column(Text)
+    journal_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./isli_dev.db" if IS_DEV else ""
     redis_url: str = "fakeredis://localhost" if IS_DEV else ""
     jwt_secret: str = secrets.token_urlsafe(32) if IS_DEV else ""
+    admin_api_key: str = "isli-admin-dev-key" if IS_DEV else ""
     keeper_url: str = "http://localhost:8001"
     core_api_url: str = "http://localhost:8000"
     otel_service_name: str = "isli-core"
@@ -28,6 +29,8 @@ class Settings(BaseSettings):
     pii_encryption_key: str = secrets.token_urlsafe(32) if IS_DEV else ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    task_lease_minutes: int = 5
+    workspace_base_path: str = "./workspaces" if IS_DEV else "/workspaces"
 
     @model_validator(mode="after")
     def _validate(self):

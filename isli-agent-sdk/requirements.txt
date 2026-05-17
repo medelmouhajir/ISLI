@@ -1,0 +1,6 @@
+httpx
+websockets
+pydantic
+structlog
+litellm
+python-dotenv

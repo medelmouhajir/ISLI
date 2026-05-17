@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     redis_url: str = ""
     skill_registry_token: str = ""
     otel_service_name: str = "isli-skills"
+    jwt_secret: str = ""
 
 
 @lru_cache

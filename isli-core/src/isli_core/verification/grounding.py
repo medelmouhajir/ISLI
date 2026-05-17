@@ -102,6 +102,16 @@ class GroundingVerifier:
                 continue
 
             result = GroundingVerifier.verify(skill_name, raw)
+            
+            # Phase 2: Local Logic Judge (Quality Gating) - Risk Based
+            HIGH_RISK_SKILLS = {"shell-exec", "file-write", "file-delete", "file-list"}
+            if result.is_valid and skill_name in HIGH_RISK_SKILLS:
+                from isli_core.memory.keeper_client import KeeperClient
+                judge_result = await KeeperClient.verify_logic(str(raw))
+                if not judge_result.get("is_valid", True):
+                    logger.warning("verification.judge_fail", skill=skill_name, reason=judge_result.get("reason"))
+                    result = VerificationResult(is_valid=False, reason=f"Local Judge: {judge_result.get('reason')}")
+
             if result.is_valid:
                 return raw, result
 

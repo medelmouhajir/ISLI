@@ -280,6 +280,38 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  isli-workspace:
+    build:
+      context: ./isli-workspace
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: production
+      WORKSPACE_BASE_PATH: /workspaces
+      REDIS_URL: redis://redis-master:6379/4
+    volumes:
+      - workspace_data:/workspaces
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.isli-workspace.rule=PathPrefix(`/workspace`)"
+      - "traefik.http.routers.isli-workspace.entrypoints=web"
+      - "traefik.http.services.isli-workspace.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.isli-workspace.loadbalancer.healthcheck.interval=10s"
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    depends_on:
+      - redis-master
+    networks:
+      - isli
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   isli-board:
     build:
       context: ./isli-board
@@ -370,3 +402,4 @@ volumes:
   redis_replica_data:
   chroma_data:
   ollama_data:
+  workspace_data:

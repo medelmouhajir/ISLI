@@ -9,7 +9,7 @@ description = "ISLI Keeper — local Ollama sidecar for memory and context"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi==0.115.12",
+    "fastapi==0.116.1",
     "uvicorn[standard]==0.34.2",
     "httpx==0.28.1",
     "asyncpg==0.30.0",
