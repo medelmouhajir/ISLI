@@ -45,8 +45,7 @@ Channels            | python-telegram-bot, Twilio SDK, smtplib
 - **Reason**: Embedded mode (no server needed). Python-native. Excellent for local deployment. Supports cosine similarity + metadata filtering.
 - **Why not Weaviate/Qdrant?**: Overkill for a personal/small-team assistant. ChromaDB runs in the same process.
 - **Why not PostgreSQL pgvector only?**: pgvector is good for archival but ChromaDB gives better ANN performance for real-time retrieval.
-Primary Database    | PostgreSQL 16 (pgvector 0.4.x)
-...
+
 ### PostgreSQL 16 (Primary Database)
 - **Reason**: The proven choice for durable state in AI agent systems. JSON/JSONB support for flexible task payloads. `pgvector` extension for storing dense embeddings alongside relational data (episodic memory).
 - **pgvector**: Used for episodic memory semantic search (Tier 2). Implemented using cosine similarity (`<=>`) retrieval.
@@ -86,6 +85,7 @@ chromadb==0.5.x
 langfuse==2.x
 python-jose[cryptography]  # JWT
 httpx==0.27.x         # async HTTP for skill calls
+pyyaml==6.0.x         # prompt config loader
 ```
 
 ### `isli-keeper`
@@ -95,6 +95,7 @@ chromadb           # vector store
 asyncpg            # episodic memory writes
 numpy              # embedding operations
 fastapi            # keeper internal API
+pyyaml==6.0.x      # prompt config loader
 ```
 
 ### `isli-board` (Frontend)
@@ -113,6 +114,7 @@ date-fns@3
 httpx              # Core API calls
 websockets         # WebSocket connection
 pydantic           # config validation
+pyyaml             # prompt config loader
 anthropic / openai / google-generativeai  # model clients
 ```
 
@@ -228,4 +230,3 @@ The following production-grade infrastructure items are documented in this file 
 | Exact semver lockfiles | **Missing** | Critical | Wildcard minors (`fastapi==0.115.x`) allow breaking changes |
 
 > **Research finding:** The `docker-compose.yml` skeleton above uses `localhost` for inter-service URLs in `.env`, which will break container-to-container networking. In Docker mode, use Compose service names (`postgres`, `redis`, `isli-keeper`) instead of `localhost`. Provide separate `.env.dev` and `.env.prod` templates.
-li-keeper`) instead of `localhost`. Provide separate `.env.dev` and `.env.prod` templates.

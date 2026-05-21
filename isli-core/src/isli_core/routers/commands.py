@@ -31,20 +31,9 @@ class CommandRequest(BaseModel):
     text: str = ""
 
 
-HELP_TEXT = (
-    "Available commands:\n"
-    "/new — start a fresh session\n"
-    "/compact — trigger journal compaction now\n"
-    "/context — show current session journal\n"
-    "/status — show agent and session stats\n"
-    "/remember <text> — pin a fact to memory\n"
-    "/forget <text> — search and propose a memory to delete\n"
-    "/confirm_forget — confirm deletion from last /forget\n"
-    "/memories — list pinned memories\n"
-    "/retry — retry the last unanswered message\n"
-    "/cancel — cancel the current in-progress task\n"
-    "/help — show this list"
-)
+from isli_core.prompts_loader import get_prompts
+
+HELP_TEXT = get_prompts()["core"]["help_text"]
 
 
 async def _get_session(db: AsyncSession, session_id: str) -> Session:

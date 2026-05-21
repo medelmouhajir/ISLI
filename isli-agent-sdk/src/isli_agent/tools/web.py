@@ -1,6 +1,15 @@
 from typing import Any
 from isli_agent.client import CoreClient
 
+
+def _get_tool_desc(name: str, default: str) -> str:
+    try:
+        from isli_agent.prompts_loader import get_prompts
+        return get_prompts()["agent"]["tool_descriptions"].get(name, default)
+    except Exception:
+        return default
+
+
 async def web_fetch(agent_id: str, url: str, core_client: CoreClient) -> dict[str, Any]:
     """Fetch content from a URL and return structured data via the web-fetch skill."""
     resp = await core_client.client.post(
@@ -15,7 +24,7 @@ WEB_FETCH_DEF = {
     "type": "function",
     "function": {
         "name": "web_fetch",
-        "description": "Fetch the content of a website or API from a URL.",
+        "description": _get_tool_desc("web_fetch", "Fetch the content of a website or API from a URL."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -43,7 +52,7 @@ WEB_SEARCH_DEF = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the web for information using a query.",
+        "description": _get_tool_desc("web_search", "Search the web for information using a query."),
         "parameters": {
             "type": "object",
             "properties": {

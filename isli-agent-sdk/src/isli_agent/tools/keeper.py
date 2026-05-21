@@ -3,6 +3,14 @@ from typing import Any
 from isli_agent.client import CoreClient
 
 
+def _get_tool_desc(name: str, default: str) -> str:
+    try:
+        from isli_agent.prompts_loader import get_prompts
+        return get_prompts()["agent"]["tool_descriptions"].get(name, default)
+    except Exception:
+        return default
+
+
 async def summarize_text(agent_id: str, text: str, core_client: CoreClient, max_length: int = 256) -> dict[str, Any]:
     """Summarize text via the Keeper skill."""
     resp = await core_client.client.post(
@@ -57,7 +65,7 @@ SUMMARIZE_TEXT_DEF = {
     "type": "function",
     "function": {
         "name": "summarize_text",
-        "description": "Summarize a long text into a shorter version using the Keeper sidecar.",
+        "description": _get_tool_desc("summarize_text", "Summarize a long text into a shorter version using the Keeper sidecar."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -80,7 +88,7 @@ SUMMARIZE_DEF = {
     "type": "function",
     "function": {
         "name": "summarize",
-        "description": "Summarize text into a concise format, optionally with a specific goal.",
+        "description": _get_tool_desc("summarize", "Summarize text into a concise format, optionally with a specific goal."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -102,7 +110,7 @@ TRANSLATE_DEF = {
     "type": "function",
     "function": {
         "name": "translate",
-        "description": "Translate text from one language to another.",
+        "description": _get_tool_desc("translate", "Translate text from one language to another."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -124,7 +132,7 @@ EMBED_TEXT_DEF = {
     "type": "function",
     "function": {
         "name": "embed_text",
-        "description": "Generate a vector embedding for a piece of text.",
+        "description": _get_tool_desc("embed_text", "Generate a vector embedding for a piece of text."),
         "parameters": {
             "type": "object",
             "properties": {

@@ -3,6 +3,14 @@ from typing import Any
 from isli_agent.client import CoreClient
 
 
+def _get_tool_desc(name: str, default: str) -> str:
+    try:
+        from isli_agent.prompts_loader import get_prompts
+        return get_prompts()["agent"]["tool_descriptions"].get(name, default)
+    except Exception:
+        return default
+
+
 async def send_message(
     agent_id: str,
     channel: str,
@@ -24,7 +32,7 @@ SEND_MESSAGE_DEF = {
     "type": "function",
     "function": {
         "name": "send_message",
-        "description": "Send a proactive message to a user through one of the agent's assigned channels (e.g., telegram). The agent must have the channel in its assigned channels list.",
+        "description": _get_tool_desc("send_message", "Send a proactive message to a user through one of the agent's assigned channels (e.g., telegram). The agent must have the channel in its assigned channels list."),
         "parameters": {
             "type": "object",
             "properties": {

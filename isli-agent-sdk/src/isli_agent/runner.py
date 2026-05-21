@@ -100,26 +100,25 @@ class AgentRunner:
 
     def _assemble_system_prompt(self, context_summary: str) -> str:
         """Assemble the system prompt from identity, tools, and context."""
-        lines = [
-            "=== IDENTITY ===",
-            f"Name: {self.config.name}",
-            f"Description: {self.config.description or 'No description provided.'}",
-        ]
-        if self.config.persona:
-            lines.append(f"Persona: {self.config.persona}")
-        lines.append("")
-        lines.append("=== AVAILABLE TOOLS ===")
-        lines.append("You have access to the following tools. Call them when appropriate.")
-        for definition in self.tool_definitions:
-            func_name = definition.get("function", {}).get("name", "unknown")
-            func_desc = definition.get("function", {}).get("description", "No description.")
-            lines.append(f"- {func_name}: {func_desc}")
-        lines.append("")
-        lines.append("=== CONTEXT ===")
-        lines.append(context_summary)
-        lines.append("")
-        lines.append("Use the tools when you need to interact with external systems.")
-        return "\n".join(lines)
+        from .prompts_loader import get_prompts
+
+        prompts = get_prompts()
+        template = prompts["agent"]["system_prompt_template"]
+
+        persona_line = f"Persona: {self.config.persona}\n" if self.config.persona else ""
+        tools_list = "\n".join(
+            f"- {definition.get('function', {}).get('name', 'unknown')}: "
+            f"{definition.get('function', {}).get('description', 'No description.')}"
+            for definition in self.tool_definitions
+        )
+
+        return template.format(
+            name=self.config.name,
+            description=self.config.description or "No description provided.",
+            persona_line=persona_line,
+            tools_list=tools_list,
+            context_summary=context_summary,
+        )
 
     async def start(self):
         """Start the agent: registration, heartbeat, and WebSocket listener."""
@@ -230,6 +229,20 @@ class AgentRunner:
                     tools=self.tool_definitions if self.tool_definitions else None,
                 )
 
+                # Record cost usage back to Core
+                try:
+                    usage_payload = {
+                        "input_tokens": getattr(response.usage, "prompt_tokens", 0),
+                        "output_tokens": getattr(response.usage, "completion_tokens", 0),
+                        "reasoning_tokens": getattr(response.usage, "reasoning_tokens", 0),
+                        "model_id": self.config.model_id or "unknown",
+                        "task_id": task_id,
+                        "tier": self.config.config.get("tier", "standard") if self.config.config else "standard",
+                    }
+                    await self.client.report_usage(self.config.id, usage_payload)
+                except Exception as e:
+                    logger.warning("runner.usage_report_failed", agent_id=self.config.id, error=str(e))
+
                 choice = response.choices[0]
                 message = choice.message
 
@@ -300,6 +313,20 @@ class AgentRunner:
                     messages=[{"role": "system", "content": system_prompt}] + messages,
                     tools=self.tool_definitions if self.tool_definitions else None,
                 )
+
+                # Record cost usage back to Core
+                try:
+                    usage_payload = {
+                        "input_tokens": getattr(response.usage, "prompt_tokens", 0),
+                        "output_tokens": getattr(response.usage, "completion_tokens", 0),
+                        "reasoning_tokens": getattr(response.usage, "reasoning_tokens", 0),
+                        "model_id": self.config.model_id or "unknown",
+                        "task_id": None,
+                        "tier": self.config.config.get("tier", "standard") if self.config.config else "standard",
+                    }
+                    await self.client.report_usage(self.config.id, usage_payload)
+                except Exception as e:
+                    logger.warning("runner.usage_report_failed", agent_id=self.config.id, error=str(e))
 
                 choice = response.choices[0]
                 message = choice.message

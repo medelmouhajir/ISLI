@@ -105,22 +105,23 @@ When a task is assigned to an agent:
 ```python
 # Simplified agent SDK prompt assembly
 def _assemble_system_prompt(self, context_summary: str) -> str:
-    identity_parts = [
-        f"You are {self.config.name} (ID: {self.config.id}).",
-    ]
-    if self.config.description:
-        identity_parts.append(f"Description: {self.config.description}")
-    if self.config.persona:
-        identity_parts.append(f"Persona: {self.config.persona}")
+    from isli_agent.prompts_loader import get_prompts
+    template = get_prompts()["agent"]["system_prompt_template"]
 
-    identity_block = "=== IDENTITY ===\n" + "\n".join(identity_parts)
-    
-    prompt = f"{identity_block}\n\n{context_summary}"
-    
-    if self.config.config:
-        prompt += f"\n\n=== ADDITIONAL CONFIG ===\n{json.dumps(self.config.config, indent=2)}"
-        
-    return prompt
+    persona_line = f"Persona: {self.config.persona}\n" if self.config.persona else ""
+    tools_list = "\n".join(
+        f"- {d.get('function', {}).get('name', 'unknown')}: "
+        f"{d.get('function', {}).get('description', 'No description.')}"
+        for d in self.tool_definitions
+    )
+
+    return template.format(
+        name=self.config.name,
+        description=self.config.description or "No description provided.",
+        persona_line=persona_line,
+        tools_list=tools_list,
+        context_summary=context_summary,
+    )
 
 async def execute_task(task: Task):
     # 1. Get Keeper context injection (includes identity, journal, and memories)
@@ -135,6 +136,17 @@ async def execute_task(task: Task):
     messages = [{"role": "user", "content": task.input}]
     ...
 ```
+
+### Prompt Configuration (`prompts.yaml`)
+
+The agent system prompt template and all 15 tool descriptions are loaded from `prompts.yaml` at runtime. The file is mounted as a volume on the `agent-runner` container, so you can tune prompts without rebuilding.
+
+**Agent keys you can override:**
+
+| Key | Description |
+|-----|-------------|
+| `agent.system_prompt_template` | Full system prompt with `{name}`, `{description}`, `{persona_line}`, `{tools_list}`, `{context_summary}` |
+| `agent.tool_descriptions.*` | LiteLLM function `description` for each tool (e.g., `file_read`, `web_search`, `memory_save`) |
 
 ---
 
@@ -357,7 +369,7 @@ elif event["type"] == "session:message":
 The following gaps were identified during a parallel 12-agent research review:
 
 ### Critical
-- **Token budget enforcement (F15) entirely unimplemented** — the "optional daily cap" exists only in docs; no enforcement code.
+- ~~**Token budget enforcement (F15) entirely unimplemented**~~ — **Implemented 2026-05-21**. `POST /v1/agents/{id}/usage` endpoint records CostLedger, enforces agent/task/user/org budgets, and pauses agents on exceed. Agent SDK extracts `response.usage` from LiteLLM and reports back after every turn.
 - **No delegation cycle detection** — `can_delegate_to` enforces edges but not acyclicity; A→B→C→A loops forever.
 - **Unbounded delegation chain length** — no `max_depth` enforced; 2026 research shows >3-agent chains degrade to ~22.5% accuracy.
 

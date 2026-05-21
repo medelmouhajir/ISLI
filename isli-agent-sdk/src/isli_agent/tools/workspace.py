@@ -4,6 +4,14 @@ from typing import Any
 from isli_agent.client import CoreClient
 
 
+def _get_tool_desc(name: str, default: str) -> str:
+    try:
+        from isli_agent.prompts_loader import get_prompts
+        return get_prompts()["agent"]["tool_descriptions"].get(name, default)
+    except Exception:
+        return default
+
+
 class WorkspacePathError(Exception):
     """Raised when a path is blocked by the workspace sandbox (traversal, not found, etc.)."""
 
@@ -102,7 +110,7 @@ FILE_READ_DEF = {
     "type": "function",
     "function": {
         "name": "file_read",
-        "description": "Read the contents of a file from the agent's workspace.",
+        "description": _get_tool_desc("file_read", "Read the contents of a file from the agent's workspace."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -120,7 +128,7 @@ FILE_WRITE_DEF = {
     "type": "function",
     "function": {
         "name": "file_write",
-        "description": "Write content to a file in the agent's workspace. Creates parent directories if needed.",
+        "description": _get_tool_desc("file_write", "Write content to a file in the agent's workspace. Creates parent directories if needed."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -142,7 +150,7 @@ FILE_LIST_DEF = {
     "type": "function",
     "function": {
         "name": "file_list",
-        "description": "List files and directories in a path within the agent's workspace.",
+        "description": _get_tool_desc("file_list", "List files and directories in a path within the agent's workspace."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -160,7 +168,7 @@ FILE_DELETE_DEF = {
     "type": "function",
     "function": {
         "name": "file_delete",
-        "description": "Delete a file from the agent's workspace. Directories cannot be deleted with this tool.",
+        "description": _get_tool_desc("file_delete", "Delete a file from the agent's workspace. Directories cannot be deleted with this tool."),
         "parameters": {
             "type": "object",
             "properties": {

@@ -1,0 +1,134 @@
+# ISLI Prompts Configuration
+# Single source of truth for all LLM prompts across Keeper, Agent SDK, and Core.
+# Modify prompts here; services reload on restart.
+
+keeper:
+  summarize: |
+    Summarize the following text in under {max_length} words:
+
+    {text}
+
+    Summary:
+
+  journal_update: |
+    Update the structured session journal based on the recent messages. Maintain the following format precisely:
+
+    [Context]
+    (General environment, active versions, user preferences)
+    [Decisions]
+    (Key decisions made, agreed-upon constraints, or changes in direction)
+    [Last State]
+    (What the agent was doing most recently and where it left off)
+
+    Old Journal:
+    {old_journal}
+
+    Recent Messages:
+    {recent_messages}
+    Updated Structured Journal:
+
+  heartbeat_anomaly: |
+    Analyze the following recent activity for agent '{agent_id}' (Status: {status}). Detect any anomalies like infinite loops, stuck states, or repetitive behavior.
+
+    Activity:
+    {activity}
+
+    If an anomaly is found, describe it in one short sentence. Otherwise, respond with 'NONE'.
+
+  heartbeat_validate: |
+    Analyze the recent activity for agent '{agent_id}'. Heartbeat received at: {heartbeat_at}
+
+    Detect any anomalies like infinite loops, stuck states, or repetitive behavior.
+    Activity Log:
+    {compressed_log}
+
+    If an anomaly is found, respond with JSON: {"is_valid": false, "anomaly": "..."}. Otherwise, respond with JSON: {"is_valid": true}
+
+  pii_scrub: |
+    Identify any REMAINING Personal Identifiable Information (PII) in the following text. PII includes names, proprietary IDs, and addresses. Do NOT re-scrub placeholders starting with [[PII_.
+
+    Replace remaining PII with a unique placeholder like [[PII_NAME_N]] or [[PII_ADDR_N]].
+
+    Text: {text}
+
+    Return ONLY a JSON object with two fields: 'scrubbed_text' and 'mapping' (new placeholder -> original value).
+
+  skill_clean: |
+    Clean the following raw data and extract only information relevant to: {extraction_goal}
+
+    If the data is HTML, strip all tags and boilerplate. Return a clean, compact JSON or text summary.
+
+    Raw Data:
+    {raw_data}
+
+    Cleaned Data:
+
+  verify_logic: |
+    Act as a logic judge. Analyze the following agent output for contradictions, infinite reasoning loops, or safety violations.
+
+    Context: {context}
+    Agent Output: {text}
+
+    Is this output valid? Respond with JSON: {"is_valid": bool, "reason": "string"}
+
+agent:
+  system_prompt_template: |
+    === IDENTITY ===
+    Name: {name}
+    Description: {description}
+    {persona_line}
+    === AVAILABLE TOOLS ===
+    You have access to the following tools. Call them when appropriate.
+    {tools_list}
+    === CONTEXT ===
+    {context_summary}
+
+    Use the tools when you need to interact with external systems.
+
+  tool_descriptions:
+    get_current_datetime: Return the current UTC date and time.
+    shell_exec: Execute a shell command in a sandboxed environment.
+    file_read: Read the contents of a file from the agent's workspace.
+    file_write: Write content to a file in the agent's workspace. Creates parent directories if needed.
+    file_list: List files and directories in a path within the agent's workspace.
+    file_delete: Delete a file from the agent's workspace. Directories cannot be deleted with this tool.
+    send_message: Send a proactive message to a user through one of the agent's assigned channels (e.g., telegram). The agent must have the channel in its assigned channels list.
+    web_fetch: Fetch the content of a website or API from a URL.
+    web_search: Search the web for information using a query.
+    memory_save: Save a fact to the agent's long-term semantic memory. Use this to remember important information for later retrieval.
+    memory_delete: Delete a previously saved fact from the agent's semantic memory by its fact ID.
+    memory_search: Search the agent's semantic memory for facts relevant to a query.
+    summarize_text: Summarize a long text into a shorter version using the Keeper sidecar.
+    summarize: Summarize text into a concise format, optionally with a specific goal.
+    translate: Translate text from one language to another.
+    embed_text: Generate a vector embedding for a piece of text.
+
+core:
+  help_text: |
+    Available commands:
+    /new — start a fresh session
+    /compact — trigger journal compaction now
+    /context — show current session journal
+    /status — show agent and session stats
+    /remember <text> — pin a fact to memory
+    /forget <text> — search and propose a memory to delete
+    /confirm_forget — confirm deletion from last /forget
+    /memories — list pinned memories
+    /retry — retry the last unanswered message
+    /cancel — cancel the current in-progress task
+    /help — show this list
+
+  context_inject_task_desc: "Session with {user_id}: {last_message}"
+
+  prompt_injection_markers:
+    - "ignore\\s+(previous|above|all)\\s+instructions"
+    - "ignore\\s+(previous|above|all)\\s+(prompts?|commands?)"
+    - "disregard\\s+(previous|above|all)\\s+instructions"
+    - "you\\s+are\\s+now\\s+"
+    - "new\\s+role\\s*:?\\s*"
+    - "system\\s+prompt\\s*:"
+    - "developer\\s+mode"
+    - "DAN\\s+mode"
+    - "jailbreak"
+    - "\\{\\{.*\\}\\}"
+    - "<%.*%>"

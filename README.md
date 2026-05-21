@@ -38,6 +38,15 @@ Services will be available at:
 - Board: http://localhost:5173
 - Jaeger (tracing): http://localhost:16686
 
+### Prompt Configuration
+
+All LLM prompts are centralized in `prompts.yaml` at the repo root. Edit prompts there and restart containers to apply changes — no rebuild required.
+
+```bash
+# Edit prompts.yaml, then restart affected services
+docker compose restart keeper core agent-runner
+```
+
 ## Run Tests
 
 ```bash

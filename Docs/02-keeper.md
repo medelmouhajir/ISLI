@@ -108,15 +108,6 @@ The updated structured journal string, which is then persisted to the `sessions`
 
 ---
 
-## CPU-Only Optimizations (Implemented 2026-05-19)
-
-In environments without a GPU, the following optimizations are applied:
-
-1.  **Permanent Model Loading**: `OLLAMA_KEEP_ALIVE=-1` ensures the model stays in RAM.
-2.  **Thread Pinning**: `OLLAMA_NUM_THREADS=8` pins Ollama to half of the available 16 cores to prevent context switching overhead and leave room for other services.
-3.  **API Context Cap**: The Keeper client enforces `num_ctx: 4096` and `num_batch: 512` to maintain sub-second ingestion and steady throughput on CPU.
-4.  **Model Tiering**: Using `1.5B` parameter models allows for high-speed local inference that competes with cloud speeds for small background tasks.
-
 ### 4. Agent Heartbeats
 
 Each registered agent sends a heartbeat signal to the Core API every 180 seconds. Instead of a simple `200 OK` ping, ISLI uses **intelligent heartbeats**:
@@ -136,7 +127,7 @@ The Keeper checks for anomalies:
 
 If an anomaly is detected, the Core API flags the agent card on the Kanban board and optionally pauses the agent.
 
-### 4. Memory Compaction
+### 5. Memory Compaction
 
 Periodically (or when a session context grows beyond a threshold), the Keeper runs **compaction**:
 - Reads raw session messages
@@ -146,9 +137,20 @@ Periodically (or when a session context grows beyond a threshold), the Keeper ru
 
 This mirrors Claude Code's compaction concept but happens locally, for free.
 
-### 5. Skill Result Summarization
+### 6. Skill Result Summarization
 
 When a skill returns a large payload (e.g., a 10,000-word web scrape), the Keeper summarizes it to a compact form before it enters the agent's context window. This is the **"RAG gate"** — the Keeper acts as a retrieval pre-processor.
+
+---
+
+## CPU-Only Optimizations (Implemented 2026-05-19)
+
+In environments without a GPU, the following optimizations are applied:
+
+1. **Permanent Model Loading**: `OLLAMA_KEEP_ALIVE=-1` ensures the model stays in RAM.
+2. **Thread Pinning**: `OLLAMA_NUM_THREADS=8` pins Ollama to half of the available 16 cores to prevent context switching overhead and leave room for other services.
+3. **API Context Cap**: The Keeper client enforces `num_ctx: 4096` and `num_batch: 512` to maintain sub-second ingestion and steady throughput on CPU.
+4. **Model Tiering**: Using `1.5B` parameter models allows for high-speed local inference that competes with cloud speeds for small background tasks.
 
 ---
 
@@ -186,6 +188,44 @@ keeper:
     top_k_episodic: 5            # episodic memories to retrieve
     max_injection_tokens: 1000   # total context block cap
 ```
+
+---
+
+## Prompt Configuration (`prompts.yaml`)
+
+All Keeper prompts live in a single `prompts.yaml` at the repo root and are loaded at runtime. Each service has a symlink (`isli-keeper/prompts.yaml → ../prompts.yaml`) so Docker builds pick it up automatically. The file is mounted as a volume in `docker-compose.yml` so you can edit prompts without rebuilding.
+
+**Search order for the loader:**
+1. `PROMPTS_FILE` env var
+2. `/app/prompts.yaml` (Docker default)
+3. `./prompts.yaml` relative to the service root
+
+**Keeper prompts you can override:**
+
+| Key | Endpoint | Variables |
+|-----|----------|-----------|
+| `keeper.summarize` | `/summarize` | `{max_length}`, `{text}` |
+| `keeper.journal_update` | `/journal/update` | `{old_journal}`, `{recent_messages}` |
+| `keeper.heartbeat_anomaly` | `/heartbeat` | `{agent_id}`, `{status}`, `{activity}` |
+| `keeper.heartbeat_validate` | `/heartbeat/validate` | `{agent_id}`, `{heartbeat_at}`, `{compressed_log}` |
+| `keeper.pii_scrub` | `/pii/scrub` | `{text}` |
+| `keeper.skill_clean` | `/skill/clean` | `{extraction_goal}`, `{raw_data}` |
+| `keeper.verify_logic` | `/verify/logic` | `{context}`, `{text}` |
+
+**Example override (repo root `prompts.yaml`):**
+
+```yaml
+keeper:
+  summarize: |
+    Summarize the following text in under {max_length} words.
+    Be concise and factual:
+
+    {text}
+
+    Summary:
+```
+
+Restart the Keeper container (`docker compose restart keeper`) to pick up changes.
 
 ---
 

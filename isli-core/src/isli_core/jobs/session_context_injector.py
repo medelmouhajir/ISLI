@@ -6,6 +6,7 @@ from isli_core.db import async_session
 from isli_core.models import Session, Agent
 from isli_core.memory.keeper_client import KeeperClient
 from isli_core.event_manager import EventManager
+from isli_core.prompts_loader import get_prompts
 
 logger = structlog.get_logger()
 
@@ -74,7 +75,9 @@ class SessionContextInjectorWorker:
                 last_message = ""
                 if sess.messages:
                     last_message = sess.messages[-1].get("content", "")
-                task_desc = f"Session with {sess.user_id or 'user'}: {last_message}"
+                task_desc = get_prompts()["core"]["context_inject_task_desc"].format(
+                    user_id=sess.user_id or "user", last_message=last_message
+                )
 
                 summary = await KeeperClient.get_context_injection(
                     sess.agent_id,

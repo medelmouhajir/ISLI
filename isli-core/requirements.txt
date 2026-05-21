@@ -23,3 +23,4 @@ cryptography==44.0.2
 prometheus-client==0.25.0
 onnxruntime>=1.17.0
 python-multipart==0.0.12
+pyyaml==6.0.2

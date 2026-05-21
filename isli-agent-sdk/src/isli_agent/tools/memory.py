@@ -3,6 +3,14 @@ from typing import Any
 from isli_agent.client import CoreClient
 
 
+def _get_tool_desc(name: str, default: str) -> str:
+    try:
+        from isli_agent.prompts_loader import get_prompts
+        return get_prompts()["agent"]["tool_descriptions"].get(name, default)
+    except Exception:
+        return default
+
+
 async def memory_save(
     agent_id: str,
     content: str,
@@ -56,7 +64,7 @@ MEMORY_SAVE_DEF = {
     "type": "function",
     "function": {
         "name": "memory_save",
-        "description": "Save a fact to the agent's long-term semantic memory. Use this to remember important information for later retrieval.",
+        "description": _get_tool_desc("memory_save", "Save a fact to the agent's long-term semantic memory. Use this to remember important information for later retrieval."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -83,7 +91,7 @@ MEMORY_DELETE_DEF = {
     "type": "function",
     "function": {
         "name": "memory_delete",
-        "description": "Delete a previously saved fact from the agent's semantic memory by its fact ID.",
+        "description": _get_tool_desc("memory_delete", "Delete a previously saved fact from the agent's semantic memory by its fact ID."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -101,7 +109,7 @@ MEMORY_SEARCH_DEF = {
     "type": "function",
     "function": {
         "name": "memory_search",
-        "description": "Search the agent's semantic memory for facts relevant to a query.",
+        "description": _get_tool_desc("memory_search", "Search the agent's semantic memory for facts relevant to a query."),
         "parameters": {
             "type": "object",
             "properties": {

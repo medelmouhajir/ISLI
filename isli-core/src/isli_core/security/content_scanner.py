@@ -14,22 +14,13 @@ class ScanResult:
         self.risk_score = risk_score
 
 
+from isli_core.prompts_loader import get_prompts
+
+
 class ContentScanner:
     """Scan text for prompt injection patterns and basic PII."""
 
-    PROMPT_INJECTION_MARKERS = [
-        r"ignore\s+(previous|above|all)\s+instructions",
-        r"ignore\s+(previous|above|all)\s+(prompts?|commands?)",
-        r"disregard\s+(previous|above|all)\s+instructions",
-        r"you\s+are\s+now\s+",
-        r"new\s+role\s*:?\s*",
-        r"system\s+prompt\s*:",
-        r"developer\s+mode",
-        r"DAN\s+mode",
-        r"jailbreak",
-        r"\{\{.*\}\}",
-        r"<%.*%>",
-    ]
+    PROMPT_INJECTION_MARKERS = get_prompts()["core"]["prompt_injection_markers"]
 
     PII_PATTERNS = {
         "ssn": r"\b\d{3}-\d{2}-\d{4}\b",

@@ -13,6 +13,7 @@ from .config import get_settings
 from .db import close_db, get_recent_memories, get_relevant_memories, init_db
 from .metrics import get_metrics
 from .ollama_client import OllamaClient
+from .prompts_loader import get_prompts
 from .telemetry import get_trace_id, instrument_fastapi
 
 SERVICE_NAME = "isli-keeper"
@@ -259,9 +260,8 @@ async def summarize(
     _auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
-    prompt = (
-        f"Summarize the following text in under {req.max_length} words:\n\n"
-        f"{req.text}\n\nSummary:"
+    prompt = get_prompts()["keeper"]["summarize"].format(
+        max_length=req.max_length, text=req.text
     )
     try:
         result = await _generate_with_ollama(
@@ -291,19 +291,14 @@ async def journal_update(
     _auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
-    prompt = (
-        "Update the structured session journal based on the recent messages. "
-        "Maintain the following format precisely:\n\n"
-        "[Context]\n(General environment, active versions, user preferences)\n"
-        "[Decisions]\n(Key decisions made, agreed-upon constraints, or changes in direction)\n"
-        "[Last State]\n(What the agent was doing most recently and where it left off)\n\n"
-        f"Old Journal:\n{req.old_journal or 'No previous journal.'}\n\n"
-        "Recent Messages:\n"
+    recent_messages = "\n".join(
+        f"{msg.get('role', 'user')}: {msg.get('content', '')}"
+        for msg in req.recent_messages
     )
-    for msg in req.recent_messages:
-        prompt += f"{msg.get('role', 'user')}: {msg.get('content', '')}\n"
-
-    prompt += "\nUpdated Structured Journal:"
+    prompt = get_prompts()["keeper"]["journal_update"].format(
+        old_journal=req.old_journal or "No previous journal.",
+        recent_messages=recent_messages,
+    )
 
     try:
         result = await _generate_with_ollama(
@@ -469,11 +464,10 @@ async def heartbeat(req: HeartbeatRequest, _auth: dict = Depends(require_interna
             memories = await get_recent_memories(req.agent_id, limit=3)
             activity_text = "\n".join(memories)
 
-            prompt = (
-                f"Analyze the following recent activity for agent '{req.agent_id}' (Status: {req.status}). "
-                "Detect any anomalies like infinite loops, stuck states, or repetitive behavior.\n\n"
-                f"Activity:\n{activity_text}\n\n"
-                "If an anomaly is found, describe it in one short sentence. Otherwise, respond with 'NONE'."
+            prompt = get_prompts()["keeper"]["heartbeat_anomaly"].format(
+                agent_id=req.agent_id,
+                status=req.status,
+                activity=activity_text,
             )
 
             result = await _generate_with_ollama(prompt, model=DEFAULT_GEN_MODEL, agent_id=req.agent_id, endpoint="heartbeat")
@@ -506,14 +500,10 @@ async def heartbeat_validate(req: HeartbeatValidateRequest, _auth: dict = Depend
         memories = await get_recent_memories(req.agent_id, limit=20)
         compressed_log = _compress_activity_log(memories)
 
-        prompt = (
-            f"Analyze the recent activity for agent '{req.agent_id}'. "
-            f"Heartbeat received at: {req.heartbeat_at}\n\n"
-            "Detect any anomalies like infinite loops, stuck states, or repetitive behavior.\n"
-            "Activity Log:\n"
-            f"{compressed_log}\n\n"
-            "If an anomaly is found, respond with JSON: {\"is_valid\": false, \"anomaly\": \"...\"}. "
-            "Otherwise, respond with JSON: {\"is_valid\": true}"
+        prompt = get_prompts()["keeper"]["heartbeat_validate"].format(
+            agent_id=req.agent_id,
+            heartbeat_at=req.heartbeat_at,
+            compressed_log=compressed_log,
         )
 
         result = await _generate_with_ollama(
@@ -573,13 +563,7 @@ async def pii_scrub(
             counter += 1
 
     # 2. LLM Pass: Context-aware scrubbing for names, IDs, etc.
-    prompt = (
-        "Identify any REMAINING Personal Identifiable Information (PII) in the following text. "
-        "PII includes names, proprietary IDs, and addresses. Do NOT re-scrub placeholders starting with [[PII_.\n\n"
-        "Replace remaining PII with a unique placeholder like [[PII_NAME_N]] or [[PII_ADDR_N]].\n\n"
-        f"Text: {text}\n\n"
-        "Return ONLY a JSON object with two fields: 'scrubbed_text' and 'mapping' (new placeholder -> original value)."
-    )
+    prompt = get_prompts()["keeper"]["pii_scrub"].format(text=text)
 
     try:
         result = await _generate_with_ollama(prompt, model=DEFAULT_GEN_MODEL, agent_id=agent_id, endpoint="pii/scrub")
@@ -647,13 +631,8 @@ async def skill_clean(
         )
         raw_data = raw_data[:MAX_CLEAN_CHARS]
 
-    prompt = (
-        f"Clean the following raw data and extract only information relevant to: "
-        f"{req.extraction_goal}\n\n"
-        "If the data is HTML, strip all tags and boilerplate. "
-        "Return a clean, compact JSON or text summary.\n\n"
-        f"Raw Data:\n{raw_data}\n\n"
-        "Cleaned Data:"
+    prompt = get_prompts()["keeper"]["skill_clean"].format(
+        extraction_goal=req.extraction_goal, raw_data=raw_data
     )
     try:
         result = await _generate_with_ollama(
@@ -676,12 +655,8 @@ async def verify_logic(
     _auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
-    prompt = (
-        "Act as a logic judge. Analyze the following agent output for contradictions, "
-        "infinite reasoning loops, or safety violations.\n\n"
-        f"Context: {req.context or 'None'}\n"
-        f"Agent Output: {req.text}\n\n"
-        "Is this output valid? Respond with JSON: {\"is_valid\": bool, \"reason\": \"string\"}"
+    prompt = get_prompts()["keeper"]["verify_logic"].format(
+        context=req.context or "None", text=req.text
     )
     try:
         result = await _generate_with_ollama(
