@@ -96,6 +96,7 @@ The **MAST (Multi-Agent System Failure Taxonomy)** from UC Berkeley (NeurIPS 202
 - **Incremental Updates**: The journal is updated after every successful task completion.
 - On agent restart, the Keeper re-injects the last journal state and the most recent raw messages.
 - 4-tier memory ensures nothing critical is stored only in RAM.
+- **Fixed 2026-05-18**: Session soft-delete no longer wipes `messages`; revival no longer wipes `journal`; `session:message` event now includes `journal`; agent prepends it to the system prompt.
 
 ---
 
@@ -220,7 +221,7 @@ The 2026 research review identified structural resilience patterns that ISLI cur
 
 | Gap | Related MAST Mode | Status | Recommended Fix |
 |-----|-------------------|--------|---------------|
-| No circuit breakers (CLOSED/OPEN/HALF_OPEN) | F7, F11, F15 | **Missing** | Add circuit breakers on WebSocket pool, Skills proxy, and model API calls |
+| Circuit breakers (CLOSED/OPEN/HALF_OPEN) | F7, F11, F15 | **Implemented** | `isli_keeper/circuit_breaker.py` wraps Ollama calls; extend to WebSocket pool and Skills proxy |
 | No checkpointing for agent turn state | F8, F11 | **Missing** | Add agent-side turn checkpointing to PostgreSQL before each tool call |
 | No BICR governance (Buffer, Isolate, Challenge, Recover) | F6, F11 | **Missing** | Model BICR: Buffer = Keeper pre-processing; Isolate = sandbox; Challenge = Judge + similarity gate; Recover = rollback + fallback |
 | No chaos engineering validation | All | **Missing** | Create fault-injection suite to assert mitigations F1–F16 actually trigger |
@@ -230,5 +231,30 @@ The 2026 research review identified structural resilience patterns that ISLI cur
 | No bulkhead pattern for resource isolation | F15, F16 | **Missing** | Add per-agent connection limits and per-skill thread pools |
 | Delegation cycle detection missing from F7 | F7 | **Missing** | Extend loop detection to inter-agent delegation DAGs, not just intra-agent state revisits |
 | Token budget enforcement unimplemented (F15) | F15 | **Missing** | Implement hard token caps at Core API level before any model call |
+| Heartbeat commits token revocation before guaranteeing delivery | F14 | **Fixed 2026-05-18** | Moved `token_issued_at` update to after all side effects in heartbeat endpoint |
+| Agent task API calls use JWT instead of admin key | F14 | **Fixed 2026-05-18** | `complete_task()`, `move_task()`, `save_checkpoint()` now pass `use_admin=True` to `_get_headers()` |
+| JWT token revocation | F14 | **Implemented 2026-05-18** | `token_issued_at` column + `POST /v1/agents/{id}/token` invalidates old tokens on recovery |
+| Keeper timeout chain too short for slow hardware | F7, F15 | **Fixed 2026-05-18** | Core→Keeper timeouts increased to 180s (journal/heartbeat), 120s (context injection); Keeper→Ollama to 120s; circuit breaker recovery to 120s |
+| Session compaction cron redundant with JournalWorker | F8 | **Fixed 2026-05-18** | Deprecated `compact_sessions`; JournalWorker already truncates to last 10 messages |
+| Agent task path ignores pre-computed context | F4 | **Fixed 2026-05-18** | `AgentRunner._execute_task()` now reads `task.context_summary` first |
+| Crude token counting triggers compaction too early | F15 | **Fixed 2026-05-18** | `len(str(messages))` → `len(str(messages)) // 4` (4-char/token heuristic) |
+| Session soft-delete causes duplicate key violation on revival | F8 | **Fixed 2026-05-18** | `channel_webhook` now queries for soft-deleted sessions and revives them instead of re-inserting |
+| Soft-delete wipes raw messages (history loss) | F8 | **Fixed 2026-05-18** | Removed `sess.messages = []` from `expire_sessions` and `detect_idle`; raw messages persist |
+| Revival code wipes structured journal | F8 | **Fixed 2026-05-18** | Removed `journal = None` and `context_summary = None` from session revival in `channels.py` |
+| Event payload never includes journal | F8 | **Fixed 2026-05-18** | `session:message` event now includes `"journal": sess.journal`; agent prepends it to system prompt |
+| Heartbeat validator flags agents on single flaky LLM response | F14 | **Fixed 2026-05-18** | Redis counter `agent:heartbeat:anomaly:{id}` requires 3 consecutive anomalies before `flagged`; valid heartbeat auto-unflags |
+| Cascading timeouts during heartbeat validation | F7, F15 | **Fixed 2026-05-19** | Implemented per-request timeouts (30s) for heartbeat validation in Keeper; fails open with `is_valid: True` and warning log on timeout/error. |
+| Anomaly detection choking on large logs | F7 | **Fixed 2026-05-20** | Added activity log compression (deduplication + truncation) in `isli-keeper`. |
+| Infinite tool loop recursion | F7 | **Fixed 2026-05-20** | Added `MAX_CONSECUTIVE_TOOL_FAILURES` (3) in `isli-agent-sdk`. |
+| Infinite reasoning loops | F7 | **Fixed 2026-05-20** | Added `MAX_LLM_TURNS` (50) in `isli-agent-sdk`. |
+| Silent agent failure (ghosting) | F7 | **Fixed 2026-05-20** | Added `CheckAgentStalenessWorker` in `isli-core` to mark stale agents (5m) as `unresponsive`. |
+| WebSocket auth bypasses token revocation | F14 | **Fixed 2026-05-18** | WebSocket endpoint now calls `_check_token_revocation` after `verify_internal_token` |
+| Silent event drop when agent WebSocket offline | F7, F8 | **Fixed 2026-05-18** | `send_to_agent` now queues to Redis list `agent:events:{id}` with TTL 1h / max depth 50 |
+| Agent never catches up on reconnect | F8 | **Fixed 2026-05-18** | `connect_agent` drains queued Redis events immediately upon WebSocket connect |
+| No automatic offline detection | F7 | **Fixed 2026-05-18** | `CheckpointRecoveryWorker` now sets `agent.status = "offline"` on stale heartbeat and triggers `FallbackManager` |
+| Short task lease reclaims long-running work | F7 | **Fixed 2026-05-18** | `task_lease_minutes` increased from 5 to 30 |
+| Core→Channels delivery swallowed with no retry | F10 | **Fixed 2026-05-18** | `reply_to_session` now uses `exponential_backoff` with 3 retries; Telegram adapter retries 3× with backoff |
+| Checkpoint recovery crashes on tuple unpacking | F7, F11 | **Fixed 2026-05-18** | `rows_map[task.id] = (task, agent)` comprehension now unpacks `for _, (task, agent) in rows_map.items()` |
+| Agent runner opaque error messages | F10 | **Fixed 2026-05-18** | `runner.py` catch-all now classifies overloaded/timeout vs generic; `acompletion` has `timeout=120` |
 
-> **Note:** The documented mitigations above are architectural intent only. Zero implementation code exists in the repository to realize any of them.
+> **Note:** Most documented mitigations are architectural intent only. The circuit breaker (`isli_keeper/circuit_breaker.py`) and JWT token revocation are implemented; the rest remain design-only.

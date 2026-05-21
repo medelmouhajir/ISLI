@@ -20,4 +20,39 @@ SKILL_OUTPUT_SCHEMAS: dict[str, dict] = {
             "translation": str,
         },
     },
+    "file-read": {
+        "required": ["content", "size_bytes", "encoding"],
+        "types": {
+            "content": str,
+            "size_bytes": int,
+            "encoding": str,
+        },
+    },
+    "file-write": {
+        "required": ["status", "size_bytes"],
+        "types": {
+            "status": str,
+            "size_bytes": int,
+        },
+    },
+    "file-list": {
+        "required": ["entries"],
+        "types": {
+            "entries": list,
+        },
+    },
+    "file-delete": {
+        "required": ["status", "path"],
+        "types": {
+            "status": str,
+            "path": str,
+        },
+    },
+    "send-message": {
+        "required": ["status", "session_id"],
+        "types": {
+            "status": str,
+            "session_id": str,
+        },
+    },
 }

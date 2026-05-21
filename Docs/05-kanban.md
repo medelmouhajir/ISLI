@@ -79,7 +79,9 @@ Colors: ● green = healthy, ● yellow = warning, ● red = anomaly, ○ gray =
 
 ## Real-Time Events (WebSocket)
 
-The board subscribes to a WebSocket stream from Core API. Events:
+The board subscribes to a **single shared WebSocket** stream from Core API via `BoardSocketContext` (`isli-board/src/contexts/BoardSocketContext.tsx`). All consumers (Kanban, Sessions, Keeper dashboard) read from one connection — no duplicate sockets.
+
+Event types:
 
 ```typescript
 type BoardEvent =
@@ -89,11 +91,23 @@ type BoardEvent =
   | { type: "agent:heartbeat"; agent_id: string; status: AgentStatus; anomaly?: string }
   | { type: "agent:online";    agent_id: string }
   | { type: "agent:offline";   agent_id: string }
+  | { type: "session:updated"; session_id: string }
+  | { type: "session:message"; session_id: string; agent_id: string }
   | { type: "keeper:event";    event_type: string; payload: object }
   | { type: "system:alert";    severity: string; message: string }
 ```
 
-All events arrive in real-time. No polling.
+### Update Strategy
+
+React Query caches server state. WebSocket events update the cache **surgically** to avoid HTTP refetch storms:
+
+- **Tasks** — `setQueryData(['tasks'], ...)` patches the list in-place.
+- **Agents** — `setQueryData(['agents'], ...)` patches the agent record.
+- **Sessions** — `setQueryData(['sessions'], ...)` bumps `last_activity_at` on the affected session; only `['sessions', session_id]` is invalidated for a detail refetch.
+
+Session queries use `staleTime: 30000` with `refetchOnWindowFocus: false` and `refetchOnReconnect: false`. Real-time freshness comes from WebSocket events, not polling.
+
+WebSocket configuration: `reconnectInterval: 3000`, `reconnectAttempts: 20`.
 
 ---
 
@@ -128,6 +142,31 @@ Parent and child cards are visually connected with an arrow. Clicking either sho
 
 ---
 
+## Sessions & Chat Interface
+
+Beyond the Kanban board, the `isli-board` provides a dedicated **Sessions** page for direct multi-agent interaction.
+
+### Purpose
+The Sessions page allows users to:
+- **Direct Messaging**: Chat with any online agent in real-time.
+- **Session Persistence**: Continue existing conversations or start new ones.
+- **Human-to-Agent Loop**: Manually inject messages into the agent's context.
+
+### Interaction Flow
+1. **Selection**: User chooses an existing session from the list or starts a new one by selecting an agent.
+2. **Inbound Message**: When a user sends a message, the session is set to `pending_context`.
+3. **Context Injection**: `isli-core` (via `SessionContextInjectorWorker`) injects episodic and semantic memory from the Keeper.
+4. **Agent Notification**: Core API broadcasts a `session:message` event via WebSockets.
+5. **Agent Reply**: The assigned agent processes the request (ReAct loop) and replies via `POST /v1/sessions/{id}/reply`.
+6. **Real-time Update**: The UI receives a `session:updated` event and refreshes the chat view.
+
+### UI Features
+- **Two-Pane Layout**: Left pane for conversation history/selection, right pane for the active chat.
+- **Status Indicators**: Real-time visualization of whether an agent is "thinking" or "injecting context".
+- **Responsive Shell**: The interface uses a fixed viewport (`h-screen`) to ensure the chat container is independently scrollable.
+
+---
+
 ## Filtering and Search
 
 The board supports:
@@ -146,6 +185,7 @@ The board supports:
 React 18 + TypeScript
 Vite (build)
 TailwindCSS (styling)
+react-router-dom (navigation)
 @dnd-kit/core (drag and drop)
 @tanstack/react-query (server state)
 WebSocket (native browser API)
@@ -158,13 +198,19 @@ No heavy UI libraries. No real-time framework dependencies (pure WebSocket).
 
 ## Board Backend Endpoints
 
+The board interacts with the `isli-core` API. All resource endpoints are versioned under `/v1`.
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/tasks` | GET | List tasks (with filters) |
-| `/api/tasks` | POST | Create task |
-| `/api/tasks/{id}` | GET | Get task detail |
-| `/api/tasks/{id}` | PATCH | Update task (status, assignment) |
-| `/api/agents` | GET | List agents and their statuses |
+| `/v1/tasks` | GET | List tasks (with filters) |
+| `/v1/tasks` | POST | Create task |
+| `/v1/tasks/{id}` | GET | Get task detail |
+| `/v1/tasks/{id}` | PATCH | Update task (status, assignment) |
+| `/v1/agents` | GET | List agents and their statuses |
+| `/v1/sessions` | GET | List active chat sessions |
+| `/v1/sessions` | POST | Create a new chat session |
+| `/v1/sessions/{id}` | GET | Fetch session details and message history |
+| `/v1/sessions/{id}/message` | POST | Send a human message to an agent session |
 | `/ws/board` | WS | Real-time event stream |
 
 ---

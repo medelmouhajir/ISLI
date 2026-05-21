@@ -1,0 +1,14 @@
+use_default_settings: true
+server:
+  secret_key: "isli-searxng-secret-key"
+search:
+  safe_search: 0
+  formats:
+    - json
+engines:
+  - name: google
+    engine: google
+    shortcut: go
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg

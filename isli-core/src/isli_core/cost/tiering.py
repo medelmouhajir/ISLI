@@ -21,10 +21,11 @@ class ModelTiering:
 
     @staticmethod
     def resolve_model(agent_config: dict[str, Any], tier: str | None = None) -> str:
+        configured_model = agent_config.get("model_id", "qwen3:1.7b")
         if tier:
             candidates = TIER_MODELS.get(tier, TIER_MODELS["standard"])
         else:
-            candidates = [agent_config.get("model_id", "qwen3:1.7b")]
+            candidates = [configured_model]
 
         preferred = agent_config.get("preferred_model")
         if preferred and preferred in candidates:
@@ -34,7 +35,10 @@ class ModelTiering:
         for c in candidates:
             if c in RATE_CARD:
                 return c
-        return "qwen3:1.7b"
+
+        # If the configured model is not in the rate card, respect the user's choice
+        # rather than silently downgrading to a default.
+        return configured_model
 
     @staticmethod
     def downgrade_tier(current_tier: str) -> str | None:

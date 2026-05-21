@@ -57,3 +57,7 @@ See [native-deploy.md](native-deploy.md) for running all services directly on th
 - Board UI: http://localhost (or http://server-ip)
 - Core API docs: http://localhost:8000/docs
 - Jaeger traces: http://localhost:16686
+
+### Admin API Key
+
+Mutating endpoints (create/move/delete tasks, create/update agents) require an `Authorization: Bearer <key>` header. The key is configured via the `ADMIN_API_KEY` environment variable and must be entered in the board's login modal. Ensure the value in your `.env` matches what operators use in the board.

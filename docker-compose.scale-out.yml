@@ -1,8 +1,6 @@
 # ISLI — Scale-Out Docker Compose (Production-like)
 # Extends the base setup with Traefik, Redis Sentinel, and all 5 services.
 
-version: "3.9"
-
 services:
   traefik:
     image: traefik:v3.2
@@ -157,6 +155,7 @@ services:
       REDIS_URL: redis://redis-master:6379/0
       JWT_SECRET: ${JWT_SECRET:?error}
       PII_ENCRYPTION_KEY: ${PII_ENCRYPTION_KEY:?error}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?error}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
     labels:
       - "traefik.enable=true"
@@ -338,10 +337,18 @@ services:
 
   ollama-1:
     image: ollama/ollama:latest
+    environment:
+      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-8}
     volumes:
       - ollama_data:/root/.ollama
     networks:
       - isli
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 8G
     logging:
       driver: json-file
       options:
@@ -350,10 +357,18 @@ services:
 
   ollama-2:
     image: ollama/ollama:latest
+    environment:
+      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-8}
     volumes:
       - ollama_data:/root/.ollama
     networks:
       - isli
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 8G
     logging:
       driver: json-file
       options:

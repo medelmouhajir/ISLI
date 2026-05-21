@@ -1,8 +1,5 @@
 import structlog
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from isli_core.models import UserProfile
+from typing import Any
 
 logger = structlog.get_logger()
 
@@ -12,11 +9,14 @@ class CrossChannelIdentity:
 
     @staticmethod
     async def resolve_or_create(
-        session: AsyncSession,
+        session: Any,
         channel: str,
         channel_user_id: str,
         display_name: str | None = None,
-    ) -> UserProfile:
+    ) -> Any:
+        from sqlalchemy import select
+        from isli_core.models import UserProfile
+
         identity_key = f"{channel}:{channel_user_id}"
         result = await session.execute(
             select(UserProfile).where(
@@ -37,11 +37,14 @@ class CrossChannelIdentity:
 
     @staticmethod
     async def link_identity(
-        session: AsyncSession,
+        session: Any,
         canonical_user_id: str,
         channel: str,
         channel_user_id: str,
-    ) -> UserProfile | None:
+    ) -> Any | None:
+        from sqlalchemy import select
+        from isli_core.models import UserProfile
+
         result = await session.execute(
             select(UserProfile).where(UserProfile.canonical_user_id == canonical_user_id)
         )
@@ -57,13 +60,14 @@ class CrossChannelIdentity:
 
     @staticmethod
     async def verify_identity(
-        session: AsyncSession,
+        session: Any,
         canonical_user_id: str,
         channel: str,
         verification_code: str,
     ) -> bool:
-        # In production, this would verify a code sent to the channel
-        # For now, mark as verified on first successful link
+        from sqlalchemy import select
+        from isli_core.models import UserProfile
+
         result = await session.execute(
             select(UserProfile).where(UserProfile.canonical_user_id == canonical_user_id)
         )
@@ -76,7 +80,10 @@ class CrossChannelIdentity:
         return True
 
     @staticmethod
-    async def get_identities(session: AsyncSession, canonical_user_id: str) -> dict:
+    async def get_identities(session: Any, canonical_user_id: str) -> dict:
+        from sqlalchemy import select
+        from isli_core.models import UserProfile
+
         result = await session.execute(
             select(UserProfile).where(UserProfile.canonical_user_id == canonical_user_id)
         )

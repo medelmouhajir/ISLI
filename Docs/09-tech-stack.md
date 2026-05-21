@@ -5,7 +5,7 @@
 ```
 Layer               | Technology
 --------------------|---------------------------------------------
-Local AI            | Ollama (runtime) + qwen3:1.7b + nomic-embed-text
+Local AI            | Ollama (runtime) + qwen2.5-coder:1.5b + nomic-embed-text
 Vector Store        | ChromaDB (local, embedded)
 Core API            | Python 3.12 + FastAPI + Uvicorn
 Task Queue          | Redis (pub/sub + stream)
@@ -34,8 +34,11 @@ Channels            | python-telegram-bot, Twilio SDK, smtplib
 - **Reason**: One-command model management. Supports all major quantized models. REST API at `localhost:11434`. No Python dependency conflicts.
 - **Key models used**:
   - `nomic-embed-text` (274MB, 8K context, best local embedding quality)
-  - `qwen3:1.7b` (summarization, JSON output, fast)
-  - `qwen3:0.6b` (heartbeat validation, minimal VRAM)
+  - `qwen2.5-coder:1.5b` (summarization, JSON output, fast CPU inference)
+- **Optimizations**:
+  - `OLLAMA_KEEP_ALIVE=-1`: Permanent memory loading to eliminate cold-start lag.
+  - `OLLAMA_NUM_THREADS=8`: Pinning to half of available cores for balanced performance.
+  - `num_ctx: 4096`: Optimized context window for CPU throughput.
 - **Alternative considered**: llama.cpp directly (more control but more ops overhead).
 
 ### ChromaDB (Vector Store)

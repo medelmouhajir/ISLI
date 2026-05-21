@@ -101,7 +101,9 @@ def get_verification_failure_counter():
 def instrument_fastapi(app, service_name: str) -> trace.TracerProvider:
     configure_structlog(service_name)
     provider = configure_otel(service_name)
-    configure_otel_metrics(service_name)
+    # NOTE: configure_otel_metrics is not called here because Jaeger does not
+    # support OTLP metrics export. Metrics collection is disabled until a
+    # compatible metrics backend (e.g. Prometheus, OTel Collector) is added.
     FastAPIInstrumentor.instrument_app(app)
     return provider
 

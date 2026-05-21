@@ -35,7 +35,9 @@ class CostEstimator:
     def estimate_turn(model_id: str, input_tokens: int, output_tokens: int, reasoning_tokens: int = 0) -> float:
         rate = RATE_CARD.get(model_id)
         if rate is None:
-            raise ValueError(f"Unknown model: {model_id}")
+            # Unknown model: assume zero cost (common for local/Ollama models)
+            # Log would happen at call site if needed; here we return 0.0 to avoid crashes.
+            return 0.0
         if rate.is_local:
             return 0.0
         input_cost = (input_tokens / 1000) * rate.input_per_1k

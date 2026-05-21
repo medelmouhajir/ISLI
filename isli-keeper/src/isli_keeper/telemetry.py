@@ -1,4 +1,3 @@
-import os
 import structlog
 
 from opentelemetry import trace
@@ -30,8 +29,12 @@ def configure_structlog(service_name: str) -> None:
     )
 
 
+from isli_keeper.config import get_settings
+
+
 def configure_otel(service_name: str) -> trace.TracerProvider:
-    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    settings = get_settings()
+    endpoint = settings.otel_exporter_otlp_endpoint
     resource = Resource.create({"service.name": service_name})
     provider = TracerProvider(resource=resource)
     exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)

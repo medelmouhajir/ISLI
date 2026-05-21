@@ -1,6 +1,7 @@
 """Policy engine — evaluate requests against security rules."""
 
 import hashlib
+import os
 import structlog
 from typing import Any
 
@@ -119,7 +120,14 @@ class PolicyEngine:
             "claude-haiku-4-5",
             "o1",
             "o3",
+            "qwen3:1.7b",
+            "qwen3:0.6b",
+            "qwen2.5:7b",
         }
+        # Allow comma-separated extra models via env var for custom/local models
+        extra = os.getenv("ISLI_EXTRA_APPROVED_MODELS", "")
+        if extra:
+            approved.update(m.strip() for m in extra.split(",") if m.strip())
         return model_id.lower() in approved
 
     @staticmethod

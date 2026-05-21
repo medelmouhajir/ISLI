@@ -3,9 +3,31 @@
 # Copy .env.production to .env and fill in values, then run:
 #   docker compose up -d
 
-version: "3.9"
-
 services:
+  traefik:
+    image: traefik:v2.11
+    command:
+      - --api.dashboard=false
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+      - --certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_EMAIL:-admin@example.com}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --accesslog=true
+      - --accesslog.format=json
+      - --log.level=INFO
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    networks:
+      - isli
+    restart: unless-stopped
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -43,18 +65,22 @@ services:
 
   ollama:
     image: ollama/ollama:latest
+    environment:
+      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-8}
     volumes:
       - ollama_data:/root/.ollama
     ports:
-      - "11434:11434"
+      - "11435:11434"
     networks:
       - isli
     deploy:
       resources:
         limits:
-          memory: 4G
+          cpus: '8.0'
+          memory: 8G
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/tags || exit 1"]
+      test: ["CMD-SHELL", "ollama list | grep -q '.' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -63,20 +89,44 @@ services:
 
   core:
     image: ${CORE_API_IMAGE:-ghcr.io/medelmouhajir/isli-core:latest}
+    build:
+      context: ./isli-core
+      dockerfile: Dockerfile
     environment:
       ISLI_ENV: production
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET: ${JWT_SECRET:?error}
       PII_ENCRYPTION_KEY: ${PII_ENCRYPTION_KEY:?error}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?error}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      KEEPER_URL: http://keeper:8001
+      WORKSPACE_URL: http://workspace:8300
+      CHANNELS_URL: http://channels:8200
+      SKILL_FILE_READ_URL: http://workspace:8300
+      SKILL_FILE_WRITE_URL: http://workspace:8300
+      SKILL_FILE_LIST_URL: http://workspace:8300
+      SKILL_FILE_DELETE_URL: http://workspace:8300
+      SKILL_WEB_FETCH_URL: http://skills:8100
+      SKILL_SUMMARIZE_URL: http://skills:8100
+      SKILL_TRANSLATE_URL: http://skills:8100
+      SKILL_SHELL_EXEC_URL: http://skills:8100
+      SKILL_WEB_SEARCH_URL: http://skills:8100
+      SKILL_SUMMARIZE_TEXT_URL: http://skills:8100
+      SKILL_EMBED_TEXT_URL: http://skills:8100
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      ANONYMIZED_TELEMETRY: "FALSE"
+    volumes:
+      - chroma_data:/data/vectors
+      - ./isli-core/src/isli_core:/app/src/isli_core
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      keeper:
         condition: service_healthy
     networks:
       - isli
@@ -93,14 +143,17 @@ services:
 
   keeper:
     image: ${KEEPER_IMAGE:-ghcr.io/medelmouhajir/isli-keeper:latest}
+    build:
+      context: ./isli-keeper
+      dockerfile: Dockerfile
     environment:
       ISLI_ENV: production
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_GEN_MODEL: qwen2.5:7b
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+      OLLAMA_GEN_MODEL: ${OLLAMA_GEN_MODEL:-qwen2.5-coder:1.5b}
       DATABASE_URL: postgresql://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
       REDIS_URL: redis://redis:6379/1
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      JWT_SECRET: ${JWT_SECRET}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     ports:
       - "8001:8001"
@@ -108,6 +161,8 @@ services:
       ollama:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     networks:
       - isli
@@ -124,6 +179,9 @@ services:
 
   channels:
     image: ${CHANNELS_IMAGE:-ghcr.io/medelmouhajir/isli-channels:latest}
+    build:
+      context: ./isli-channels
+      dockerfile: Dockerfile
     environment:
       ISLI_ENV: production
       REDIS_URL: redis://redis:6379/2
@@ -131,9 +189,17 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
-    ports:
-      - "8002:8200"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.channels.rule=Host(`isli.mangati.ma`) && PathPrefix(`/webhook`)"
+      - "traefik.http.routers.channels.entrypoints=websecure"
+      - "traefik.http.routers.channels.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.channels-http.rule=Host(`isli.mangati.ma`) && PathPrefix(`/webhook`)"
+      - "traefik.http.routers.channels-http.entrypoints=web"
+      - "traefik.http.routers.channels-http.middlewares=redirect-to-https"
+      - "traefik.http.services.channels.loadbalancer.server.port=8200"
     depends_on:
       redis:
         condition: service_healthy
@@ -154,13 +220,18 @@ services:
 
   skills:
     image: ${SKILLS_IMAGE:-ghcr.io/medelmouhajir/isli-skills:latest}
+    build:
+      context: ./isli-skills
+      dockerfile: Dockerfile
     environment:
       ISLI_ENV: production
       REDIS_URL: redis://redis:6379/3
       CORE_API_URL: http://core:8000
       KEEPER_URL: http://keeper:8001
       WORKSPACE_URL: http://workspace:8300
+      SEARXNG_URL: http://searxng:8080/search
       SKILL_REGISTRY_TOKEN: ${SKILL_REGISTRY_TOKEN}
+      JWT_SECRET: ${JWT_SECRET}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     ports:
       - "8003:8100"
@@ -184,12 +255,16 @@ services:
 
   workspace:
     image: ${WORKSPACE_IMAGE:-ghcr.io/medelmouhajir/isli-workspace:latest}
+    build:
+      context: ./isli-workspace
+      dockerfile: Dockerfile
     environment:
       ISLI_ENV: production
       WORKSPACE_BASE_PATH: /workspaces
       REDIS_URL: redis://redis:6379/4
     volumes:
       - workspace_data:/workspaces
+      - ./isli-workspace/src/isli_workspace:/app/isli_workspace
     ports:
       - "8300:8300"
     depends_on:
@@ -208,12 +283,46 @@ services:
       retries: 3
     restart: unless-stopped
 
+  agent-runner:
+    build:
+      context: ./isli-agent-sdk
+      dockerfile: Dockerfile
+    environment:
+      CORE_API_URL: http://core:8000
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      AGENT_ID: ${AGENT_ID}
+      REDIS_URL: redis://redis:6379/0
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-ollama}
+      MODEL_ID: ${MODEL_ID:-qwen2.5:7b}
+      OLLAMA_API_BASE: https://ollama.com
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+    depends_on:
+      core:
+        condition: service_healthy
+    networks:
+      - isli
+    profiles:
+      - agents
+    restart: unless-stopped
+
   board:
     image: ${BOARD_IMAGE:-ghcr.io/medelmouhajir/isli-board:latest}
-    ports:
-      - "80:80"
+    build:
+      context: ./isli-board
+      dockerfile: Dockerfile
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.board.rule=Host(`isli.mangati.ma`)"
+      - "traefik.http.routers.board.entrypoints=websecure"
+      - "traefik.http.routers.board.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.board-http.rule=Host(`isli.mangati.ma`)"
+      - "traefik.http.routers.board-http.entrypoints=web"
+      - "traefik.http.routers.board-http.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.services.board.loadbalancer.server.port=80"
     depends_on:
-      - core
+      core:
+        condition: service_healthy
     networks:
       - isli
     deploy:
@@ -238,11 +347,21 @@ services:
           memory: 512M
     restart: unless-stopped
 
+  searxng:
+    image: searxng/searxng:latest
+    volumes:
+      - ./infra/searxng/settings.yml:/etc/searxng/settings.yml
+    networks:
+      - isli
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
   ollama_data:
   workspace_data:
+  letsencrypt:
+  chroma_data:
 
 networks:
   isli:

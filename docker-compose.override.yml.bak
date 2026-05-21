@@ -1,8 +1,6 @@
 # ISLI — Local Development Overrides
 # Place this file next to docker-compose.yml. Docker Compose merges it automatically.
 
-version: "3.9"
-
 services:
   core:
     build:
@@ -10,10 +8,12 @@ services:
       dockerfile: Dockerfile
     environment:
       ISLI_ENV: development
-      DATABASE_URL: sqlite+aiosqlite:///./isli_dev.db
+      DATABASE_URL: sqlite+aiosqlite:///./data/isli_dev.db
       REDIS_URL: redis://redis:6379/0
+      ANONYMIZED_TELEMETRY: "FALSE"
     volumes:
       - ./isli-core/src:/app/src:ro
+      - ./isli-core/data:/app/data
 
   keeper:
     build:

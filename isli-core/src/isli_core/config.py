@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     admin_api_key: str = "isli-admin-dev-key" if IS_DEV else ""
     keeper_url: str = "http://localhost:8001"
     core_api_url: str = "http://localhost:8000"
+    channels_url: str = "http://localhost:8002"
+    workspace_url: str = "http://localhost:8300" if IS_DEV else "http://workspace:8300"
     otel_service_name: str = "isli-core"
     cors_origins: str = ""
     tls_cert_path: str = ""
@@ -29,7 +31,11 @@ class Settings(BaseSettings):
     pii_encryption_key: str = secrets.token_urlsafe(32) if IS_DEV else ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
-    task_lease_minutes: int = 5
+    webhook_secrets: dict[str, str] = {
+        "telegram": "telegram-secret",
+        "whatsapp": "whatsapp-secret",
+    }
+    task_lease_minutes: int = 30
     workspace_base_path: str = "./workspaces" if IS_DEV else "/workspaces"
 
     @model_validator(mode="after")
@@ -52,6 +58,9 @@ class Settings(BaseSettings):
             raise ValueError("pii_encryption_key is required in production")
         if self.pii_encryption_key and len(self.pii_encryption_key.encode()) < 32:
             raise ValueError("pii_encryption_key must be at least 32 bytes of entropy")
+
+        if not IS_DEV and not self.admin_api_key:
+            raise ValueError("admin_api_key is required in production. Set ADMIN_API_KEY in your environment.")
 
         return self
 

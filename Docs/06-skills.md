@@ -61,21 +61,45 @@ skill:
 
 | Skill ID | Description | Notes |
 |----------|-------------|-------|
-| `web-search` | Web search → structured results | Uses DuckDuckGo or SerpAPI |
+| `web-search` | Web search → structured results | Uses local SearXNG instance |
 | `web-fetch` | Fetch URL content → clean text | HTML stripped by default |
 | `pdf-extract` | Extract text from PDF | Returns paginated JSON |
-| `file-read` | Read file from agent's workspace | Path-scoped |
-| `file-write` | Write file to agent's workspace | Path-scoped |
+| `file-read` | Read file from agent's workspace | Path-scoped, per-agent isolation |
+| `file-write` | Write file to agent's workspace | Path-scoped, per-agent isolation |
+| `file-list` | List directory entries in agent's workspace | Path-scoped, per-agent isolation |
+| `file-delete` | Delete a file from agent's workspace | Path-scoped, per-agent isolation |
 | `db-query` | Run read-only SQL query | Scoped to allowed schemas |
 | `send-email` | Send email via SMTP | Requires SMTP config |
 | `send-message` | Send message via channel | Routes to channel gateway |
 | `image-describe` | Get text description of image | Calls local vision model |
-| `datetime` | Current date/time in formats | No external calls |
+| `datetime` | Current date/time in formats | Pure local SDK tool |
 | `json-parse` | Parse and validate JSON | Schema validation support |
-| `summarize-text` | Long text → short summary | Calls Keeper endpoint |
-| `embed-text` | Text → embedding vector | Calls Keeper endpoint |
-| `memory-save` | Save to Tier 3 semantic memory | Calls Keeper endpoint |
-| `memory-search` | Search semantic memory | Returns relevant memories |
+| `summarize-text` | Long text → short summary | Proxies to Keeper via isli-skills |
+| `embed-text` | Text → embedding vector | Proxies to Keeper via isli-skills |
+| `memory-save` | Save to Tier 3 semantic memory | Inline in Core (ChromaDB) |
+| `memory-delete` | Delete from Tier 3 semantic memory | Inline in Core (ChromaDB) |
+| `memory-search` | Search semantic memory | Inline in Core (ChromaDB) |
+
+### Web Search (`web-search`)
+The web-search skill provides agents with the ability to perform wide-scale information gathering without relying on external SaaS providers like Google Search API or SerpAPI.
+
+**Implementation Details:**
+- **Backend:** Self-hosted **SearXNG** instance.
+- **Aggregation:** SearXNG aggregates results from multiple engines (Google, DuckDuckGo) locally.
+- **Privacy:** Search queries are routed through your own infrastructure; no direct tracking by external engines.
+- **Output:** Returns a clean JSON array of results, each containing a `title`, `url`, and a brief text `snippet`.
+
+**Example Usage (SDK):**
+```python
+results = await agent.web_search(query="latest ISLI architecture gaps")
+```
+
+**Proxy Route:** `POST /v1/skills/web-search/search`
+
+**Skill Types:**
+- **External microservice** — `summarize-text`, `embed-text` live in `isli-skills` and are proxied by Core
+- **Inline handler** — `memory-save`, `memory-delete`, `memory-search` are handled directly in Core's skill proxy router using `ChromaMemoryClient`; no external service hop
+- **Local SDK tool** — `datetime` is a pure Python function in `isli-agent-sdk`; no network call
 
 ---
 
@@ -102,33 +126,118 @@ Benefits:
 
 ## Skill Response Format
 
-All skills return the same envelope:
+External microservice skills return a standard envelope:
 
 ```json
 {
   "skill_id": "web-search",
   "success": true,
-  "data": { ... },          // skill-specific payload
+  "data": { ... },
   "error": null,
   "execution_ms": 342,
   "timestamp": "2026-05-10T14:23:00Z"
 }
 ```
 
-On failure:
+Inline handlers (memory skills) and local SDK tools return simpler, domain-specific payloads. For example:
+
+**`memory-save` response:**
 ```json
-{
-  "skill_id": "web-search",
-  "success": false,
-  "data": null,
-  "error": {
-    "code": "RATE_LIMIT_EXCEEDED",
-    "message": "Too many requests. Retry after 30s.",
-    "retry_after": 30
-  },
-  "execution_ms": 5
-}
+{"id": "<uuid>", "collection": "agent_test-agent", "status": "saved"}
 ```
+
+**`memory-search` response:**
+```json
+{"ids": [["uuid-1"]], "documents": [["Paris is the capital of France"]], "distances": [[0.21]]}
+```
+
+**`summarize-text` response:**
+```json
+{"summary": "Quick fox jumps over a lazy dog.", "model": "qwen3:1.7b"}
+```
+
+On Keeper failure:
+```json
+{"summary": "<raw input>", "model": "fallback", "note": "Keeper unreachable; returning raw text"}
+```
+
+---
+
+## Agent SDK Tool Registry
+
+The `isli-agent-sdk` maintains a central `SKILL_TOOL_REGISTRY` in `isli_agent/tools/__init__.py` that maps normalized skill names to their `(function, definition)` tuples:
+
+```python
+from isli_agent.tools import SKILL_TOOL_REGISTRY, normalize_skill_name
+
+# SKILL_TOOL_REGISTRY includes:
+#   "send_message", "shell_exec", "web_fetch",
+#   "summarize_text", "embed_text", "summarize", "translate",
+#   "file_read", "file_write", "file_list", "file_delete",
+#   "memory_save", "memory_delete", "memory_search"
+```
+
+Skill names from Core (kebab-case like `"send-message"`) are normalized to Python identifiers (`"send_message"`) via `normalize_skill_name()`. The `AgentRunner` uses this registry to auto-populate its toolbox from the synced `config.skills` list.
+
+### Auto-Registration
+
+```python
+# Inside AgentRunner.start() — runs automatically
+for skill_name in self.config.skills:
+    normalized = normalize_skill_name(skill_name)  # "send-message" -> "send_message"
+    if normalized in SKILL_TOOL_REGISTRY:
+        func, definition = SKILL_TOOL_REGISTRY[normalized]
+        self.add_tool(normalized, func, definition)
+```
+
+### Convenience Methods
+
+```python
+runner.add_workspace_tools()  # file_read, file_write, file_list, file_delete
+runner.add_channel_tools()    # send_message
+runner.add_system_tools()     # get_current_datetime (always auto-registered)
+```
+
+### LiteLLM Tool Definitions
+
+All tool definitions (`FILE_READ_DEF`, `SEND_MESSAGE_DEF`, `MEMORY_SAVE_DEF`, `DATETIME_DEF`, etc.) are exported from their respective `isli_agent.tools.*` modules and from the top-level `isli_agent` package for custom registration:
+
+```python
+from isli_agent import send_message, SEND_MESSAGE_DEF
+```
+
+### Workspace Tools
+
+Each workspace tool is an async function that calls the Core skill proxy and raises typed exceptions on failure:
+
+| Tool | Exception (404) | Exception (403) | Exception (413) |
+|------|----------------|----------------|----------------|
+| `file_read` | `WorkspaceNotFoundError` | `WorkspacePathError` | — |
+| `file_write` | `WorkspaceNotFoundError` | `WorkspacePathError` | `WorkspaceQuotaError` |
+| `file_list` | `WorkspaceNotFoundError` | `WorkspacePathError` | — |
+| `file_delete` | `WorkspaceNotFoundError` | `WorkspacePathError` / `WorkspacePermissionError` | — |
+
+These exceptions allow the agent's ReAct loop to recover gracefully instead of crashing on raw HTTP errors.
+
+### Keeper Tools
+
+`summarize_text` and `embed_text` proxy through Core to `isli-skills`, which forwards to Keeper. If Keeper/Ollama is unreachable, they gracefully degrade:
+- `summarize_text` returns the raw input text
+- `embed_text` returns an empty embedding list
+
+Both require a valid `JWT_SECRET` on the `skills` service to sign internal auth tokens for Keeper communication.
+
+### Memory Tools
+
+`memory_save`, `memory_delete`, and `memory_search` are handled **inline** in Core's skill proxy router (not via an external microservice). Core reads `agent_id` from the request body and calls `ChromaMemoryClient` directly. Collections are scoped per-agent using the `agent_{id}` naming convention.
+
+### System Tools
+
+`get_current_datetime` is a pure Python function that uses `datetime.now(timezone.utc)`. No network call, no auth, no external dependency.
+
+### LiteLLM Tool Definitions
+
+All tool definitions (`FILE_READ_DEF`, `SUMMARIZE_TEXT_DEF`, `MEMORY_SAVE_DEF`, `DATETIME_DEF`, etc.) are exported from their respective `isli_agent.tools.*` modules for custom registration.
 
 ---
 
@@ -215,7 +324,7 @@ The following gaps were identified during a parallel 12-agent research review:
 - **No structured skill-level observability** — no per-skill latency percentiles, error rates, or payload size logging.
 
 ### Medium
-- **`file-write` path scoping undocumented** — "Path-scoped" label with no explanation of traversal or symlink prevention.
+- ~~**`file-write` path scoping undocumented**~~ — **Fixed 2026-05-19**. Workspace sandbox (`isli-workspace/src/isli_workspace/sandbox.py`) enforces path traversal blocking via `resolve_path()` + `_ensure_within_workspace()`. Directory deletion is blocked; file size limit is 10 MB; workspace quota is 100 MB.
 - **Skill evolution (SkillClaw) is advisory only** — no automated validation that improvement suggestions actually improve outcomes.
 - **No per-skill rate limiting** — `rate_limit: 20/minute` in manifest but no enforcement code shown.
 

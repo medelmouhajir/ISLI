@@ -6,13 +6,14 @@ class AgentConfig(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
+    persona: Optional[str] = None
     model_provider: str
     model_id: str
     channels: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
     token_budget: Optional[int] = None
-    heartbeat_interval: int = 30
+    heartbeat_interval: int = 180
 
 class Task(BaseModel):
     id: str
@@ -24,6 +25,7 @@ class Task(BaseModel):
     agent_id: Optional[str] = None
     context_summary: Optional[str] = None
     payload: Optional[dict[str, Any]] = None
+    scheduled_at: Optional[datetime] = None
 
 class ContextInjection(BaseModel):
     context_summary: str

@@ -15,10 +15,11 @@ from isli_core.security.policy_engine import PolicyEngine
 from isli_core.memory.keeper_client import KeeperClient
 from isli_core.event_manager import EventManager
 from isli_core.checkpoint import CheckpointManager
+from isli_core.auth import require_admin_auth
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
-VALID_STATUSES = {"pending_context", "inbox", "doing", "review", "done", "failed", "blocked"}
+VALID_STATUSES = {"pending", "pending_context", "inbox", "doing", "review", "done", "failed", "blocked", "context_failed"}
 
 
 class TaskCreate(BaseModel):
@@ -35,6 +36,7 @@ class TaskCreate(BaseModel):
     parent_task_id: str | None = None
     tags: list[str] = Field(default_factory=list)
     idempotency_key: str | None = None
+    scheduled_at: datetime | None = None
 
 
 class TaskUpdate(BaseModel):
@@ -51,6 +53,7 @@ class TaskUpdate(BaseModel):
     tags: list[str] | None = None
     token_usage: dict[str, Any] | None = None
     saga_log: list[dict[str, Any]] | None = None
+    scheduled_at: datetime | None = None
 
 
 class TaskOut(BaseModel):
@@ -83,6 +86,7 @@ class TaskOut(BaseModel):
     trace_id: str | None
     retry_count: int
     idempotency_key: str | None
+    scheduled_at: datetime | None
 
     model_config = {"from_attributes": True}
 
@@ -104,7 +108,11 @@ async def list_tasks(
 
 
 @router.post("", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
-async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
+async def create_task(
+    payload: TaskCreate,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     # Security scan and policy check
     scan = ContentScanner.scan(payload.input)
     decision = await PolicyEngine.evaluate(
@@ -140,6 +148,12 @@ async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=409, detail="Duplicate idempotency key")
 
+    if payload.agent_id:
+        from isli_core.models import Agent
+        agent_check = await db.execute(select(Agent).where(Agent.id == payload.agent_id, Agent.deleted_at.is_(None)))
+        if not agent_check.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail=f"Agent '{payload.agent_id}' not found or deleted")
+
     depth = 0
     if payload.parent_task_id:
         parent = await db.execute(
@@ -152,11 +166,18 @@ async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
         if depth > 3:
             raise HTTPException(status_code=400, detail="Max delegation depth exceeded")
 
+    # Determine initial status
+    now = datetime.now(timezone.utc)
+    if payload.scheduled_at and payload.scheduled_at > now:
+        initial_status = "pending"
+    else:
+        initial_status = "pending_context" if payload.agent_id else "inbox"
+
     task = Task(
         title=payload.title,
         description=payload.description,
         type=payload.type,
-        status="pending_context" if payload.agent_id else "inbox",
+        status=initial_status,
         priority=payload.priority,
         agent_id=payload.agent_id,
         created_by=payload.created_by,
@@ -168,6 +189,7 @@ async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
         depth=depth,
         tags=payload.tags,
         idempotency_key=payload.idempotency_key,
+        scheduled_at=payload.scheduled_at,
     )
     
     db.add(task)
@@ -202,7 +224,12 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/{task_id}", response_model=TaskOut)
-async def update_task(task_id: str, payload: TaskUpdate, db: AsyncSession = Depends(get_db)):
+async def update_task(
+    task_id: str,
+    payload: TaskUpdate,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
     task = result.scalar_one_or_none()
     if not task:
@@ -211,7 +238,23 @@ async def update_task(task_id: str, payload: TaskUpdate, db: AsyncSession = Depe
     await increment_task_version(db, task_id, task.version)
 
     changes = payload.model_dump(exclude_unset=True)
-    
+
+    if "agent_id" in changes and changes["agent_id"] is not None:
+        from isli_core.models import Agent
+        agent_check = await db.execute(select(Agent).where(Agent.id == changes["agent_id"], Agent.deleted_at.is_(None)))
+        if not agent_check.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail=f"Agent '{changes['agent_id']}' not found or deleted")
+
+    # If agent_id is being assigned for the first time, trigger context injection
+    if (
+        "agent_id" in changes
+        and changes["agent_id"] is not None
+        and task.agent_id is None
+        and task.status == "inbox"
+    ):
+        task.status = "pending_context"
+        changes["status"] = "pending_context"
+
     for field, value in changes.items():
         setattr(task, field, value)
     task.updated_at = datetime.now(timezone.utc)
@@ -235,7 +278,12 @@ async def update_task(task_id: str, payload: TaskUpdate, db: AsyncSession = Depe
 
 
 @router.post("/{task_id}/move", response_model=TaskOut)
-async def move_task(task_id: str, new_status: str, db: AsyncSession = Depends(get_db)):
+async def move_task(
+    task_id: str,
+    new_status: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     if new_status not in VALID_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
 
@@ -273,7 +321,8 @@ async def move_task(task_id: str, new_status: str, db: AsyncSession = Depends(ge
 async def append_saga_entry(
     task_id: str,
     entry: dict[str, Any],
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
 ):
     result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
     task = result.scalar_one_or_none()
@@ -299,7 +348,8 @@ async def save_checkpoint(
     turn_number: int,
     messages: list[dict[str, Any]],
     tool_calls: list[dict[str, Any]] | None = None,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
 ):
     cp = await CheckpointManager.save(db, task_id, turn_number, messages, tool_calls)
     await db.commit()
@@ -322,7 +372,11 @@ async def get_latest_checkpoint(task_id: str, db: AsyncSession = Depends(get_db)
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_task(task_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_task(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
     task = result.scalar_one_or_none()
     if not task:

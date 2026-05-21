@@ -4,12 +4,13 @@ from typing import Any
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import structlog
 
 from .config import settings
-from .sandbox import read_file, write_file, list_dir, delete_file
+from .sandbox import read_file, write_file, list_dir, delete_file, write_file_bytes, create_dir, resolve_path
 from .auth import require_internal_auth
 
 SERVICE_NAME = "isli-workspace"
@@ -33,6 +34,11 @@ class ListRequest(BaseModel):
 
 
 class DeleteRequest(BaseModel):
+    agent_id: str
+    path: str
+
+
+class MkdirRequest(BaseModel):
     agent_id: str
     path: str
 
@@ -77,6 +83,7 @@ async def read(body: ReadRequest, _auth: dict = Depends(require_internal_auth)):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except PermissionError as exc:
+        logger.error("workspace.permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
         raise HTTPException(status_code=403, detail=str(exc))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -88,6 +95,7 @@ async def write(body: WriteRequest, _auth: dict = Depends(require_internal_auth)
         result = write_file(body.agent_id, settings.workspace_base_path, body.path, body.content)
         return {"status": "ok", **result}
     except PermissionError as exc:
+        logger.error("workspace.permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
         raise HTTPException(status_code=403, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=413, detail=str(exc))
@@ -103,6 +111,7 @@ async def list_files(body: ListRequest, _auth: dict = Depends(require_internal_a
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except PermissionError as exc:
+        logger.error("workspace.permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
         raise HTTPException(status_code=403, detail=str(exc))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -116,6 +125,66 @@ async def delete(body: DeleteRequest, _auth: dict = Depends(require_internal_aut
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except PermissionError as exc:
+        logger.error("workspace.permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/upload")
+async def upload(
+    agent_id: str = Form(...),
+    path: str = Form(...),
+    file: UploadFile = File(...),
+    _auth: dict = Depends(require_internal_auth)
+):
+    try:
+        content = await file.read()
+        result = write_file_bytes(agent_id, settings.workspace_base_path, path, content)
+        return {"status": "ok", **result}
+    except PermissionError as exc:
+        logger.error("workspace.permission_denied", agent_id=agent_id, path=path, error=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/download")
+async def download(
+    agent_id: str,
+    path: str,
+    _auth: dict = Depends(require_internal_auth)
+):
+    try:
+        file_path = resolve_path(agent_id, settings.workspace_base_path, path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        if file_path.is_dir():
+            raise HTTPException(status_code=400, detail="Cannot download a directory")
+        
+        return FileResponse(
+            path=file_path,
+            filename=file_path.name,
+            media_type="application/octet-stream"
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        logger.error("workspace.permission_denied", agent_id=agent_id, path=path, error=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/mkdir")
+async def mkdir(body: MkdirRequest, _auth: dict = Depends(require_internal_auth)):
+    try:
+        result = create_dir(body.agent_id, settings.workspace_base_path, body.path)
+        return {"status": "ok", **result}
+    except PermissionError as exc:
+        logger.error("workspace.permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
         raise HTTPException(status_code=403, detail=str(exc))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))

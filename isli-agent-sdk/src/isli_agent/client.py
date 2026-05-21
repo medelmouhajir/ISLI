@@ -24,16 +24,32 @@ class CoreClient:
         return headers
 
     async def register(self, config: AgentConfig) -> dict[str, Any]:
-        """Register the agent with Core API using admin key."""
+        """Register the agent with Core API using admin key.
+
+        Idempotent: works for new agents and already-registered agents.
+        On 409 Conflict, recovers a fresh token via the admin token endpoint.
+        """
         resp = await self.client.post(
-            "/v1/agents", 
+            "/v1/agents",
             json=config.model_dump(),
             headers=self._get_headers(use_admin=True)
         )
         if resp.status_code == 409:
-            # Already exists, try to get existing but we might not have a token yet
-            # In a real scenario, we might need a way to recover a token if lost
+            # Agent exists — recover a fresh token using admin auth
+            token_resp = await self.client.post(
+                f"/v1/agents/{config.id}/token",
+                headers=self._get_headers(use_admin=True)
+            )
+            token_resp.raise_for_status()
+            token_data = token_resp.json()
+            self.token = token_data["token"]
+            # Fetch existing agent config to return a consistent shape
             resp = await self.client.get(f"/v1/agents/{config.id}")
+            resp.raise_for_status()
+            data = resp.json()
+            data["token"] = self.token
+            return data
+
         resp.raise_for_status()
         data = resp.json()
         if "token" in data:
@@ -87,9 +103,9 @@ class CoreClient:
             "tool_calls": tool_calls
         }
         resp = await self.client.post(
-            f"/v1/tasks/{task_id}/checkpoint", 
+            f"/v1/tasks/{task_id}/checkpoint",
             json=payload,
-            headers=self._get_headers()
+            headers=self._get_headers(use_admin=True)
         )
         resp.raise_for_status()
         return resp.json()
@@ -98,15 +114,15 @@ class CoreClient:
         """Update task with final output and move to a completion status."""
         # Update output first
         await self.client.put(
-            f"/v1/tasks/{task_id}", 
+            f"/v1/tasks/{task_id}",
             json={"output": output},
-            headers=self._get_headers()
+            headers=self._get_headers(use_admin=True)
         )
         # Then move to final status
         resp = await self.client.post(
-            f"/v1/tasks/{task_id}/move", 
+            f"/v1/tasks/{task_id}/move",
             params={"new_status": status},
-            headers=self._get_headers()
+            headers=self._get_headers(use_admin=True)
         )
         resp.raise_for_status()
         return resp.json()
@@ -114,9 +130,9 @@ class CoreClient:
     async def move_task(self, task_id: str, new_status: str) -> dict[str, Any]:
         """Move a task to a new status."""
         resp = await self.client.post(
-            f"/v1/tasks/{task_id}/move", 
+            f"/v1/tasks/{task_id}/move",
             params={"new_status": new_status},
-            headers=self._get_headers()
+            headers=self._get_headers(use_admin=True)
         )
         resp.raise_for_status()
         return resp.json()
@@ -124,3 +140,33 @@ class CoreClient:
     async def close(self):
         """Close the underlying HTTP client."""
         await self.client.aclose()
+
+    async def get_session(self, session_id: str) -> dict[str, Any]:
+        """Fetch session details."""
+        resp = await self.client.get(
+            f"/v1/sessions/{session_id}",
+            headers=self._get_headers()
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_skills(self) -> list[dict[str, Any]]:
+        """Fetch registered skill metadata from Core API."""
+        resp = await self.client.get(
+            "/v1/skills",
+            headers=self._get_headers()
+        )
+        if resp.status_code != 200:
+            logger.warning("client.get_skills_failed", status=resp.status_code)
+            return []
+        return resp.json()
+
+    async def reply_to_session(self, session_id: str, text: str) -> dict[str, Any]:
+        """Send a reply to a session (delivered to user via channels)."""
+        resp = await self.client.post(
+            f"/v1/sessions/{session_id}/reply",
+            json={"text": text},
+            headers=self._get_headers()
+        )
+        resp.raise_for_status()
+        return resp.json()

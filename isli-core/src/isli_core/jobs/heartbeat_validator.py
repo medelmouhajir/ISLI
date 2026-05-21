@@ -7,6 +7,9 @@ from isli_core.db import get_db_session_manual
 from isli_core.models import Agent
 from sqlalchemy import select
 
+ANOMALY_THRESHOLD = 3
+ANOMALY_COUNTER_TTL_SECONDS = 600
+
 logger = structlog.get_logger()
 
 async def heartbeat_validator_worker():
@@ -48,15 +51,36 @@ async def heartbeat_validator_worker():
 
 async def validate_and_update(agent_id: str, heartbeat_at: str):
     is_valid = await KeeperClient.validate_heartbeat(agent_id, heartbeat_at)
+    redis = await get_redis()
+    counter_key = f"agent:heartbeat:anomaly:{agent_id}"
+
     if not is_valid:
-        logger.warning("agent.heartbeat_anomaly_detected", agent_id=agent_id)
+        # Increment consecutive anomaly counter
+        count = await redis.incr(counter_key)
+        await redis.expire(counter_key, ANOMALY_COUNTER_TTL_SECONDS)
+        logger.warning("agent.heartbeat_anomaly_detected", agent_id=agent_id, consecutive_count=count)
+
+        if count >= ANOMALY_THRESHOLD:
+            try:
+                async with get_db_session_manual() as db:
+                    result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
+                    agent = result.scalar_one_or_none()
+                    if agent and agent.status != "flagged":
+                        agent.status = "flagged"
+                        await db.commit()
+                        logger.info("agent.status_updated", agent_id=agent_id, status="flagged", consecutive_count=count)
+            except Exception as exc:
+                logger.error("jobs.heartbeat_validator_update_failed", agent_id=agent_id, error=str(exc))
+    else:
+        # Reset anomaly counter on valid heartbeat
+        await redis.delete(counter_key)
         try:
             async with get_db_session_manual() as db:
-                result = await db.execute(select(Agent).where(Agent.id == agent_id))
+                result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
                 agent = result.scalar_one_or_none()
-                if agent:
-                    agent.status = "flagged"
+                if agent and agent.status == "flagged":
+                    agent.status = "online"
                     await db.commit()
-                    logger.info("agent.status_updated", agent_id=agent_id, status="flagged")
+                    logger.info("agent.status_updated", agent_id=agent_id, status="online", reason="heartbeat_valid")
         except Exception as exc:
-            logger.error("jobs.heartbeat_validator_update_failed", agent_id=agent_id, error=str(exc))
+            logger.error("jobs.heartbeat_validator_unflag_failed", agent_id=agent_id, error=str(exc))

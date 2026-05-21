@@ -3,7 +3,7 @@ import json
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
 from isli_core.redis_client import get_redis
-from isli_core.auth import verify_internal_token
+from isli_core.auth import verify_internal_token, _check_token_revocation
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/ws", tags=["websocket"])
@@ -29,6 +29,28 @@ class ConnectionManager:
             self.agent_connections[agent_id] = []
         self.agent_connections[agent_id].append(websocket)
         logger.info("ws.agent_connected", agent_id=agent_id, count=len(self.agent_connections[agent_id]))
+        await self._drain_queued_events(agent_id)
+
+    async def _drain_queued_events(self, agent_id: str):
+        try:
+            redis = await get_redis()
+            queue_key = f"agent:events:{agent_id}"
+            while True:
+                message = await redis.lpop(queue_key)
+                if not message:
+                    break
+                if agent_id in self.agent_connections and self.agent_connections[agent_id]:
+                    for connection in self.agent_connections[agent_id]:
+                        try:
+                            await connection.send_text(message)
+                        except Exception as exc:
+                            logger.warning("ws.agent_queued_send_failed", agent_id=agent_id, error=str(exc))
+                    logger.info("ws.agent_queued_event_delivered", agent_id=agent_id)
+                else:
+                    await redis.lpush(queue_key, message)
+                    break
+        except Exception as exc:
+            logger.warning("ws.agent_drain_failed", agent_id=agent_id, error=str(exc))
 
     def disconnect_agent(self, websocket: WebSocket, agent_id: str):
         if agent_id in self.agent_connections:
@@ -46,12 +68,22 @@ class ConnectionManager:
                 logger.warning("ws.board_send_failed", error=str(exc))
 
     async def send_to_agent(self, agent_id: str, message: str):
-        if agent_id in self.agent_connections:
+        if agent_id in self.agent_connections and self.agent_connections[agent_id]:
             for connection in self.agent_connections[agent_id]:
                 try:
                     await connection.send_text(message)
                 except Exception as exc:
                     logger.warning("ws.agent_send_failed", agent_id=agent_id, error=str(exc))
+        else:
+            try:
+                redis = await get_redis()
+                queue_key = f"agent:events:{agent_id}"
+                await redis.rpush(queue_key, message)
+                await redis.ltrim(queue_key, 0, 49)
+                await redis.expire(queue_key, 3600)
+                logger.info("ws.agent_event_queued", agent_id=agent_id, queue_key=queue_key)
+            except Exception as exc:
+                logger.warning("ws.agent_event_queue_failed", agent_id=agent_id, error=str(exc))
 
 manager = ConnectionManager()
 
@@ -76,6 +108,7 @@ async def agent_ws(websocket: WebSocket, agent_id: str, token: str = Query(None)
 
     try:
         payload = verify_internal_token(token)
+        await _check_token_revocation(payload)
         if payload["sub"] != agent_id:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
@@ -98,42 +131,44 @@ async def redis_listener():
     """Background task to listen to Redis Pub/Sub and broadcast to WebSockets with retry."""
     retry_delay = 1.0
     max_delay = 60.0
-    
+
     while True:
         try:
             redis = await get_redis()
             pubsub = redis.pubsub()
             await pubsub.subscribe("isli:events")
-            
+
             logger.info("ws.redis_listener_started")
             retry_delay = 1.0  # Reset delay on success
-            
+
             async for message in pubsub.listen():
                 if message["type"] == "message":
                     data = message["data"]
                     if isinstance(data, bytes):
                         data = data.decode("utf-8")
-                    
+
                     # Always broadcast to the board
                     await manager.broadcast_to_board(data)
-                    
+
                     # Targeted delivery to agents
                     try:
                         event = json.loads(data)
                         payload = event.get("payload", {})
-                        
+
                         target_agent_id = None
                         if event.get("type") in ("task:created", "task:updated", "task:moved"):
                             task = payload.get("task", {})
                             target_agent_id = task.get("agent_id")
                         elif event.get("type") == "agent:heartbeat":
                             target_agent_id = payload.get("agent_id")
-                        
+                        elif event.get("type") == "session:message":
+                            target_agent_id = payload.get("agent_id")
+
                         if target_agent_id:
                             await manager.send_to_agent(target_agent_id, data)
                     except Exception as e:
                         logger.debug("ws.dispatch_failed", error=str(e))
-                        
+
         except asyncio.CancelledError:
             logger.info("ws.redis_listener_cancelled")
             break

@@ -11,7 +11,7 @@ ISLI is built as a **layered, event-driven multi-agent system**. The architectur
 ```
 ╔══════════════════════════════════════════════════════════════════╗
 ║  LAYER 5 — PRESENTATION                                         ║
-║  React Kanban UI  ·  Agent Chat Panels  ·  System Health View   ║
+║  React Kanban UI  ·  Workspace File Manager  ·  Agent Details   ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  LAYER 4 — CHANNEL GATEWAY                                      ║
 ║  Telegram Bot  ·  WhatsApp Business  ·  Web  ·  Email           ║
@@ -68,6 +68,14 @@ ISLI is built as a **layered, event-driven multi-agent system**. The architectur
 - Each channel is a thin adapter that forwards messages to a specific agent
 - Telegram adapter, WhatsApp adapter, etc.
 - See `07-channels.md`
+
+### Workspace Manager (`isli-workspace`)
+- **Runtime**: Python 3.12 + FastAPI
+- **Responsibilities**:
+  - Sandboxed file management for agents
+  - Quota enforcement per workspace (100MB default)
+  - Secure file read/write/list/delete operations
+- **Access**: Proxied via `isli-core` with path traversal validation.
 
 ---
 
@@ -142,6 +150,7 @@ This design ensures:
 isli/
 ├── isli-core/          ← FastAPI core service (port 8000)
 ├── isli-keeper/        ← Keeper sidecar (port 8001, local only)
+├── isli-workspace/     ← Workspace manager (port 8300, local only)
 ├── isli-board/         ← React frontend (port 5173)
 ├── isli-skills/        ← Skill microservices (ports 8100-8199)
 ├── isli-channels/      ← Channel adapters (port 8200+)

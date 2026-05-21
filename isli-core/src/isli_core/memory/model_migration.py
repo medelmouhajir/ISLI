@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from isli_core.models import EpisodicMemory
 from isli_core.memory.validation import MemoryValidator
 from isli_core.memory.dimension_guard import VectorDimensionGuard
-from isli_keeper.ollama_client import OllamaClient
 
 logger = structlog.get_logger()
 
@@ -20,8 +19,10 @@ class EmbeddingModelMigration:
         session: AsyncSession,
         old_model: str,
         new_model: str,
-        client: OllamaClient | None = None,
+        client: Any | None = None,
     ) -> dict[str, Any]:
+        from isli_keeper.ollama_client import OllamaClient
+
         logger.info("migration.start", old_model=old_model, new_model=new_model)
         new_dim = VectorDimensionGuard.get_dimension(new_model)
 

@@ -1,38 +1,26 @@
 import json
 from typing import Any
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
+from isli_core.auth import verify_webhook_signature
 from isli_core.db import get_db
-from isli_core.models import ChannelMessage, Task, UserConsent
+from isli_core.models import ChannelMessage, Task, Session, UserConsent
 from isli_core.schemas import validate_event
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/channels", tags=["channels"])
 
-WEBHOOK_SECRETS = {
-    "telegram": "telegram-secret",
-    "whatsapp": "whatsapp-secret",
-}
-
 
 class WebhookPayload(BaseModel):
     event_type: str
     data: dict[str, Any]
-
-
-def verify_webhook_signature(channel: str, request: Request, body: bytes) -> bool:
-    secret = WEBHOOK_SECRETS.get(channel)
-    if not secret:
-        return True
-    import hmac, hashlib
-    signature = request.headers.get("X-Webhook-Signature", "")
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature, expected)
 
 
 @router.post("/{channel}/webhook")
@@ -51,7 +39,7 @@ async def channel_webhook(channel: str, request: Request, db: AsyncSession = Dep
     if dedup_key:
         existing = await db.execute(
             select(ChannelMessage).where(
-                ChannelMessage.raw_payload.contains({"dedup_id": dedup_key})
+                ChannelMessage.raw_payload.cast(JSONB).contains({"dedup_id": dedup_key})
             )
         )
         if existing.scalar_one_or_none():
@@ -60,7 +48,8 @@ async def channel_webhook(channel: str, request: Request, db: AsyncSession = Dep
 
     # Consent gate
     user_id = payload.get("user_id")
-    if user_id:
+    if user_id is not None:
+        user_id = str(user_id)
         consent = await db.execute(
             select(UserConsent).where(
                 UserConsent.user_id == user_id,
@@ -72,30 +61,103 @@ async def channel_webhook(channel: str, request: Request, db: AsyncSession = Dep
             logger.warning("channels.consent_missing", channel=channel, user_id=user_id)
             raise HTTPException(status_code=403, detail="User consent not granted")
 
-    # Create a task from the webhook
-    task = Task(
-        title=f"{channel} message",
-        type="channel_message",
-        status="inbox",
-        created_by=user_id or "system",
-        input=payload.get("text", ""),
-        channel=channel,
-    )
-    db.add(task)
-    await db.commit()
-    await db.refresh(task)
+    agent_id = payload.get("agent_id")
 
-    # Store raw channel message
-    msg = ChannelMessage(
-        session_id=payload.get("session_id", "unknown"),
-        sequence_number=payload.get("sequence_number", 0),
-        channel=channel,
-        direction="inbound",
-        content=payload.get("text", ""),
-        raw_payload=payload,
-    )
-    db.add(msg)
-    await db.commit()
+    if agent_id:
+        # Session conversation path: direct 1:1 chat with the agent
+        session_id = payload.get("session_id") or f"sess_{channel}_{agent_id}_{user_id or 'unknown'}"
+        now = datetime.now(timezone.utc)
 
-    logger.info("channels.webhook_ingested", channel=channel, task_id=task.id)
-    return {"status": "ok", "task_id": task.id}
+        result = await db.execute(
+            select(Session).where(
+                Session.id == session_id,
+                Session.deleted_at.is_(None)
+            )
+        )
+        sess = result.scalar_one_or_none()
+
+        if not sess:
+            # Check for a soft-deleted session and revive it instead of creating a duplicate PK
+            soft_deleted_result = await db.execute(
+                select(Session).where(Session.id == session_id)
+            )
+            soft_deleted = soft_deleted_result.scalar_one_or_none()
+            if soft_deleted:
+                soft_deleted.deleted_at = None
+                soft_deleted.status = "pending_context"
+                soft_deleted.expires_at = now + timedelta(hours=24)
+                soft_deleted.last_activity_at = now
+                sess = soft_deleted
+                logger.info("channels.session_revived", session_id=session_id, agent_id=agent_id)
+            else:
+                sess = Session(
+                    id=session_id,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    channel=channel,
+                    messages=[],
+                    consent_given=True,
+                    consent_at=now,
+                    expires_at=now + timedelta(hours=24),
+                    status="pending_context",
+                )
+                db.add(sess)
+        else:
+            sess.status = "pending_context"
+            sess.expires_at = now + timedelta(hours=24)
+
+        # Append inbound message
+        msg_text = payload.get("text", "")
+        sess.messages = (sess.messages or []) + [
+            {"role": "user", "content": msg_text, "timestamp": now.isoformat()}
+        ]
+        sess.last_activity_at = now
+        sess.last_message_at = now
+        sess.token_count = len(str(sess.messages)) // 4
+
+        await db.commit()
+        await db.refresh(sess)
+
+        # Store raw channel message for audit
+        msg = ChannelMessage(
+            session_id=session_id,
+            sequence_number=len(sess.messages),
+            channel=channel,
+            direction="inbound",
+            content=msg_text,
+            raw_payload=payload,
+        )
+        db.add(msg)
+        await db.commit()
+
+        logger.info("channels.session_ingested", channel=channel, session_id=sess.id, agent_id=agent_id)
+        return {"status": "ok", "session_id": sess.id}
+    else:
+        # Fallback: create a Kanban Task (agent-to-agent or unassigned message)
+        task = Task(
+            title=f"{channel} message",
+            type="channel_message",
+            status="inbox",
+            created_by=user_id or "system",
+            input=payload.get("text", ""),
+            channel=channel,
+            session_id=payload.get("session_id"),
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+        # Store raw channel message
+        msg = ChannelMessage(
+            session_id=payload.get("session_id", "unknown"),
+            sequence_number=payload.get("sequence_number", 0),
+            channel=channel,
+            direction="inbound",
+            content=payload.get("text", ""),
+            raw_payload=payload,
+        )
+        db.add(msg)
+        await db.commit()
+
+        logger.info("channels.webhook_ingested", channel=channel, task_id=task.id)
+        return {"status": "ok", "task_id": task.id}

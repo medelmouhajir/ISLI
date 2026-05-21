@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import os
+import asyncio
 from pathlib import Path
 
 from isli_core.db import get_db
@@ -16,6 +17,7 @@ from isli_core.auth import create_internal_token, require_admin_auth, require_in
 from isli_core.audit_writer import AuditWriter
 from isli_core.config import get_settings
 from isli_core.event_manager import EventManager
+from isli_core.redis_client import get_redis
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -24,6 +26,7 @@ class AgentCreate(BaseModel):
     id: str | None = None
     name: str
     description: str | None = None
+    persona: str | None = None
     model_provider: str | None = None
     model_id: str | None = None
     channels: list[str] = Field(default_factory=list)
@@ -35,10 +38,21 @@ class AgentCreate(BaseModel):
     fallback_agent_id: str | None = None
     max_retries: int = 3
 
+    @field_validator("model_provider")
+    @classmethod
+    def _validate_provider(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        allowed = {"ollama", "anthropic", "openai", "kimi", "deepseek", "google", "azure"}
+        if v.lower() not in allowed:
+            raise ValueError(f"model_provider must be one of {allowed}, got '{v}'")
+        return v.lower()
+
 
 class AgentUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    persona: str | None = None
     status: str | None = None
     model_provider: str | None = None
     model_id: str | None = None
@@ -51,16 +65,28 @@ class AgentUpdate(BaseModel):
     fallback_agent_id: str | None = None
     max_retries: int | None = None
 
+    @field_validator("model_provider")
+    @classmethod
+    def _validate_provider(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        allowed = {"ollama", "anthropic", "openai", "kimi", "deepseek", "google", "azure"}
+        if v.lower() not in allowed:
+            raise ValueError(f"model_provider must be one of {allowed}, got '{v}'")
+        return v.lower()
+
 
 class AgentOut(BaseModel):
     id: str
     name: str
     description: str | None
+    persona: str | None
     status: str
     model_provider: str | None
     model_id: str | None
     channels: list[str]
     skills: list[str]
+    config: dict[str, Any]
     token_budget: int | None
     token_used: int
     user_id: str | None
@@ -102,6 +128,7 @@ async def create_agent(
         id=agent_id,
         name=payload.name,
         description=payload.description,
+        persona=payload.persona,
         model_provider=payload.model_provider,
         model_id=payload.model_id,
         channels=payload.channels,
@@ -114,6 +141,7 @@ async def create_agent(
         max_retries=payload.max_retries,
     )
     db.add(agent)
+    agent.token_issued_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(agent)
 
@@ -129,8 +157,8 @@ async def create_agent(
     )
     await db.commit()
     
-    out = AgentRegistrationOut.model_validate(agent)
-    out.token = token
+    base = AgentOut.model_validate(agent)
+    out = AgentRegistrationOut(**base.model_dump(), token=token)
     return out
 
 
@@ -144,7 +172,12 @@ async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/{agent_id}", response_model=AgentOut)
-async def update_agent(agent_id: str, payload: AgentUpdate, db: AsyncSession = Depends(get_db)):
+async def update_agent(
+    agent_id: str,
+    payload: AgentUpdate,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
     agent = result.scalar_one_or_none()
     if not agent:
@@ -166,7 +199,11 @@ async def update_agent(agent_id: str, payload: AgentUpdate, db: AsyncSession = D
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_agent(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
     agent = result.scalar_one_or_none()
     if not agent:
@@ -196,9 +233,27 @@ async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
     return
 
 
+@router.post("/{agent_id}/token", response_model=dict)
+async def issue_agent_token(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
+    """Issue a fresh agent-scoped JWT, invalidating any previous token."""
+    result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    agent.token_issued_at = datetime.now(timezone.utc)
+    token = create_internal_token(agent_id, scopes=["agent"], expires_minutes=525600)
+    await db.commit()
+    return {"token": token, "agent_id": agent_id}
+
+
 @router.post("/{agent_id}/heartbeat", response_model=dict)
 async def agent_heartbeat(
-    agent_id: str, 
+    agent_id: str,
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_internal_auth)
 ):
@@ -211,7 +266,7 @@ async def agent_heartbeat(
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
+
     old_status = agent.status
     agent.heartbeat_at = datetime.now(timezone.utc)
     agent.status = "online" if agent.status in ("registered", "offline", "paused") else agent.status
@@ -229,8 +284,10 @@ async def agent_heartbeat(
     for sess in session_result.scalars().all():
         sess.last_activity_at = datetime.now(timezone.utc)
 
+    now = datetime.now(timezone.utc)
+    agent.token_issued_at = now
     await db.commit()
-    token = create_internal_token(agent_id, scopes=["agent"], expires_minutes=60)
+    token = create_internal_token(agent_id, scopes=["agent"], expires_minutes=525600, iat=now)
     latency_ms = (time.perf_counter() - start) * 1000
     from isli_core.telemetry import get_heartbeat_latency_histogram
     get_heartbeat_latency_histogram().record(latency_ms)
@@ -240,13 +297,13 @@ async def agent_heartbeat(
         payload={"latency_ms": round(latency_ms, 2)},
     )
     await db.commit()
-    
+
     await EventManager.emit("agent:heartbeat", {
         "agent_id": agent_id,
         "status": agent.status,
         "heartbeat_at": agent.heartbeat_at.isoformat() if agent.heartbeat_at else None
     })
-    
+
     return {"status": "ok", "agent_id": agent_id, "token": token}
 
 
@@ -260,12 +317,43 @@ async def get_agent_context(
     """Proxy context injection from Keeper through Core API."""
     from isli_core.memory.keeper_client import KeeperClient
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
-    if not result.scalar_one_or_none():
+    agent = result.scalar_one_or_none()
+    if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
         
+    threshold = (agent.config or {}).get("memory_similarity_threshold", 0.4)
     context_summary = await KeeperClient.get_context_injection(
         agent_id=agent_id,
         task_description=task_description,
-        session_id=session_id
+        session_id=session_id,
+        agent_name=agent.name,
+        agent_description=agent.description,
+        agent_persona=agent.persona,
+        memory_similarity_threshold=threshold,
     )
     return {"context_summary": context_summary}
+
+
+@router.websocket("/{agent_id}/logs/stream")
+async def stream_agent_logs(websocket: WebSocket, agent_id: str):
+    await websocket.accept()
+    
+    redis = await get_redis()
+    pubsub = redis.pubsub()
+    channel = f"agent:{agent_id}:logs"
+    
+    try:
+        await pubsub.subscribe(channel)
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                await websocket.send_text(message["data"])
+            
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        # Log error or send to client? For now just close
+        print(f"Error streaming logs for {agent_id}: {e}")
+    finally:
+        await pubsub.unsubscribe(channel)
+        await pubsub.close()

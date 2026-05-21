@@ -30,13 +30,11 @@ class SessionCronJob:
                 return
             async with async_session() as session:
                 expired = await SessionLifecycleManager.expire_sessions(session)
-                compacted = await SessionLifecycleManager.compact_sessions(session)
                 idle_closed = await SessionLifecycleManager.detect_idle(session)
                 await session.commit()
                 logger.info(
                     "session_cron.completed",
                     expired=expired,
-                    compacted=compacted,
                     idle_closed=idle_closed,
                 )
         except Exception as exc:

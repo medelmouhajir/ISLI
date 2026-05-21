@@ -12,7 +12,6 @@ from isli_core.models import Session, Task
 logger = structlog.get_logger()
 
 DEFAULT_IDLE_TIMEOUT_MINUTES = 30
-DEFAULT_COMPACTION_TURNS = 20
 
 
 class SessionLifecycleManager:
@@ -41,7 +40,6 @@ class SessionLifecycleManager:
         count = 0
         for sess in expired:
             sess.deleted_at = now
-            sess.messages = []
             count += 1
         if count > 0:
             await session.flush()
@@ -52,30 +50,16 @@ class SessionLifecycleManager:
     async def compact_sessions(
         session: AsyncSession,
         token_threshold: int = 4096,
-        turn_threshold: int = DEFAULT_COMPACTION_TURNS,
+        turn_threshold: int = 20,
     ) -> int:
-        """Summarize and truncate old messages in large sessions."""
-        result = await session.execute(
-            select(Session).where(
-                Session.token_count > token_threshold,
-                Session.compacted_at.is_(None),
-                Session.deleted_at.is_(None),
-            )
-        )
-        candidates = list(result.scalars().all())
-        count = 0
-        for sess in candidates:
-            messages = sess.messages or []
-            if len(messages) > turn_threshold:
-                # Keep the last turn_threshold messages; drop the rest
-                sess.messages = messages[-turn_threshold:]
-                sess.token_count = sum(len(str(m)) for m in sess.messages)
-                sess.compacted_at = datetime.now(timezone.utc)
-                count += 1
-        if count > 0:
-            await session.flush()
-            logger.info("session.compacted", count=count)
-        return count
+        """Summarize and truncate old messages in large sessions.
+
+        NOTE: This is deprecated. JournalWorker already truncates raw
+        messages to last 10, making this compaction redundant. Kept for
+        API compatibility but returns 0 immediately.
+        """
+        logger.debug("session.compaction_skipped", reason="deprecated_by_journal_worker")
+        return 0
 
     @staticmethod
     async def detect_idle(
@@ -96,6 +80,7 @@ class SessionLifecycleManager:
             select(Session).where(
                 Session.last_activity_at < cutoff,
                 Session.deleted_at.is_(None),
+                Session.status != "closed",
                 ~active_task_exists
             )
         )
@@ -103,7 +88,6 @@ class SessionLifecycleManager:
         count = 0
         for sess in idle:
             sess.deleted_at = datetime.now(timezone.utc)
-            sess.messages = []
             count += 1
         if count > 0:
             await session.flush()

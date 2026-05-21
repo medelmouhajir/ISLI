@@ -9,11 +9,11 @@ from fastapi import FastAPI, APIRouter, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .db import init_db, close_db, engine
+from .db import init_db, close_db
 from .redis_client import get_redis
 from .startup_validation import validate_startup_secrets
 from .telemetry import instrument_fastapi, get_trace_id
-from .routers import agents, tasks, skills, channels, system, transparency, security, ws, memory
+from .routers import agents, tasks, skills, channels, system, transparency, security, ws, memory, sessions, commands, workspaces
 
 SERVICE_NAME = "isli-core"
 
@@ -74,16 +74,24 @@ async def lifespan(app: FastAPI):
 
     # Start background workers
     from isli_core.jobs.session_cron import SessionCronJob
+    from isli_core.jobs.scheduler_worker import SchedulerWorker
     from isli_core.jobs.checkpoint_recovery import CheckpointRecoveryWorker
     from isli_core.jobs.context_injector import ContextInjectorWorker
     from isli_core.jobs.journal_worker import JournalWorker
+    from isli_core.jobs.session_context_injector import SessionContextInjectorWorker
+    from isli_core.jobs.memory_worker import MemoryWorker
+    from isli_core.jobs.outbox_worker import OutboxWorker
     from isli_core.routers.ws import redis_listener
     from isli_core.jobs.heartbeat_validator import heartbeat_validator_worker
 
     cron_task = asyncio.create_task(SessionCronJob.loop())
+    scheduler_task = asyncio.create_task(SchedulerWorker.loop())
     recovery_task = asyncio.create_task(_recovery_loop())
     context_task = asyncio.create_task(ContextInjectorWorker.loop())
+    session_ctx_task = asyncio.create_task(SessionContextInjectorWorker.loop())
     journal_task = asyncio.create_task(JournalWorker.loop())
+    memory_task = asyncio.create_task(MemoryWorker.loop())
+    outbox_task = asyncio.create_task(OutboxWorker.loop())
     ws_task = asyncio.create_task(redis_listener())
     heartbeat_task = asyncio.create_task(heartbeat_validator_worker())
 
@@ -91,9 +99,13 @@ async def lifespan(app: FastAPI):
 
     logger.info("core.shutdown.drain", service=SERVICE_NAME)
     cron_task.cancel()
+    scheduler_task.cancel()
     recovery_task.cancel()
     context_task.cancel()
+    session_ctx_task.cancel()
     journal_task.cancel()
+    memory_task.cancel()
+    outbox_task.cancel()
     ws_task.cancel()
     heartbeat_task.cancel()
     try:
@@ -102,6 +114,10 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await recovery_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await session_ctx_task
     except asyncio.CancelledError:
         pass
 
@@ -137,8 +153,11 @@ v1 = APIRouter(prefix="/v1")
 v1.include_router(agents.router)
 v1.include_router(tasks.router)
 v1.include_router(skills.router)
+v1.include_router(workspaces.router)
 v1.include_router(memory.router)
 v1.include_router(channels.router)
+v1.include_router(sessions.router)
+v1.include_router(commands.router)
 v1.include_router(system.router)
 v1.include_router(transparency.router)
 v1.include_router(security.router)
@@ -169,6 +188,7 @@ async def ready_v1():
     redis_ok = False
     try:
         from sqlalchemy import text
+        from .db import engine
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
             db_ok = True
@@ -233,6 +253,7 @@ async def ready():
     redis_ok = False
     try:
         from sqlalchemy import text
+        from .db import engine
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
             db_ok = True

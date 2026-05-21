@@ -50,8 +50,9 @@ async def lifespan(app: FastAPI):
     # Initialize Adapters
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
     core_url = os.getenv("CORE_API_URL", "http://localhost:8000")
+    webhook_secret = os.getenv("WEBHOOK_SECRET", "")
     if tg_token:
-        tg_adapter = TelegramAdapter(tg_token, core_url)
+        tg_adapter = TelegramAdapter(tg_token, core_url, webhook_secret, redis_client=redis_client)
         await tg_adapter.start()
         adapters["telegram"] = tg_adapter
         
@@ -157,6 +158,7 @@ class SendMessageRequest(BaseModel):
     channel: str
     channel_user_id: str
     text: str
+    agent_id: str | None = None
     metadata: dict[str, Any] = {}
 
 
@@ -165,6 +167,6 @@ async def send_message(req: SendMessageRequest):
     adapter = adapters.get(req.channel)
     if not adapter:
         raise HTTPException(status_code=400, detail=f"No adapter for channel: {req.channel}")
-    
-    success = await adapter.send_message(req.channel_user_id, req.text)
+
+    success = await adapter.send_message(req.channel_user_id, req.text, agent_id=req.agent_id)
     return {"success": success}

@@ -21,6 +21,7 @@ class Agent(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    persona: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="registered", nullable=False)
     status_reason: Mapped[str | None] = mapped_column(Text)
     model_provider: Mapped[str | None] = mapped_column(String(64))
@@ -36,6 +37,7 @@ class Agent(Base):
     fallback_agent_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agents.id"), nullable=True)
     max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    token_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False
     )
@@ -92,7 +94,10 @@ class Task(Base):
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     trace_id: Mapped[str | None] = mapped_column(String(64))
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    context_inject_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    context_inject_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
@@ -183,23 +188,31 @@ class Session(Base):
     user_id: Mapped[str | None] = mapped_column(String(64))
     channel: Mapped[str | None] = mapped_column(String(32))
     messages: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    archived_messages: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     token_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     consent_given: Mapped[bool] = mapped_column(default=False, nullable=False)
     consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(32), default="ready", nullable=False)
+    context_summary: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     compacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     journal: Mapped[str | None] = mapped_column(Text)
     journal_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_memory_extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    context_inject_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    context_inject_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index("ix_sessions_agent_id", "agent_id"),
         Index("ix_sessions_expires_at", "expires_at"),
         Index("ix_sessions_last_activity_at", "last_activity_at"),
+        Index("ix_sessions_last_message_at", "last_message_at"),
     )
 
 

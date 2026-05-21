@@ -1,15 +1,18 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from isli_core.db import get_db
-from isli_core.models import Agent, CostLedger, Task, UserConsent, AuditLog, UserBudget, OrgBudget
-from isli_core.budget import BudgetEngine, BudgetAlerter
+from isli_core.auth import create_internal_token, require_admin_auth
+from isli_core.budget import BudgetEngine
 from isli_core.compliance.audit_integrity import AuditIntegrity
+from isli_core.config import get_settings
+from isli_core.db import get_db
+from isli_core.models import Agent, AuditLog, CostLedger, OrgBudget, Task, UserBudget, UserConsent
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -24,10 +27,10 @@ class CostDashboardOut(BaseModel):
 
 @router.get("/cost/dashboard", response_model=CostDashboardOut)
 async def cost_dashboard(db: AsyncSession = Depends(get_db)):
-    agents_result = await db.execute(select(func.count()).select_from(Agent))
+    agents_result = await db.execute(select(func.count()).select_from(Agent).where(Agent.deleted_at.is_(None)))
     total_agents = agents_result.scalar() or 0
 
-    tasks_result = await db.execute(select(func.count()).select_from(Task))
+    tasks_result = await db.execute(select(func.count()).select_from(Task).where(Task.deleted_at.is_(None)))
     total_tasks = tasks_result.scalar() or 0
 
     cost_result = await db.execute(select(func.sum(CostLedger.cost_usd)))
@@ -88,13 +91,17 @@ class ConsentCreate(BaseModel):
 
 
 @router.post("/compliance/consents", response_model=ConsentOut, status_code=201)
-async def create_consent(payload: ConsentCreate, db: AsyncSession = Depends(get_db)):
+async def create_consent(
+    payload: ConsentCreate,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     consent = UserConsent(
         user_id=payload.user_id,
         channel=payload.channel,
         purpose=payload.purpose,
         granted=payload.granted,
-        granted_at=datetime.now(timezone.utc) if payload.granted else None,
+        granted_at=datetime.now(UTC) if payload.granted else None,
     )
     db.add(consent)
     await db.commit()
@@ -167,7 +174,11 @@ class BudgetStatusOut(BaseModel):
 
 
 @router.post("/budgets/user", response_model=BudgetOut, status_code=201)
-async def create_user_budget(payload: BudgetCreate, db: AsyncSession = Depends(get_db)):
+async def create_user_budget(
+    payload: BudgetCreate,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     if not payload.user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
     existing = await db.execute(select(UserBudget).where(UserBudget.user_id == payload.user_id))
@@ -187,7 +198,11 @@ async def create_user_budget(payload: BudgetCreate, db: AsyncSession = Depends(g
 
 
 @router.post("/budgets/org", response_model=BudgetOut, status_code=201)
-async def create_org_budget(payload: BudgetCreate, db: AsyncSession = Depends(get_db)):
+async def create_org_budget(
+    payload: BudgetCreate,
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     if not payload.org_id:
         raise HTTPException(status_code=400, detail="org_id is required")
     existing = await db.execute(select(OrgBudget).where(OrgBudget.org_id == payload.org_id))
@@ -260,3 +275,18 @@ async def get_budget(scope: str, scope_id: str, db: AsyncSession = Depends(get_d
         alert_threshold_pct=status["alert_threshold_pct"],
         slack_webhook_url=status["slack_webhook_url"],
     )
+
+
+@router.get("/keeper/dashboard")
+async def keeper_dashboard():
+    settings = get_settings()
+    url = f"{settings.keeper_url}/dashboard"
+    try:
+        token = create_internal_token("core-api", scopes=["keeper:dashboard"], expires_minutes=1)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers={"X-Internal-Auth": token})
+            resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Keeper unavailable: {exc}")
+

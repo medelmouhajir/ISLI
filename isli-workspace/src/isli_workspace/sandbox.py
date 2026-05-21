@@ -1,4 +1,5 @@
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,8 +15,13 @@ def _workspace_root(agent_id: str, base_path: str) -> Path:
 def _ensure_within_workspace(agent_id: str, base_path: str, target: Path) -> None:
     root = _workspace_root(agent_id, base_path).resolve()
     resolved = target.resolve()
-    if not str(resolved).startswith(str(root)):
-        raise PermissionError(f"Path traversal blocked: {resolved}")
+    try:
+        if not resolved.is_relative_to(root):
+            raise PermissionError(f"Path traversal blocked: {resolved}")
+    except AttributeError:
+        # Fallback for Python < 3.9
+        if not str(resolved).startswith(str(root)):
+            raise PermissionError(f"Path traversal blocked: {resolved}")
 
 
 def _get_workspace_size(agent_id: str, base_path: str) -> int:
@@ -32,7 +38,10 @@ def _get_workspace_size(agent_id: str, base_path: str) -> int:
 
 def resolve_path(agent_id: str, base_path: str, relative_path: str) -> Path:
     root = _workspace_root(agent_id, base_path)
-    target = (root / relative_path).resolve()
+    # Ensure the root exists before resolving against it, otherwise resolve() 
+    # might behave differently for non-existent paths on some systems
+    root.mkdir(parents=True, exist_ok=True, mode=0o777)
+    target = (root / (relative_path or ".")).resolve()
     _ensure_within_workspace(agent_id, base_path, target)
     return target
 
@@ -73,13 +82,39 @@ def write_file(agent_id: str, base_path: str, relative_path: str, content: str) 
         raise ValueError(f"Content exceeds max file size: {size} bytes")
     if not check_quota(agent_id, base_path, size):
         raise ValueError("Workspace quota exceeded")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o777)
     path.write_text(content, encoding="utf-8")
     stat = path.stat()
     return {
         "status": "written",
         "size_bytes": stat.st_size,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+    }
+
+
+def write_file_bytes(agent_id: str, base_path: str, relative_path: str, content: bytes) -> dict[str, Any]:
+    path = resolve_path(agent_id, base_path, relative_path)
+    size = len(content)
+    if size > MAX_FILE_SIZE_BYTES:
+        raise ValueError(f"Content exceeds max file size: {size} bytes")
+    if not check_quota(agent_id, base_path, size):
+        raise ValueError("Workspace quota exceeded")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o777)
+    path.write_bytes(content)
+    stat = path.stat()
+    return {
+        "status": "written",
+        "size_bytes": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+    }
+
+
+def create_dir(agent_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
+    path = resolve_path(agent_id, base_path, relative_path)
+    path.mkdir(parents=True, exist_ok=True, mode=0o777)
+    return {
+        "status": "created",
+        "path": relative_path,
     }
 
 
@@ -105,8 +140,12 @@ def delete_file(agent_id: str, base_path: str, relative_path: str) -> dict[str, 
     path = resolve_path(agent_id, base_path, relative_path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {relative_path}")
+    
     if path.is_dir():
-        raise IsADirectoryError(f"Cannot delete directory via file delete: {relative_path}")
-    size = path.stat().st_size
-    path.unlink()
-    return {"status": "deleted", "size_bytes": size}
+        shutil.rmtree(path)
+        return {"status": "deleted", "path": relative_path, "type": "directory"}
+    else:
+        size = path.stat().st_size
+        path.unlink()
+        return {"status": "deleted", "path": relative_path, "size_bytes": size, "type": "file"}
+

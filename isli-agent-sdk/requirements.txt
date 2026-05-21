@@ -4,3 +4,4 @@ pydantic
 structlog
 litellm
 python-dotenv
+redis

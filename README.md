@@ -7,7 +7,7 @@ Intelligent System for Local Intelligence — a modular multi-agent digital assi
 | Directory | Service | Port | Description |
 |-----------|---------|------|-------------|
 | `isli-core/` | Core API | 8000 | FastAPI — agent lifecycle, task bus, skill proxy, cost control |
-| `isli-keeper/` | Keeper | 8001 | Local Ollama sidecar for memory & context; cloud fallback |
+| `isli-keeper/` | Keeper | 8001 | Local Ollama sidecar (qwen2.5-coder:1.5b) for memory & context |
 | `isli-board/` | Kanban UI | 5173 | React + Vite real-time task board |
 | `isli-skills/` | Skills Registry | 8100+ | Stateless HTTP skill microservices |
 | `isli-channels/` | Channel Gateway | 8200+ | Telegram, WhatsApp, Web, Email adapters |
@@ -61,3 +61,4 @@ All 7 implementation phases are complete:
 - Phase 5 — Cost Optimization & Model Tiering
 - Phase 6 — Compliance & Audit Hardening
 - Phase 7 — Scale-Out & Production Topology
+- Phase 8 — Advanced Local Research (SearXNG Web Search)

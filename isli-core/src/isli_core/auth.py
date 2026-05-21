@@ -1,6 +1,9 @@
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+import hashlib
+import hmac
+
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
@@ -10,10 +13,19 @@ from isli_core.config import get_settings
 security = HTTPBearer()
 security_admin = HTTPBearer()
 
-
-def create_internal_token(agent_id: str, scopes: list[str], expires_minutes: int = 60) -> str:
+def verify_webhook_signature(channel: str, request: Request, body: bytes) -> bool:
     settings = get_settings()
-    now = datetime.now(timezone.utc)
+    secret = settings.webhook_secrets.get(channel)
+    if not secret:
+        return True
+    signature = request.headers.get("X-Webhook-Signature", "")
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def create_internal_token(agent_id: str, scopes: list[str], expires_minutes: int = 60, iat: datetime | None = None) -> str:
+    settings = get_settings()
+    now = iat if iat is not None else datetime.now(timezone.utc)
     payload = {
         "sub": agent_id,
         "scopes": scopes,
@@ -38,10 +50,47 @@ def verify_internal_token(token: str) -> dict[str, Any]:
         ) from exc
 
 
+async def _check_token_revocation(payload: dict[str, Any]) -> None:
+    """Reject the token if it was issued before the agent's current token_issued_at."""
+    agent_id = payload.get("sub")
+    iat = payload.get("iat")
+    if not agent_id or iat is None:
+        return
+
+    from sqlalchemy import select
+    from isli_core.models import Agent
+    from isli_core.db import async_session
+
+    if async_session is None:
+        return  # DB not initialized; skip revocation check
+
+    async with async_session() as db:
+        result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
+        agent = result.scalar_one_or_none()
+        if not agent:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Agent not found or deleted",
+            )
+        
+        if agent.token_issued_at:
+            from datetime import datetime, timezone
+            # python-jose encodes iat as integer seconds; truncate DB timestamp to match
+            token_iat = int(iat) if isinstance(iat, (int, float)) else int(datetime.fromisoformat(str(iat)).timestamp())
+            issued_at_ts = int(agent.token_issued_at.replace(tzinfo=timezone.utc).timestamp())
+            if token_iat < issued_at_ts:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked",
+                )
+
+
 async def require_internal_auth(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict[str, Any]:
-    return verify_internal_token(credentials.credentials)
+    payload = verify_internal_token(credentials.credentials)
+    await _check_token_revocation(payload)
+    return payload
 
 
 async def require_admin_auth(

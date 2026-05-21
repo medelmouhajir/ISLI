@@ -17,7 +17,9 @@ class TestWorkspaceAPI:
 
     @pytest.fixture
     def client(self):
-        return TestClient(app)
+        client = TestClient(app)
+        client.headers.update({"X-Internal-Auth": "test-token"})
+        return client
 
     def test_write_and_read(self, client: TestClient):
         resp = client.post("/write", json={"agent_id": "agent-a", "path": "notes.txt", "content": "hello world"})

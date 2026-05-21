@@ -42,23 +42,24 @@ async def get_recent_memories(agent_id: str, limit: int = 5) -> list[str]:
         )
         return [r["summary"] for r in rows]
 
-async def get_relevant_memories(agent_id: str, query_embedding: list[float], limit: int = 5) -> list[str]:
+async def get_relevant_memories(agent_id: str, query_embedding: list[float], limit: int = 5, threshold: float = 0.4) -> list[str]:
     global _pool
     if not _pool:
         return []
-    
+
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT summary FROM episodic_memories WHERE agent_id = $1 AND deleted_at IS NULL ORDER BY embedding <=> $2 LIMIT $3",
-            agent_id, query_embedding, limit
+            "SELECT summary FROM episodic_memories WHERE agent_id = $1 AND deleted_at IS NULL AND embedding <=> $2 < $4 ORDER BY embedding <=> $2 LIMIT $3",
+            agent_id, query_embedding, limit, threshold
         )
         return [r["summary"] for r in rows]
+import json
 
 async def get_session_data(session_id: str) -> dict[str, Any]:
     global _pool
     if not _pool:
         return {}
-    
+
     async with _pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT messages, journal, journal_updated_at FROM sessions WHERE id = $1 AND deleted_at IS NULL",
@@ -66,8 +67,17 @@ async def get_session_data(session_id: str) -> dict[str, Any]:
         )
         if not row:
             return {}
-        
-        return dict(row)
+
+        data = dict(row)
+        # asyncpg may return JSON columns as strings; parse them
+        for key in ("messages", "journal"):
+            val = data.get(key)
+            if isinstance(val, str):
+                try:
+                    data[key] = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    data[key] = [] if key == "messages" else ""
+        return data
 
 async def get_session_messages(session_id: str, limit: int = 5) -> list[dict[str, Any]]:
     data = await get_session_data(session_id)

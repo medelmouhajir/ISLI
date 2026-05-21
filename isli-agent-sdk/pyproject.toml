@@ -15,9 +15,16 @@ dependencies = [
     "pydantic",
     "structlog",
     "litellm",
-    "python-dotenv"
+    "python-dotenv",
+    "redis"
 ]
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "respx"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

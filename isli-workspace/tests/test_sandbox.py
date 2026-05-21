@@ -70,10 +70,12 @@ class TestSandboxSecurity:
         result = read_file("agent-1", temp_workspace, "bin.dat")
         assert result["encoding"] == "binary"
 
-    def test_delete_directory_not_allowed(self, temp_workspace):
+    def test_delete_directory_allowed(self, temp_workspace):
         os.makedirs(os.path.join(temp_workspace, "agent-1", "mydir"), exist_ok=True)
-        with pytest.raises((IsADirectoryError, OSError)):
-            delete_file("agent-1", temp_workspace, "mydir")
+        result = delete_file("agent-1", temp_workspace, "mydir")
+        assert result["status"] == "deleted"
+        assert result["type"] == "directory"
+        assert not os.path.exists(os.path.join(temp_workspace, "agent-1", "mydir"))
 
     def test_list_directory_not_a_directory(self, temp_workspace):
         write_file("agent-1", temp_workspace, "plain.txt", "hi")

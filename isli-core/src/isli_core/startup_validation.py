@@ -48,15 +48,4 @@ def validate_startup_secrets() -> None:
     if enc_key and len(enc_key.encode()) < 32:
         raise RuntimeError("PII_ENCRYPTION_KEY must be at least 32 bytes of entropy.")
 
-    fallback_model = os.getenv("KEEPER_FALLBACK_MODEL", "")
-    if fallback_model and fallback_model.startswith(("anthropic", "openai")):
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        openai_key = os.getenv("OPENAI_API_KEY", "")
-        if not anthropic_key and not openai_key:
-            logger.warning(
-                "startup.no_cloud_api_key",
-                fallback_model=fallback_model,
-                message="Cloud fallback is configured but no ANTHROPIC_API_KEY or OPENAI_API_KEY is set.",
-            )
-
     logger.info("startup.validation_passed", production=is_prod)

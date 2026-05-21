@@ -9,7 +9,7 @@ class Settings(BaseSettings):
 
     ollama_host: str = ""
     ollama_embed_model: str = "nomic-embed-text"
-    ollama_gen_model: str = "qwen2.5:7b"
+    ollama_gen_model: str = "qwen2.5-coder:1.5b"
     keeper_fallback_model: str = ""
     keeper_identity: str = "isli-keeper"
     ollama_api_key: str = ""
@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     otel_service_name: str = "isli-keeper"
+    otel_exporter_otlp_endpoint: str = "http://localhost:4317"
     jwt_secret: str = ""
 
 

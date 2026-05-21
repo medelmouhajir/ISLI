@@ -10,3 +10,4 @@ opentelemetry-instrumentation-fastapi==0.53b1
 opentelemetry-exporter-otlp==1.32.1
 python-telegram-bot==22.0
 twilio==9.5.2
+redis==5.2.1

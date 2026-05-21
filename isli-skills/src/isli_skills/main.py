@@ -7,7 +7,8 @@ import structlog
 
 from .telemetry import instrument_fastapi, get_trace_id
 from .config import get_settings
-from .auth import require_internal_auth
+from .auth import require_internal_auth, create_internal_token
+from .playwright_service import browse_url
 
 
 SERVICE_NAME = "isli-skills"
@@ -30,6 +31,31 @@ class RegisterSkill(BaseModel):
 class InvokeSkill(BaseModel):
     action: str
     payload: dict[str, Any]
+
+
+class BrowseRequest(BaseModel):
+    url: str
+    wait_for_selector: str | None = None
+    screenshot: bool = False
+
+
+class SearchRequest(BaseModel):
+    query: str
+    max_results: int = 5
+
+
+class SummarizeRequest(BaseModel):
+    text: str
+    max_length: int = 256
+
+
+class EmbedRequest(BaseModel):
+    input: str
+    model: str | None = None
+
+
+KEEPER_URL = os.getenv("KEEPER_URL", "http://localhost:8001")
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search")
 
 
 @asynccontextmanager
@@ -97,6 +123,91 @@ async def browse(request: BrowseRequest, _auth: dict = Depends(require_internal_
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
     return result
+
+
+@app.post("/search")
+async def search(request: SearchRequest, _auth: dict = Depends(require_internal_auth)):
+    """Web search endpoint via SearXNG."""
+    logger.info("skills.search", query=request.query, max_results=request.max_results)
+    
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            params = {
+                "q": request.query,
+                "format": "json",
+                "safesearch": 1
+            }
+            resp = await client.get(SEARXNG_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            results = []
+            for res in data.get("results", [])[:request.max_results]:
+                results.append({
+                    "title": res.get("title"),
+                    "url": res.get("url"),
+                    "snippet": res.get("content") or res.get("snippet")
+                })
+            
+            return {"success": True, "query": request.query, "results": results}
+            
+    except Exception as exc:
+        logger.error("skills.search_failed", query=request.query, error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Web search failed: {exc}")
+
+
+@app.post("/summarize")
+async def summarize(request: SummarizeRequest, _auth: dict = Depends(require_internal_auth)):
+    """Summarize text via Keeper. Falls back to raw text if Keeper is unreachable."""
+    logger.info("skills.summarize", text_len=len(request.text), max_length=request.max_length)
+    token = create_internal_token("isli-skills", scopes=["skill:invoke"], expires_minutes=5)
+    headers = {"X-Internal-Auth": token, "Content-Type": "application/json"}
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{KEEPER_URL}/summarize",
+                headers=headers,
+                json={"text": request.text, "max_length": request.max_length},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {"summary": data.get("summary", ""), "model": data.get("model", "")}
+    except httpx.RequestError as exc:
+        logger.warning("skills.summarize_keeper_unreachable", error=str(exc))
+        return {"summary": request.text, "model": "fallback", "note": "Keeper unreachable; returning raw text"}
+    except httpx.HTTPStatusError as exc:
+        logger.error("skills.summarize_keeper_error", status=exc.response.status_code, error=str(exc))
+        return {"summary": request.text, "model": "fallback", "note": "Keeper error; returning raw text"}
+
+
+@app.post("/embed")
+async def embed(request: EmbedRequest, _auth: dict = Depends(require_internal_auth)):
+    """Generate text embeddings via Keeper. Falls back to empty embedding if Keeper is unreachable."""
+    logger.info("skills.embed", input_len=len(request.input))
+    token = create_internal_token("isli-skills", scopes=["skill:invoke"], expires_minutes=5)
+    headers = {"X-Internal-Auth": token, "Content-Type": "application/json"}
+    try:
+        import httpx
+        payload: dict[str, Any] = {"input": request.input}
+        if request.model:
+            payload["model"] = request.model
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{KEEPER_URL}/embed",
+                headers=headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {"embedding": data.get("embedding", []), "model": data.get("model", "")}
+    except httpx.RequestError as exc:
+        logger.warning("skills.embed_keeper_unreachable", error=str(exc))
+        return {"embedding": [], "model": "fallback", "note": "Keeper unreachable; returning empty embedding"}
+    except httpx.HTTPStatusError as exc:
+        logger.error("skills.embed_keeper_error", status=exc.response.status_code, error=str(exc))
+        return {"embedding": [], "model": "fallback", "note": "Keeper error; returning empty embedding"}
 
 
 @app.post("/skills/{name}/invoke")

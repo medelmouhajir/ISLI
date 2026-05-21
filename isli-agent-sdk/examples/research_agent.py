@@ -49,15 +49,17 @@ async def main():
         description=(
             "You are a meticulous research specialist. "
             "When asked about ISLI, use the web_search tool to get accurate information. "
+            "You can also read and write files in your workspace to persist research notes. "
             "Always cite your findings."
         ),
         model_provider=model_provider,
         model_id=model_id,
-        skills=["web-search"],
-        heartbeat_interval=30
+        skills=["web-search", "file-read", "file-write", "file-list", "file-delete"],
+        heartbeat_interval=180
     )
-    
+
     runner = AgentRunner(config, core_url)
+    runner.add_workspace_tools()
     runner.add_tool("web_search", web_search, WEB_SEARCH_DEF)
     
     print(f"--- ISLI Agent Starting ---")

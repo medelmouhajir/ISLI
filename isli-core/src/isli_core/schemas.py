@@ -76,6 +76,20 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "message": {"type": "string"},
             },
         },
+        "session:message": {
+            "type": "object",
+            "required": ["type", "session_id", "agent_id", "message"],
+            "properties": {
+                "type": {"const": "session:message"},
+                "session_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "user_id": {"type": ["string", "null"]},
+                "channel": {"type": ["string", "null"]},
+                "message": {"type": "object"},
+                "messages": {"type": "array"},
+                "context_summary": {"type": ["string", "null"]},
+            },
+        },
     }
 }
 

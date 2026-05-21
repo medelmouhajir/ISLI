@@ -58,9 +58,15 @@ ISLI's memory system is built on three lessons from existing systems:
 
 **Write discipline**:
 - Every message appended immediately.
-- **JournalWorker** (background) triggers on `task:done` event.
+- **JournalWorker** (background) triggers on:
+  - `task:done` event (task-based sessions), OR
+  - New message activity (`last_message_at > journal_updated_at`) for direct user-to-agent sessions.
 - Keeper updates the `journal` incrementally using the last 10 messages.
 - Buffer is truncated to the **last 10 messages** after a successful journal update.
+
+**Keep-Alive vs Activity**:
+- `last_activity_at`: Updated by agent heartbeats. Used for idle detection and session expiration. Does **not** trigger the JournalWorker.
+- `last_message_at`: Updated only when messages are added to the session. Used specifically to trigger the **JournalWorker**.
 
 **Read discipline**:
 - `context/inject` reads the `journal` + the **last 3 messages**.
@@ -94,10 +100,14 @@ CREATE TABLE episodic_memories (
 - Importance score set by Keeper based on outcome (success, error, user feedback)
 
 **Read discipline**:
-- Semantic search via `pgvector` cosine similarity (`<=>`) in Keeper.
+- Semantic search via `pgvector` cosine distance (`<=>`) in Keeper.
 - Triggered when `task_description` is provided to `context/inject`.
+- **Similarity Threshold**: Results are filtered by a cosine distance threshold (default `< 0.4`). Only memories that actually meet the relevance criteria are returned.
+- **Conditional Fallback**:
+  - If semantic search returns matches, they are used.
+  - If semantic search yields no results above the threshold OR an error occurs, the system falls back to the **3 most recent** episodic memories (down from 5) to provide some context while minimizing noise.
+  - If **no** `task_description` is provided, no episodic memories are injected (unlike the previous unconditional fallback to the last 5).
 - Filtered by `agent_id` to avoid cross-agent pollution.
-- Falls back to `ORDER BY created_at` if search fails or no query vector exists.
 
 ---
 
@@ -169,7 +179,7 @@ CREATE TABLE message_archive (
 | Scope | What it contains | Who can read | Who can write |
 |-------|-----------------|-------------|--------------|
 | `global` | ISLI system config, shared skills | All agents | Admin only |
-| `agent:{id}` | Agent persona, preferences, history | That agent + Keeper | That agent + Keeper |
+| `agent_{id}` | Agent persona, preferences, history | That agent + Keeper | That agent + Keeper |
 | `channel:{name}` | Channel-specific context | Assigned agent | Assigned agent |
 | `session:{id}` | Active session messages | Assigned agent | Assigned agent |
 
@@ -181,11 +191,13 @@ CREATE TABLE message_archive (
 Task arrives at Agent X
       │
       ▼
-Keeper.context/inject(agent_id, session_id)
+Keeper.context/inject(agent_id, session_id, task_description, memory_similarity_threshold)
       │
       ├─ Fast-fetch Journal from Session (Tier 1)
       ├─ Fast-fetch last 3 messages from Session (Tier 1)
-      ├─ Vector search Episodic Memory (Tier 2) → top 5 relevant
+      ├─ Vector search Episodic Memory (Tier 2)
+      │   ├─ Filter by distance < threshold (default 0.4)
+      │   └─ If empty, fallback to 3 most recent (Conditional Fallback)
       ├─ Vector search Semantic Memory (Tier 3) → top 3 relevant
       │
       ▼

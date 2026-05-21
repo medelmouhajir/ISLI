@@ -40,3 +40,19 @@ class TestSkillsWorkspaceProxy:
             "path": "notes.txt",
         })
         assert resp.status_code != 404
+
+    @pytest.mark.asyncio
+    async def test_send_message_skill_registered(self, client: AsyncClient):
+        resp = await client.post("/v1/skills/send-message/send", json={
+            "agent_id": "test-agent",
+            "channel": "telegram",
+            "channel_user_id": "12345",
+            "text": "hello",
+        })
+        # 404 "Agent not found" is acceptable here — it proves the inline handler
+        # was reached (the skill is registered). We only want to reject a 404
+        # that says the skill itself is unregistered.
+        if resp.status_code == 404:
+            detail = resp.json().get("detail", "")
+            assert "skill 'send-message' not registered" not in detail.lower()
+            assert "action 'send' not found" not in detail.lower()

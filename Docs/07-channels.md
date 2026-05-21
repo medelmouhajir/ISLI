@@ -70,43 +70,105 @@ channels:
 
 ---
 
-## Message Flow: Inbound (User → Agent)
+## Message Flow: Inbound — Direct Session (User → Agent)
+
+When a message is addressed to a specific agent (e.g., Telegram bot assigned to `agent_id: kimi-02`), it bypasses the Kanban board entirely and creates a **Session**:
 
 ```
 Platform (e.g., Telegram)
-  └─→ Webhook POST to Gateway (e.g., /webhook/telegram/{agent_id})
+  └─→ Webhook POST to Gateway (/webhook/telegram/{agent_id})
         └─→ Gateway parses update
-              ├─ Extract user_id, message_text, attachments
+              ├─ Extract user_id, message_text
               ├─ Normalize to ISLI Message format
-              └─→ Core API: POST /api/tasks
+              └─→ Core API: GET or CREATE Session
                     {
-                      type: "user_request",
-                      agent_id: "agent_research",
-                      input: "...",
+                      id: "sess_tg_kimi-02_123456789",
+                      agent_id: "kimi-02",
                       channel: "telegram",
                       channel_user_id: "123456789",
-                      session_id: "sess_tg_123456789"  ← per-user session
+                      messages: [...],
+                      status: "pending_context"
                     }
-                    └─→ Kanban board: new card in INBOX
+              ├─ Core: SessionContextInjectorWorker polls sessions with status="pending_context"
+              ├─ Core: POST /context/inject to Keeper (with session_id)
+              └─ Core: Update session status="ready", context_summary set
+                    └─→ Core: emit "session:message" via Redis → WebSocket
+                          └─→ Agent Runner (kimi-02) receives event
+                                └─→ Agent LLM generates reply
+                                      └─→ Core: POST /v1/sessions/{id}/reply
+                                            └─→ Gateway: sendMessage to user
 ```
+
+**Key characteristics of Session flow:**
+- No Kanban card is created
+- Messages are stored in the `sessions` table (`messages` JSON column)
+- Context injection is session-scoped (Keeper receives `session_id`)
+- Reply is delivered directly via `POST /v1/sessions/{id}/reply`
+
+## Message Flow: Inbound — Kanban Task (User → Board, or Agent → Agent)
+
+When a message has no specific `agent_id` (e.g., board web chat, or agent delegation), it creates a **Task**:
+
+```
+Platform (e.g., Web Chat or Agent Delegation)
+  └─→ Core API: POST /api/tasks
+        {
+          type: "user_request",
+          agent_id: "agent_research",
+          input: "...",
+          channel: "web",
+          session_id: "sess_web_123456789"
+        }
+        └─→ Kanban board: new card in INBOX
+              └─→ ContextInjectorWorker polls tasks with status="pending_context"
+                    └─→ Keeper: /context/inject (with task_description)
+                          └─→ Core: task status="inbox", context_summary set
+                                └─→ Core: emit "task:updated" via Redis → WebSocket
+                                      └─→ Agent Runner receives task
+                                            └─→ Agent LLM executes task
+                                                  └─→ Core: task status="done", output set
+```
+
+**Key characteristics of Task flow:**
+- Kanban card is created and visible on the board
+- Tasks support delegation chains (`parent_task_id`, `child_task_ids`)
+- Status lifecycle: `inbox` → `doing` → `done`
+- Agent-to-agent communication happens exclusively through Tasks
 
 ---
 
 ## Message Flow: Outbound (Agent → User)
 
+There are two mechanisms for an agent to send a message back to a user:
+
+### 1. Session Reply (Automatic Delivery)
+
+When an agent receives a `session:message` event (direct user message), it calls:
+
+```python
+await core_client.reply_to_session(session_id, text)
 ```
-Agent completes task
-Core API: task.status = done, task.output = "..."
-Core API: notifies channel gateway
-  └─→ Gateway: POST /send
-        {
-          channel: "telegram",
-          channel_user_id: "123456789",
-          text: "...",
-          reply_to_message_id: "..."
-        }
-        └─→ Platform API call (Telegram sendMessage)
+
+Core automatically forwards this to the channel gateway (`POST /send`). This is the default path for conversational replies.
+
+### 2. Proactive Send-Message Skill
+
+When an agent needs to reach out unprompted (e.g., from a Kanban task or a scheduled notification), it invokes the `send-message` skill:
+
+```python
+# Tool call the LLM generates:
+{"channel": "telegram", "channel_user_id": "+212668507183", "text": "Hello"}
+
+# AgentRunner injects agent_id and core_client, then calls:
+POST /v1/skills/send-message/send
 ```
+
+**Requirements for proactive send:**
+1. The agent's `channels` list must include `"telegram"` (or target channel)
+2. The agent's `skills` list must include `"send-message"`
+3. Core validates channel assignment before forwarding to the gateway
+
+If the agent lacks the channel in its `channels` field, Core returns `403 Channel not assigned to agent`.
 
 ---
 
@@ -118,6 +180,87 @@ Each unique `(channel, channel_user_id)` pair gets its own **session ID** that p
 - Agent remembers who they are and past interactions
 
 Sessions expire after 24 hours of inactivity (configurable).
+
+### Session Soft-Delete and Revival
+
+Sessions can be **soft-deleted** by `SessionLifecycleManager` when:
+- `expires_at` has passed (default: 24 hours from last activity), OR
+- `last_activity_at` is older than the idle timeout (default: 30 minutes)
+
+When a new message arrives for a soft-deleted session, the session is **revived** rather than recreated:
+- `deleted_at` is cleared
+- `expires_at` is reset to 24 hours from now
+- `status` returns to `"pending_context"`
+- **Raw `messages` and structured `journal` are preserved** so the agent retains conversation history
+
+**Important:** Prior to 2026-05-18, soft-deletion wiped `messages = []` and revival wiped `journal = None`, causing agents to lose all conversation history. Both behaviors were fixed so that historical context survives across session lifecycles.
+
+---
+
+## Session Commands (Slash Commands)
+
+Users can manage their session, inspect context, pin memories, and control in-flight tasks directly from Telegram (and future channels) using slash commands.
+
+### Architecture: Thin Adapter, Thick Core
+
+Commands are **intercepted by the channel adapter** before reaching the agent. All business logic lives in Core so future channels reuse the same endpoint.
+
+```
+User sends /status
+  → TelegramAdapter.handle_webhook()
+    → Detects "/status"
+    → POST /v1/channels/telegram/commands (HMAC-signed)
+      → Core commands router
+        → Queries DB / Keeper / Memory
+        → Returns response text
+    → TelegramAdapter.send_message(response_text)
+```
+
+Commands are **never forwarded** to `/v1/channels/telegram/webhook` — the agent never sees raw slash commands as user messages.
+
+### Available Commands
+
+| Command | Behavior |
+|---------|----------|
+| `/new` | Starts a fresh session (soft-deletes current, clears messages/journal, generates new `session_id`) |
+| `/compact` | Triggers journal compaction manually on the current session |
+| `/context` | Shows the Keeper's current structured session journal |
+| `/status` | Shows agent name, model, session age, message count, token estimate |
+| `/remember <text>` | Pins a fact to Tier 3 semantic memory (ChromaDB `agent:{id}` collection) |
+| `/forget <text>` | Searches semantic memory and proposes a candidate for deletion |
+| `/confirm_forget` | Confirms and executes the pending deletion from the last `/forget` |
+| `/memories` | Lists all pinned facts in the agent's semantic collection |
+| `/retry` | Re-sends the last unanswered message (re-sets `pending_context`, re-emits `session:message`) |
+| `/cancel` | Cancels the current in-progress task if the agent is stuck |
+| `/help` | Lists all available commands |
+
+### Session ID Tracking for `/new`
+
+Session IDs are deterministic by default: `sess_tg_{agent_id}_{user_id}`. To support genuinely new sessions, the adapter tracks the active session ID per user in Redis:
+
+- **Redis key:** `active_session:telegram:{agent_id}:{user_id}`
+- On `/new`, Core generates a new session ID (`uuid4()`), returns it, and the adapter stores it in Redis.
+- On normal messages, the adapter checks Redis first; if missing, falls back to the deterministic ID.
+- **Race condition guard:** When `/new` is received, a transient Redis lock (`new_session_pending:{channel}:{agent_id}:{user_id}`, 10s TTL) prevents follow-up messages from attaching to the old deleted session while the new one is being created.
+
+**Important (fixed 2026-05-20):** The old `/new` implementation appended a timestamp to the existing session ID (`{old_id}_{timestamp}`). With UUID agent IDs (~36 chars) and Telegram user IDs, this produced session IDs exceeding the `String(64)` column limit, causing PostgreSQL `StringDataRightTruncation` errors. The new implementation uses `uuid4()` (36 chars) and performs the soft-delete + insert as a single atomic database transaction. If the insert fails, the delete is rolled back — the user is never left session-less.
+
+### Telegram Command Menu (`setMyCommands`)
+
+The adapter registers all commands with Telegram's Bot API via `setMyCommands` so users see a command menu popup when typing `/`. Registration happens once per bot token:
+
+- **Default token:** During `TelegramAdapter.start()` on channels service startup
+- **Per-agent tokens:** The first time a custom `telegram_bot_token` is resolved via `_resolve_token()`
+
+Commands are defined as `telegram.BotCommand` objects with lowercase names (no leading slash) and descriptions within Telegram's 3–256 character limit. The adapter tracks registered tokens in `self._commands_registered_for_tokens` to avoid duplicate API calls.
+
+### Task Cancellation Guard
+
+`/cancel` moves a `doing` task to `failed` and sets a Redis flag `task_cancelled:{task_id}` (60s TTL). The agent runner checks task status before committing LLM output and discards the result if the task was cancelled mid-flight, preventing wasted tokens on stale completions.
+
+### Two-Step Memory Deletion
+
+`/forget <text>` performs semantic search, returns the top candidate with a prompt "Reply /confirm_forget to delete this memory," and stores the pending fact ID in Redis (`pending_forget:{session_id}`, 5-min TTL). This prevents accidental deletions from semantic search mismatches.
 
 ---
 
