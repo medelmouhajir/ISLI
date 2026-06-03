@@ -2,7 +2,7 @@
 
 ## Docker Compose Update
 
-### Online (GHCR)
+### Online (GHCR) — Production / Pre-built Images
 
 ```bash
 cd /opt/isli   # or wherever your compose file lives
@@ -16,6 +16,26 @@ docker compose up -d
 # Verify
 curl http://localhost:8000/health
 ```
+
+### Local Development — Rebuild from Source
+
+For active development where you have local code changes, **rebuild from source** instead of pulling:
+
+```bash
+cd /path/to/isli
+
+# Rebuild only changed services
+docker compose up -d --build core keeper board
+
+# Or rebuild everything
+docker compose up -d --build
+
+# Verify
+curl http://localhost:8000/health
+curl http://localhost:8001/health
+```
+
+> **Note:** The ISLI project follows a **rebuild-from-source** pattern for local development. Do not use `docker cp` to copy files into running containers — always rebuild the image and recreate the container. This ensures the container filesystem matches the source code and prevents drift between the image and the running state.
 
 ### Offline (Release Tarball)
 

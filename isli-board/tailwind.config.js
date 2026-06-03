@@ -25,7 +25,7 @@ export default {
         'text-muted': 'var(--text-muted)',
       },
       fontFamily: {
-        display: ['"Chakra Petch"', 'sans-serif'],
+        display: ['"IBM Plex Mono"', 'monospace'],
         mono: ['"JetBrains Mono"', 'monospace'],
       },
       animation: {
@@ -34,8 +34,13 @@ export default {
         'fade-in': 'fade-in 0.4s ease-out forwards',
         'slide-up': 'slide-up 0.3s ease-out forwards',
         'slide-down': 'slide-down 0.3s ease-out forwards',
+        'marquee': 'marquee 20s linear infinite',
       },
       keyframes: {
+        'marquee': {
+          '0%': { transform: 'translateX(100%)' },
+          '100%': { transform: 'translateX(-100%)' },
+        },
         'pulse-glow': {
           '0%, 100%': { boxShadow: '0 0 0 0 var(--glow-cyan)' },
           '50%': { boxShadow: '0 0 0 8px rgba(0,0,0,0)' },

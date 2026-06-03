@@ -1,6 +1,6 @@
 import json
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -137,7 +137,7 @@ async def _handle_start(db: AsyncSession, cmd: CommandRequest, channel: str) -> 
 
 async def _handle_new(db: AsyncSession, redis, cmd: CommandRequest) -> dict:
     sess = await _get_session(db, cmd.session_id)
-    now = datetime.now(datetime.UTC)
+    now = datetime.now(timezone.utc)
 
     # Wipe old session data so accidental revival is harmless
     sess.messages = []
@@ -198,7 +198,7 @@ async def _handle_context(db: AsyncSession, cmd: CommandRequest) -> dict:
 async def _handle_status(db: AsyncSession, cmd: CommandRequest) -> dict:
     sess = await _get_session(db, cmd.session_id)
     agent = await _get_agent(db, cmd.agent_id)
-    now = datetime.now(datetime.UTC)
+    now = datetime.now(timezone.utc)
     age = now - sess.created_at
     age_str = _format_duration(age)
 
@@ -228,7 +228,7 @@ async def _handle_remember(db: AsyncSession, redis, cmd: CommandRequest) -> dict
         content=cmd.args,
         metadata={
             "session_id": cmd.session_id,
-            "created_at": datetime.now(datetime.UTC).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         },
     )
     return {"response_text": f"Remembered: {cmd.args}\n(Fact ID: {fact_id})"}
@@ -352,7 +352,7 @@ async def _handle_cancel(db: AsyncSession, redis, cmd: CommandRequest) -> dict:
     old_status = task.status
     task.status = "failed"
     task.blocked_reason = "Cancelled by user via /cancel"
-    task.completed_at = datetime.now(datetime.UTC)
+    task.completed_at = datetime.now(timezone.utc)
     await db.commit()
 
     # Set Redis flag so agent runner can detect mid-flight cancellation

@@ -1,3 +1,7 @@
+# NOTE: Intentionally no circuit breaker here.
+# Keeper's charter is "honest 503" — local Ollama failures should surface immediately so
+# Core and callers can react. A circuit breaker would mask outages for 30+ seconds and
+# create false confidence. If that ever changes, use isli_core.circuit_breaker.
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -36,7 +40,7 @@ class OllamaClient:
             await self._client.aclose()
             self._client = None
 
-    async def generate(self, model: str, prompt: str, options: dict | None = None, timeout: float | None = None) -> dict:
+    async def generate(self, model: str, prompt: str, options: dict | None = None, timeout: float | None = None, format: str | None = None) -> dict:
         if self._client is None:
             raise RuntimeError("OllamaClient session not started")
 
@@ -50,6 +54,8 @@ class OllamaClient:
             "stream": False,
             "options": merged_options,
         }
+        if format:
+            payload["format"] = format
         # Use provided timeout or fall back to client's default (300s)
         resp = await self._client.post("/api/generate", json=payload, timeout=timeout)
         resp.raise_for_status()
@@ -85,3 +91,27 @@ class OllamaClient:
         resp = await self._client.post("/api/show", json={"name": model})
         resp.raise_for_status()
         return resp.json()
+
+    async def pull_model(self, model: str, timeout: float | None = None) -> dict[str, Any]:
+        if self._client is None:
+            raise RuntimeError("OllamaClient session not started")
+        payload = {"name": model, "stream": False}
+        resp = await self._client.post("/api/pull", json=payload, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def delete_model(self, model: str) -> dict[str, Any]:
+        if self._client is None:
+            raise RuntimeError("OllamaClient session not started")
+        resp = await self._client.request("DELETE", "/api/delete", json={"name": model})
+        resp.raise_for_status()
+        text = resp.text.strip()
+        return resp.json() if text else {"status": "ok"}
+
+    async def model_exists(self, model: str) -> bool:
+        if self._client is None:
+            raise RuntimeError("OllamaClient session not started")
+        resp = await self._client.get("/api/tags")
+        resp.raise_for_status()
+        data = resp.json()
+        return any(m.get("name") == model for m in data.get("models", []))

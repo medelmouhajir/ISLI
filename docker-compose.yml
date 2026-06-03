@@ -80,15 +80,65 @@ services:
           cpus: '8.0'
           memory: 8G
     healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q '.' || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["CMD", "sh", "-c", "ollama list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
       start_period: 60s
     restart: unless-stopped
 
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "ollama pull qwen3:1.7b &&
+       ollama pull qwen3:4b &&
+       ollama pull mistral:7b &&
+       ollama pull qwen2.5-coder:1.5b &&
+       ollama pull nomic-embed-text &&
+       ollama pull mxbai-embed-large ||
+       exit 1"
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    networks:
+      - isli
+    restart: "no"
+
+  audio:
+    image: ${AUDIO_IMAGE:-${DOCKER_REGISTRY:-ghcr.io/medelmouhajir}/isli-audio:latest}
+    build:
+      context: ./isli-audio
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: production
+      AUDIO_STT_MODEL: ${AUDIO_STT_MODEL:-whisper-tiny}
+      AUDIO_TTS_MODEL: ${AUDIO_TTS_MODEL:-piper-en-us-lessac-medium}
+      AUDIO_LANGUAGE: ${AUDIO_LANGUAGE:-en}
+      JWT_SECRET: ${JWT_SECRET}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    volumes:
+      - audio_models:/app/models
+    ports:
+      - "8400:8400"
+    networks:
+      - isli
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8400/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
   core:
-    image: ${CORE_API_IMAGE:-ghcr.io/medelmouhajir/isli-core:latest}
+    image: ${CORE_API_IMAGE:-${DOCKER_REGISTRY:-ghcr.io/medelmouhajir}/isli-core:latest}
     build:
       context: ./isli-core
       dockerfile: Dockerfile
@@ -114,12 +164,52 @@ services:
       SKILL_WEB_SEARCH_URL: http://skills:8100
       SKILL_SUMMARIZE_TEXT_URL: http://skills:8100
       SKILL_EMBED_TEXT_URL: http://skills:8100
+      SKILL_TEST_URL: http://skills:8100
+      SKILL_REGISTER_URL: http://skills:8100
+      SKILL_UPDATE_URL: http://skills:8100
+      SKILL_INTERACTIVE_DEBUGGER_URL: http://skills:8100
+      SKILL_SPEECH_TO_TEXT_URL: http://audio:8400/stt
+      SKILL_TEXT_TO_SPEECH_URL: http://audio:8400/tts
+      SKILL_WEB_BROWSE_NAVIGATE_URL: http://skills:8100/browse
+      SKILL_WEB_BROWSE_SNAPSHOT_URL: http://skills:8100/browse
+      SKILL_WEB_BROWSE_CLICK_URL: http://skills:8100/browse
+      SKILL_WEB_BROWSE_TYPE_URL: http://skills:8100/browse
+      SKILL_WEB_BROWSE_PRESS_URL: http://skills:8100/browse
+      SKILL_WEB_BROWSE_SCROLL_URL: http://skills:8100/browse
+      SKILL_WEB_BROWSE_BACK_URL: http://skills:8100/browse
+      SKILL_WEB_BROWSE_CONSOLE_URL: http://skills:8100/browse
+      SKILL_WEB_BROWSE_VISION_URL: http://skills:8100/browse
+      SKILL_WEB_BROWSE_IMAGES_URL: http://skills:8100/browse
+      SKILL_GIT_CLONE_URL: http://workspace:8300
+      SKILL_GIT_STATUS_URL: http://workspace:8300
+      SKILL_GIT_COMMIT_URL: http://workspace:8300
+      SKILL_GIT_PUSH_URL: http://workspace:8300
+      SKILL_GIT_PULL_URL: http://workspace:8300
+      SKILL_GIT_BRANCH_LIST_URL: http://workspace:8300
+      SKILL_GIT_BRANCH_CREATE_URL: http://workspace:8300
+      SKILL_GIT_CHECKOUT_URL: http://workspace:8300
+      SKILL_GIT_LOG_URL: http://workspace:8300
+      SKILL_PIP_INSTALL_URL: http://workspace:8300
+      SKILL_PIP_LIST_URL: http://workspace:8300
+      AUDIO_URL: http://audio:8400
+      CORE_API_URL: http://core:8000
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       ANONYMIZED_TELEMETRY: "FALSE"
+      AGENT_SDK_PATH: /opt/isli/isli-agent-sdk
+      AGENT_NETWORK: ${COMPOSE_PROJECT_NAME:-isli}_isli
+      AGENT_RUNNER_IMAGE: ${AGENT_RUNNER_IMAGE:-isli-agent-runner:latest}
+      WORKSPACE_BASE_PATH: /workspaces
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
+      VAPID_CLAIMS_EMAIL: ${VAPID_CLAIMS_EMAIL}
     volumes:
       - chroma_data:/data/vectors
       - ./isli-core/src/isli_core:/app/src/isli_core
       - ./prompts.yaml:/app/prompts.yaml
+      - ./isli-agent-sdk:/opt/isli/isli-agent-sdk:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - workspace_data:/workspaces
     ports:
       - "8000:8000"
     depends_on:
@@ -129,21 +219,24 @@ services:
         condition: service_healthy
       keeper:
         condition: service_healthy
+      audio:
+        condition: service_started
     networks:
       - isli
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 2G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 6
+      start_period: 60s
     restart: unless-stopped
 
   keeper:
-    image: ${KEEPER_IMAGE:-ghcr.io/medelmouhajir/isli-keeper:latest}
+    image: ${KEEPER_IMAGE:-${DOCKER_REGISTRY:-ghcr.io/medelmouhajir}/isli-keeper:latest}
     build:
       context: ./isli-keeper
       dockerfile: Dockerfile
@@ -151,6 +244,7 @@ services:
       ISLI_ENV: production
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+      # Primary model used for reasoning and validation
       OLLAMA_GEN_MODEL: ${OLLAMA_GEN_MODEL:-qwen2.5-coder:1.5b}
       DATABASE_URL: postgresql://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
       REDIS_URL: redis://redis:6379/1
@@ -161,8 +255,8 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      ollama:
-        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       postgres:
@@ -181,7 +275,7 @@ services:
     restart: unless-stopped
 
   channels:
-    image: ${CHANNELS_IMAGE:-ghcr.io/medelmouhajir/isli-channels:latest}
+    image: ${CHANNELS_IMAGE:-${DOCKER_REGISTRY:-ghcr.io/medelmouhajir}/isli-channels:latest}
     build:
       context: ./isli-channels
       dockerfile: Dockerfile
@@ -193,13 +287,19 @@ services:
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      WHATSAPP_ENABLED: ${WHATSAPP_ENABLED:-false}
+      WHATSAPP_SIDECAR_URL: http://whatsapp-sidecar:3001
+      AUDIO_URL: http://audio:8400
+      JWT_SECRET: ${JWT_SECRET}
+      SIDECAR_WEBHOOK_SECRET: ${SIDECAR_WEBHOOK_SECRET}
+      SIDECAR_API_TOKEN: ${SIDECAR_API_TOKEN}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.channels.rule=Host(`isli.mangati.ma`) && PathPrefix(`/webhook`)"
+      - "traefik.http.routers.channels.rule=Host(`${ISLI_DOMAIN}`) && PathPrefix(`/webhook`)"
       - "traefik.http.routers.channels.entrypoints=websecure"
       - "traefik.http.routers.channels.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.channels-http.rule=Host(`isli.mangati.ma`) && PathPrefix(`/webhook`)"
+      - "traefik.http.routers.channels-http.rule=Host(`${ISLI_DOMAIN}`) && PathPrefix(`/webhook`)"
       - "traefik.http.routers.channels-http.entrypoints=web"
       - "traefik.http.routers.channels-http.middlewares=redirect-to-https"
       - "traefik.http.services.channels.loadbalancer.server.port=8200"
@@ -208,6 +308,8 @@ services:
         condition: service_healthy
       core:
         condition: service_started
+      whatsapp-sidecar:
+        condition: service_healthy
     networks:
       - isli
     deploy:
@@ -221,14 +323,37 @@ services:
       retries: 3
     restart: unless-stopped
 
+  whatsapp-sidecar:
+    build:
+      context: ./isli-whatsapp-sidecar
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3001
+      CHANNELS_WEBHOOK_URL: http://channels:8200/webhook/whatsapp
+      AUTH_BASE_DIR: /auth/whatsapp
+      SIDECAR_WEBHOOK_SECRET: ${SIDECAR_WEBHOOK_SECRET}
+      SIDECAR_API_TOKEN: ${SIDECAR_API_TOKEN}
+    volumes:
+      - whatsapp_auth:/auth/whatsapp
+    networks:
+      - isli
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   skills:
-    image: ${SKILLS_IMAGE:-ghcr.io/medelmouhajir/isli-skills:latest}
+    image: ${SKILLS_IMAGE:-${DOCKER_REGISTRY:-ghcr.io/medelmouhajir}/isli-skills:latest}
     build:
       context: ./isli-skills
       dockerfile: Dockerfile
     environment:
       ISLI_ENV: production
       REDIS_URL: redis://redis:6379/3
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
       CORE_API_URL: http://core:8000
       KEEPER_URL: http://keeper:8001
       WORKSPACE_URL: http://workspace:8300
@@ -236,6 +361,11 @@ services:
       SKILL_REGISTRY_TOKEN: ${SKILL_REGISTRY_TOKEN}
       JWT_SECRET: ${JWT_SECRET}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      BROWSER_REDIS_URL: redis://redis:6379/5
+      BROWSER_SESSION_TTL: 600
+      BROWSER_HEADLESS: "true"
+      BROWSER_SESSION_DIR: /data/browser-sessions
+      BROWSER_MAX_CONCURRENT_SESSIONS: 5
     ports:
       - "8003:8100"
     depends_on:
@@ -245,10 +375,13 @@ services:
         condition: service_started
     networks:
       - isli
+    volumes:
+      - workspace_data:/workspaces:ro
+      - browser-sessions:/data/browser-sessions
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
       interval: 30s
@@ -257,7 +390,7 @@ services:
     restart: unless-stopped
 
   workspace:
-    image: ${WORKSPACE_IMAGE:-ghcr.io/medelmouhajir/isli-workspace:latest}
+    image: ${WORKSPACE_IMAGE:-${DOCKER_REGISTRY:-ghcr.io/medelmouhajir}/isli-workspace:latest}
     build:
       context: ./isli-workspace
       dockerfile: Dockerfile
@@ -287,9 +420,12 @@ services:
     restart: unless-stopped
 
   agent-runner:
+    image: isli-agent-runner:latest
     build:
       context: ./isli-agent-sdk
       dockerfile: Dockerfile
+    # This service is just a build target for agents; it doesn't need to run.
+    command: ["true"]
     environment:
       CORE_API_URL: http://core:8000
       ADMIN_API_KEY: ${ADMIN_API_KEY}
@@ -306,21 +442,21 @@ services:
         condition: service_healthy
     networks:
       - isli
-    profiles:
-      - agents
+    deploy:
+      replicas: 0
     restart: unless-stopped
 
   board:
-    image: ${BOARD_IMAGE:-ghcr.io/medelmouhajir/isli-board:latest}
+    image: ${BOARD_IMAGE:-${DOCKER_REGISTRY:-ghcr.io/medelmouhajir}/isli-board:latest}
     build:
       context: ./isli-board
       dockerfile: Dockerfile
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.board.rule=Host(`isli.mangati.ma`)"
+      - "traefik.http.routers.board.rule=Host(`${ISLI_DOMAIN}`)"
       - "traefik.http.routers.board.entrypoints=websecure"
       - "traefik.http.routers.board.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.board-http.rule=Host(`isli.mangati.ma`)"
+      - "traefik.http.routers.board-http.rule=Host(`${ISLI_DOMAIN}`)"
       - "traefik.http.routers.board-http.entrypoints=web"
       - "traefik.http.routers.board-http.middlewares=redirect-to-https"
       - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
@@ -367,6 +503,9 @@ volumes:
   workspace_data:
   letsencrypt:
   chroma_data:
+  whatsapp_auth:
+  audio_models:
+  browser-sessions:
 
 networks:
   isli:

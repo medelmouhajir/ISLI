@@ -17,11 +17,20 @@ async def send_message(
     channel_user_id: str,
     text: str,
     core_client: CoreClient,
+    audio_b64: str | None = None,
 ) -> dict[str, Any]:
     """Send a proactive message to a user through one of the agent's assigned channels."""
+    payload = {
+        "agent_id": agent_id,
+        "channel": channel,
+        "channel_user_id": channel_user_id,
+        "text": text,
+    }
+    if audio_b64:
+        payload["audio_b64"] = audio_b64
     resp = await core_client.client.post(
         "/v1/skills/send-message/send",
-        json={"agent_id": agent_id, "channel": channel, "channel_user_id": channel_user_id, "text": text},
+        json=payload,
         headers=core_client._get_headers(),
     )
     resp.raise_for_status()
@@ -32,7 +41,7 @@ SEND_MESSAGE_DEF = {
     "type": "function",
     "function": {
         "name": "send_message",
-        "description": _get_tool_desc("send_message", "Send a proactive message to a user through one of the agent's assigned channels (e.g., telegram). The agent must have the channel in its assigned channels list."),
+        "description": _get_tool_desc("send_message", "Send a proactive message to a user through one of the agent's assigned channels (e.g., telegram). The agent must have the channel in its assigned channels list. Optionally include audio_b64 to send a voice message alongside the text."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -47,6 +56,10 @@ SEND_MESSAGE_DEF = {
                 "text": {
                     "type": "string",
                     "description": "The message text to send",
+                },
+                "audio_b64": {
+                    "type": "string",
+                    "description": "Optional base64-encoded WAV audio to send as a voice message. Use the text_to_speech tool to generate this.",
                 },
             },
             "required": ["channel", "channel_user_id", "text"],

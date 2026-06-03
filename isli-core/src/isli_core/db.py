@@ -20,6 +20,8 @@ async def init_db(database_url: str):
         engine_kwargs.update({
             "pool_size": 20,
             "max_overflow": 10,
+            "pool_timeout": 60,
+            "pool_recycle": 3600,
         })
 
     engine = create_async_engine(database_url, **engine_kwargs)

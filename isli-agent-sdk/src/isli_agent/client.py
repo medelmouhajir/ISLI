@@ -43,18 +43,42 @@ class CoreClient:
             token_resp.raise_for_status()
             token_data = token_resp.json()
             self.token = token_data["token"]
-            # Fetch existing agent config to return a consistent shape
-            resp = await self.client.get(f"/v1/agents/{config.id}")
+        else:
             resp.raise_for_status()
             data = resp.json()
-            data["token"] = self.token
-            return data
+            if "token" in data:
+                self.token = data["token"]
 
+        # Fetch full config (with resolved api_key) using admin auth
+        config_resp = await self.client.get(
+            f"/v1/agents/{config.id}/config",
+            headers=self._get_headers(use_admin=True)
+        )
+        config_resp.raise_for_status()
+        final_data = config_resp.json()
+        final_data["token"] = self.token
+        return final_data
+
+    async def recover_token(self, agent_id: str) -> str:
+        """Recover a fresh token via admin auth when the current token is revoked."""
+        resp = await self.client.post(
+            f"/v1/agents/{agent_id}/token",
+            headers=self._get_headers(use_admin=True)
+        )
         resp.raise_for_status()
-        data = resp.json()
-        if "token" in data:
-            self.token = data["token"]
-        return data
+        token_data = resp.json()
+        self.token = token_data["token"]
+        return self.token
+
+    async def create_task(self, payload: dict[str, Any]) -> Task:
+        """Create a new task in the Kanban board."""
+        resp = await self.client.post(
+            "/v1/tasks",
+            json=payload,
+            headers=self._get_headers(use_admin=True)
+        )
+        resp.raise_for_status()
+        return Task.model_validate(resp.json())
 
     async def heartbeat(self, agent_id: str) -> str:
         """Send heartbeat and receive a renewed JWT token."""
@@ -161,11 +185,68 @@ class CoreClient:
             return []
         return resp.json()
 
-    async def reply_to_session(self, session_id: str, text: str) -> dict[str, Any]:
-        """Send a reply to a session (delivered to user via channels)."""
+    async def reply_to_session(
+        self,
+        session_id: str,
+        text: str,
+        components: list[dict[str, Any]] | None = None,
+        audio_b64: str | None = None,
+        audio_voice: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a reply to a session (delivered to user via channels).
+
+        If audio_b64 is provided, Core will forward it as a voice message
+        alongside the text reply.
+        """
+        payload: dict[str, Any] = {"text": text}
+        if components:
+            payload["components"] = components
+        if audio_b64:
+            payload["audio_b64"] = audio_b64
+        if audio_voice:
+            payload["audio_voice"] = audio_voice
         resp = await self.client.post(
             f"/v1/sessions/{session_id}/reply",
-            json={"text": text},
+            json=payload,
+            headers=self._get_headers()
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def report_usage(self, agent_id: str, usage: dict[str, Any]) -> dict[str, Any]:
+        """Report token usage back to Core for cost ledger and budget enforcement."""
+        resp = await self.client.post(
+            f"/v1/agents/{agent_id}/usage",
+            json=usage,
+            headers=self._get_headers()
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def report_model_error(self, agent_id: str, category: str, reason: str | None = None) -> dict[str, Any]:
+        """Report a model error to Core so the agent can be flagged in the Board UI."""
+        resp = await self.client.post(
+            f"/v1/agents/{agent_id}/model_error",
+            json={"category": category, "reason": reason},
+            headers=self._get_headers()
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def report_model_recovery(self, agent_id: str) -> dict[str, Any]:
+        """Report that the agent has recovered from a model error."""
+        resp = await self.client.post(
+            f"/v1/agents/{agent_id}/model_recovery",
+            headers=self._get_headers()
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def invoke_skill(self, skill_name: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Call a skill through the Core proxy."""
+        resp = await self.client.post(
+            f"/v1/skills/{skill_name}/{action}",
+            json=payload,
             headers=self._get_headers()
         )
         resp.raise_for_status()

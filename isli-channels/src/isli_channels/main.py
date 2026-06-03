@@ -1,20 +1,19 @@
 import os
-import structlog
 from contextlib import asynccontextmanager
 from typing import Any
 
+import structlog
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from .telemetry import instrument_fastapi, get_trace_id
-from .config import get_settings
-from .chunking import MessageChunker
-from .attachments import convert_attachment, validate_for_channel
-from .rate_limit import RateLimiter
-from .offline_queue import OfflineMessageQueue
-from .webhook_validation import WebhookValidator
-from .identity import CrossChannelIdentity
 from .adapters.telegram import TelegramAdapter
+from .adapters.whatsapp import WhatsAppAdapter
+from .attachments import convert_attachment, validate_for_channel
+from .chunking import MessageChunker
+from .offline_queue import OfflineMessageQueue
+from .rate_limit import RateLimiter
+from .telemetry import get_trace_id, instrument_fastapi
+from .webhook_validation import WebhookValidator
 
 SERVICE_NAME = "isli-channels"
 
@@ -24,6 +23,10 @@ adapters = {}
 
 try:
     from redis.asyncio import Redis
+except Exception:
+    Redis = None  # type: ignore[misc,assignment]
+
+try:
     from fakeredis.aioredis import FakeRedis
 except Exception:
     FakeRedis = None  # type: ignore[misc,assignment]
@@ -35,6 +38,8 @@ def _get_redis():
         if FakeRedis is None:
             raise RuntimeError("fakeredis is not installed")
         return FakeRedis()
+    if Redis is None:
+        raise RuntimeError("redis is not installed")
     return Redis.from_url(redis_url, decode_responses=True)
 
 
@@ -46,16 +51,31 @@ async def lifespan(app: FastAPI):
     global redis_client, adapters
     logger.info("channels.startup", service=SERVICE_NAME)
     redis_client = _get_redis()
-    
+
     # Initialize Adapters
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
     core_url = os.getenv("CORE_API_URL", "http://localhost:8000")
     webhook_secret = os.getenv("WEBHOOK_SECRET", "")
     if tg_token:
-        tg_adapter = TelegramAdapter(tg_token, core_url, webhook_secret, redis_client=redis_client)
+        audio_url = os.getenv("AUDIO_URL", "")
+        jwt_secret = os.getenv("JWT_SECRET", "")
+        tg_adapter = TelegramAdapter(tg_token, core_url, webhook_secret, redis_client=redis_client, audio_url=audio_url, jwt_secret=jwt_secret)
         await tg_adapter.start()
         adapters["telegram"] = tg_adapter
-        
+
+    if os.getenv("WHATSAPP_ENABLED", "").lower() in ("true", "1", "yes"):
+        wa_sidecar_url = os.getenv("WHATSAPP_SIDECAR_URL", "http://whatsapp-sidecar:3001")
+        wa_adapter = WhatsAppAdapter(
+            core_api_url=core_url,
+            webhook_secret=webhook_secret,
+            redis_client=redis_client,
+            sidecar_url=wa_sidecar_url,
+            sidecar_api_token=os.getenv("SIDECAR_API_TOKEN", ""),
+            sidecar_webhook_secret=os.getenv("SIDECAR_WEBHOOK_SECRET", ""),
+        )
+        await wa_adapter.start()
+        adapters["whatsapp"] = wa_adapter
+
     yield
     for adapter in adapters.values():
         await adapter.stop()
@@ -149,7 +169,7 @@ async def drain_offline_queue(payload: dict[str, Any]):
 async def telegram_webhook(agent_id: str, request: Request):
     if "telegram" not in adapters:
         raise HTTPException(status_code=501, detail="Telegram adapter not initialized")
-    
+
     raw_update = await request.json()
     return await adapters["telegram"].handle_webhook(raw_update, agent_id)
 
@@ -160,6 +180,7 @@ class SendMessageRequest(BaseModel):
     text: str
     agent_id: str | None = None
     metadata: dict[str, Any] = {}
+    audio_b64: str | None = None
 
 
 @app.post("/send")
@@ -168,5 +189,83 @@ async def send_message(req: SendMessageRequest):
     if not adapter:
         raise HTTPException(status_code=400, detail=f"No adapter for channel: {req.channel}")
 
-    success = await adapter.send_message(req.channel_user_id, req.text, agent_id=req.agent_id)
+    success = await adapter.send_message(
+        req.channel_user_id,
+        req.text,
+        agent_id=req.agent_id,
+        audio_b64=req.audio_b64,
+    )
     return {"success": success}
+
+
+# --- WhatsApp session management endpoints ---
+
+
+def _get_whatsapp_adapter() -> WhatsAppAdapter:
+    adapter = adapters.get("whatsapp")
+    if not adapter:
+        raise HTTPException(status_code=501, detail="WhatsApp adapter not initialized")
+    if not isinstance(adapter, WhatsAppAdapter):
+        raise HTTPException(status_code=500, detail="WhatsApp adapter type mismatch")
+    return adapter
+
+
+@app.post("/whatsapp/sessions/{agent_id}")
+async def whatsapp_create_session(agent_id: str):
+    wa = _get_whatsapp_adapter()
+    result = await wa.create_session(agent_id)
+    if result.get("status") == "already_connected":
+        raise HTTPException(status_code=409, detail="Agent already has an active WhatsApp session")
+    return result
+
+
+@app.get("/whatsapp/sessions/{agent_id}/qr")
+async def whatsapp_get_qr(agent_id: str):
+    wa = _get_whatsapp_adapter()
+    return wa.get_qr(agent_id)
+
+
+@app.get("/whatsapp/sessions/{agent_id}/status")
+async def whatsapp_get_status(agent_id: str):
+    wa = _get_whatsapp_adapter()
+    return wa.get_status(agent_id)
+
+
+@app.delete("/whatsapp/sessions/{agent_id}")
+async def whatsapp_delete_session(agent_id: str):
+    wa = _get_whatsapp_adapter()
+    return await wa.delete_session(agent_id)
+
+
+@app.get("/whatsapp/sessions")
+async def whatsapp_list_sessions():
+    wa = _get_whatsapp_adapter()
+    return {"sessions": wa.list_sessions()}
+
+
+@app.post("/webhook/whatsapp/{agent_id}")
+async def whatsapp_sidecar_webhook(agent_id: str, request: Request):
+    if "whatsapp" not in adapters:
+        raise HTTPException(status_code=501, detail="WhatsApp adapter not initialized")
+
+    wa = adapters["whatsapp"]
+    if wa.sidecar_webhook_secret:
+        await WebhookValidator.verify_generic(
+            request, wa.sidecar_webhook_secret, "X-Sidecar-Secret"
+        )
+
+    payload = await request.json()
+    try:
+        await adapters["whatsapp"].handle_webhook(agent_id, payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Log full details, then return a 500 so the sidecar retries on transient errors.
+        # 403 consent-missing is handled gracefully inside the adapter (auto-reply sent).
+        logger.error(
+            "whatsapp.webhook_handler_failed",
+            agent_id=agent_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
+    return {"status": "ok"}

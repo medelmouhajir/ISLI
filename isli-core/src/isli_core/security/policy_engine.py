@@ -3,15 +3,24 @@
 import hashlib
 import os
 import structlog
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from isli_core.models import PolicyOverride
-from isli_core.security.content_scanner import ContentScanner, ScanResult
+from isli_core.models import PolicyOverride, PermittedModel
+from isli_core.security.content_scanner import ContentScanner
 
 logger = structlog.get_logger()
+
+# Cache for approved models to avoid DB pressure on every policy evaluation.
+# Security trade-off: a disabled model may remain "approved" for up to 60s
+# after being disabled via the settings UI. This is acceptable for a non-real-time
+# security boundary.
+_APPROVED_MODELS_CACHE: set[str] = set()
+_CACHE_LAST_UPDATED: datetime | None = None
+_CACHE_TTL_SECONDS = 60
 
 
 class PolicyDecision:
@@ -86,7 +95,7 @@ class PolicyEngine:
             )
 
         # 4. Approved model only
-        if model_id and not PolicyEngine._is_approved_model(model_id):
+        if model_id and not await PolicyEngine._is_approved_model(model_id, session):
             return PolicyDecision(
                 allow=False,
                 reason=f"Model '{model_id}' is not in the approved list",
@@ -110,8 +119,20 @@ class PolicyEngine:
         return PolicyDecision(allow=True, risk_score=scan.risk_score)
 
     @staticmethod
-    def _is_approved_model(model_id: str) -> bool:
-        approved = {
+    async def _load_approved_models(session: AsyncSession) -> set[str]:
+        global _APPROVED_MODELS_CACHE, _CACHE_LAST_UPDATED
+
+        now = datetime.now(timezone.utc)
+        if _CACHE_LAST_UPDATED and (now - _CACHE_LAST_UPDATED).total_seconds() < _CACHE_TTL_SECONDS:
+            return _APPROVED_MODELS_CACHE
+
+        result = await session.execute(
+            select(PermittedModel.model_id).where(PermittedModel.enabled.is_(True))
+        )
+        db_models = {row[0].lower() for row in result.all()}
+
+        # Legacy fallback: if DB is empty (migration bootstrap), use hardcoded set
+        legacy = {
             "gpt-4o",
             "gpt-4o-mini",
             "gpt-4",
@@ -124,15 +145,26 @@ class PolicyEngine:
             "qwen3:0.6b",
             "qwen2.5:7b",
         }
-        # Allow comma-separated extra models via env var for custom/local models
         extra = os.getenv("ISLI_EXTRA_APPROVED_MODELS", "")
         if extra:
-            approved.update(m.strip() for m in extra.split(",") if m.strip())
+            legacy.update(m.strip() for m in extra.split(",") if m.strip())
+
+        if db_models:
+            _APPROVED_MODELS_CACHE = db_models
+        else:
+            _APPROVED_MODELS_CACHE = legacy
+
+        _CACHE_LAST_UPDATED = now
+        return _APPROVED_MODELS_CACHE
+
+    @staticmethod
+    async def _is_approved_model(model_id: str, session: AsyncSession) -> bool:
+        approved = await PolicyEngine._load_approved_models(session)
         return model_id.lower() in approved
 
     @staticmethod
     def _is_dangerous_skill(skill_name: str) -> bool:
-        dangerous = {"shell-exec", "sql-drop", "send-email"}
+        dangerous = {"shell-exec", "sql-drop", "send-email", "register-skill"}
         return skill_name.lower() in dangerous
 
     @staticmethod

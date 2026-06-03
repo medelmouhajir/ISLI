@@ -13,9 +13,14 @@ class RedisPubSubProcessor:
         try:
             # Create a copy to avoid modifying the original dict for other processors
             log_entry = event_dict.copy()
-            # Ensure timestamp and level are included if they were added by other processors
             # Publish as JSON string
-            self.redis_client.publish(self.channel, json.dumps(log_entry, default=str))
+            json_log = json.dumps(log_entry, default=str)
+            self.redis_client.publish(self.channel, json_log)
+            
+            # Persist history (last 1000 logs) in chronological order
+            history_key = f"{self.channel}:history"
+            self.redis_client.rpush(history_key, json_log)
+            self.redis_client.ltrim(history_key, -1000, -1)
         except Exception:
             # Fallback: don't let logging failures crash the agent
             pass

@@ -67,8 +67,48 @@ class TaskComplexityScorer:
         return "premium"
 
     @staticmethod
+    def score_task_input(task_input: str) -> tuple[int, str]:
+        """Score task complexity and return (score, tier)."""
+        score = TaskComplexityScorer.score(task_input)
+        tier = TaskComplexityScorer.recommend_tier(score)
+        return score, tier
+
+    @staticmethod
     def recommend_model(score: int, agent_config: dict[str, Any]) -> str:
         from isli_core.cost.tiering import ModelTiering
 
         tier = TaskComplexityScorer.recommend_tier(score)
         return ModelTiering.resolve_model(agent_config, tier)
+
+
+TIER_ORDER = ["local", "standard", "premium"]
+
+
+def filter_models_by_tier(secondary_models: list[dict], tier: str) -> list[dict]:
+    """Drop models whose cost_tier is strictly more expensive than the task tier.
+
+    If no models remain after filtering, return the full list (fail-open).
+    """
+    if not secondary_models:
+        return []
+
+    try:
+        task_idx = TIER_ORDER.index(tier)
+    except ValueError:
+        return list(secondary_models)
+
+    filtered = [
+        m for m in secondary_models
+        if TIER_ORDER.index(m.get("cost_tier", "premium")) <= task_idx
+    ]
+
+    if not filtered:
+        logger.warning(
+            "complexity.filter_empty",
+            tier=tier,
+            model_count=len(secondary_models),
+            message="All secondary models are above task tier; returning full list",
+        )
+        return list(secondary_models)
+
+    return filtered

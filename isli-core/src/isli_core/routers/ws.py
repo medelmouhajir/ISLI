@@ -8,6 +8,16 @@ from isli_core.auth import verify_internal_token, _check_token_revocation
 logger = structlog.get_logger()
 router = APIRouter(prefix="/ws", tags=["websocket"])
 
+# Lazy import to avoid circular dependency at module load time
+_notification_engine = None
+
+def _get_notification_engine():
+    global _notification_engine
+    if _notification_engine is None:
+        from isli_core.notification.notification_engine import NotificationEngine
+        _notification_engine = NotificationEngine
+    return _notification_engine
+
 class ConnectionManager:
     def __init__(self):
         self.board_connections: list[WebSocket] = []
@@ -120,7 +130,48 @@ async def agent_ws(websocket: WebSocket, agent_id: str, token: str = Query(None)
     try:
         while True:
             data = await websocket.receive_text()
-            logger.debug("ws.agent_received", agent_id=agent_id, data=data)
+            try:
+                event = json.loads(data)
+                if event.get("type") == "agent:stream_event":
+                    payload = event.get("payload", {})
+                    session_id = payload.get("session_id")
+                    event_type = payload.get("event_type")
+                    event_data = payload.get("data", {})
+
+                    # Append token_delta to Redis draft
+                    if event_type == "token_delta" and session_id:
+                        delta = event_data.get("delta", "")
+                        if delta:
+                            redis = await get_redis()
+                            await redis.append(f"session:{session_id}:draft", delta)
+                            await redis.expire(f"session:{session_id}:draft", 300)
+
+                    # Store debug events in Redis (never broadcast over WS)
+                    if event_type in ("debug_prompt", "debug_response") and session_id:
+                        redis = await get_redis()
+                        trace_key = f"session:{session_id}:debug_trace"
+                        await redis.lpush(trace_key, json.dumps({
+                            "event_type": event_type,
+                            "data": event_data,
+                            "timestamp": payload.get("timestamp"),
+                        }))
+                        await redis.ltrim(trace_key, 0, 99)
+                        await redis.expire(trace_key, 300)
+                        continue  # skip broadcast
+
+                    # Fan out to board
+                    await manager.broadcast_to_board(json.dumps({
+                        "type": "session:stream_event",
+                        "payload": {
+                            "session_id": session_id,
+                            "agent_id": agent_id,
+                            "event_type": event_type,
+                            "data": event_data,
+                            "timestamp": payload.get("timestamp"),
+                        }
+                    }))
+            except Exception as exc:
+                logger.warning("ws.agent_message_parse_failed", agent_id=agent_id, error=str(exc))
     except WebSocketDisconnect:
         manager.disconnect_agent(websocket, agent_id)
     except Exception as exc:
@@ -163,11 +214,31 @@ async def redis_listener():
                             target_agent_id = payload.get("agent_id")
                         elif event.get("type") == "session:message":
                             target_agent_id = payload.get("agent_id")
+                        elif event.get("type") == "agent:config_updated":
+                            target_agent_id = payload.get("agent_id")
+                            logger.info("ws.config_update_detected", agent_id=target_agent_id)
 
                         if target_agent_id:
+                            is_connected = target_agent_id in manager.agent_connections
+                            logger.debug("ws.dispatch_to_agent", agent_id=target_agent_id, connected=is_connected)
                             await manager.send_to_agent(target_agent_id, data)
                     except Exception as e:
                         logger.debug("ws.dispatch_failed", error=str(e))
+
+                    # Unified notification dispatch — return_exceptions=True ensures
+                    # a notification engine failure never kills the WebSocket fan-out.
+                    try:
+                        event = json.loads(data)
+                        engine = _get_notification_engine()
+                        results = await asyncio.gather(
+                            engine.on_event(event.get("type", ""), event.get("payload", {})),
+                            return_exceptions=True,
+                        )
+                        for r in results:
+                            if isinstance(r, Exception):
+                                logger.error("ws.notification_dispatch_failed", error=str(r))
+                    except Exception as e:
+                        logger.error("ws.notification_dispatch_failed", error=str(e))
 
         except asyncio.CancelledError:
             logger.info("ws.redis_listener_cancelled")

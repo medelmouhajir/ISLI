@@ -121,7 +121,7 @@ Token runaway mitigation appears only in failure modes (F15) rather than as a fi
 | ID | Severity | Finding | Recommendation |
 |----|----------|---------|----------------|
 | F-ARCH-01 | Critical | Hardcoded `localhost` service discovery | Use Docker Compose service names + lightweight registry |
-| F-ARCH-02 | Critical | Keeper restart loses episodic writes (fire-and-forget) | Implement outbox pattern with retry |
+| **F-ARCH-02** | **DONE** | **Keeper restart loses episodic writes (fire-and-forget)** | **RESOLVED (2026-06-01)**: Implemented durable outbox pattern via `JournalWorker` and `MemoryWorker`. |
 | F-ARCH-03 | Critical | No event schema registry | Adopt JSON Schema/Protobuf with versioning |
 | F-ARCH-05 | Critical | Task state race conditions (no optimistic locking) | Add `version` field + PostgreSQL row-level locking |
 | F-ARCH-10 | Critical | Docker `.env` uses `localhost` (breaks container networking) | Separate `.env.dev`/`.env.prod` with service names |
@@ -290,7 +290,7 @@ Token runaway mitigation appears only in failure modes (F15) rather than as a fi
 | ID | Severity | Finding | Recommendation |
 |----|----------|---------|----------------|
 | F-KEEP-01 | Critical | No measured accuracy for qwen3:0.6b JSON output | Run structured-output benchmark (n>1000) |
-| F-KEEP-02 | Critical | No fallback if Ollama/Keeper fails | Implement cloud-model fallback with circuit breaker |
+| F-KEEP-02 | **Rejected** | ~~No fallback if Ollama/Keeper fails~~ | **Rejected 2026-05-19 / 2026-06-03** — `fallback.py` and `circuit_breaker.py` deleted. Keeper uses honest 503. Resilience lives in Core/SDK. |
 | F-KEEP-03 | High | No warm-up strategy (cold-start latency) | Add startup probe with pre-load dummy inference |
 | F-KEEP-04 | High | Malformed JSON has no fallback/retry | Wrap JSON calls in retry loop + regex-safe heuristic |
 | F-KEEP-05 | High | Model versions not pinned | Pin Ollama image digest + model manifest hashes |

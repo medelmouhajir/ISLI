@@ -45,8 +45,8 @@ export function useCreateSession() {
 export function useSendMessage() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ sessionId, text }: { sessionId: string; text: string }) =>
-      postJSON(`/v1/sessions/${sessionId}/message`, { text }),
+    mutationFn: ({ sessionId, text, voiceMode }: { sessionId: string; text: string; voiceMode?: boolean }) =>
+      postJSON(`/v1/sessions/${sessionId}/message`, { text, voice_mode_enabled: voiceMode }),
     onSuccess: (_, variables) => {
       // Only invalidate the detail query; WebSocket will update the list via setQueryData
       queryClient.invalidateQueries({ queryKey: ['sessions', variables.sessionId] })

@@ -5,6 +5,7 @@ The standard library for building and running ISLI-compatible agents.
 ## Core Features
 
 - **Auto-Discovery:** Automatically registers tools based on the skills assigned to the agent in the Core API.
+- **Dynamic Configuration:** Real-time synchronization of skills, persona, and model settings via WebSockets (zero-restart updates).
 - **ReAct Loop:** Built-in support for the ReAct pattern using LiteLLM.
 - **Tiered Memory:** First-class support for Episodic, Semantic, and Archival memory.
 - **Sandboxed Workspace:** Tools for safe file operations within an isolated workspace.

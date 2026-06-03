@@ -1,5 +1,8 @@
+import asyncio
+import base64
 import json
 import os
+import subprocess
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -13,14 +16,21 @@ from isli_core.security.policy_engine import PolicyEngine
 from isli_core.db import get_db
 from isli_core.memory.keeper_client import KeeperClient
 from isli_core.memory.chroma_client import ChromaMemoryClient
+from isli_core.services.skill_manager import skill_manager
+from isli_core.config import get_settings
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import uuid4
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/skills", tags=["skills"])
 
+class SkillInstallRequest(BaseModel):
+    skill_id: str
+    git_url: str
+
 SKILL_REGISTRY = {
     "web-fetch": os.getenv("SKILL_WEB_FETCH_URL", "http://localhost:8100"),
+    "web-search": os.getenv("SKILL_WEB_SEARCH_URL", "http://localhost:8100"),
     "summarize": os.getenv("SKILL_SUMMARIZE_URL", "http://localhost:8100"),
     "translate": os.getenv("SKILL_TRANSLATE_URL", "http://localhost:8100"),
     "shell-exec": os.getenv("SKILL_SHELL_EXEC_URL", "http://localhost:8100"),
@@ -30,10 +40,43 @@ SKILL_REGISTRY = {
     "file-delete": os.getenv("SKILL_FILE_DELETE_URL", "http://localhost:8300"),
     "summarize-text": os.getenv("SKILL_SUMMARIZE_TEXT_URL", "http://localhost:8100"),
     "embed-text": os.getenv("SKILL_EMBED_TEXT_URL", "http://localhost:8100"),
+    "test-skill": os.getenv("SKILL_TEST_URL", "http://localhost:8100"),
+    "register-skill": os.getenv("SKILL_REGISTER_URL", "http://localhost:8100"),
+    "update-skill": os.getenv("SKILL_UPDATE_URL", "http://localhost:8100"),
+    "interactive-debugger": os.getenv("SKILL_INTERACTIVE_DEBUGGER_URL", "http://localhost:8100"),
+    "speech-to-text": os.getenv("SKILL_SPEECH_TO_TEXT_URL", "http://localhost:8400/stt"),
+    "text-to-speech": os.getenv("SKILL_TEXT_TO_SPEECH_URL", "http://localhost:8400/tts"),
+    "db-query": os.getenv("SKILL_DB_QUERY_URL", "http://localhost:8100"),
+    "git-clone": os.getenv("SKILL_GIT_CLONE_URL", "http://localhost:8300"),
+    "git-status": os.getenv("SKILL_GIT_STATUS_URL", "http://localhost:8300"),
+    "git-commit": os.getenv("SKILL_GIT_COMMIT_URL", "http://localhost:8300"),
+    "git-push": os.getenv("SKILL_GIT_PUSH_URL", "http://localhost:8300"),
+    "git-pull": os.getenv("SKILL_GIT_PULL_URL", "http://localhost:8300"),
+    "git-branch-list": os.getenv("SKILL_GIT_BRANCH_LIST_URL", "http://localhost:8300"),
+    "git-branch-create": os.getenv("SKILL_GIT_BRANCH_CREATE_URL", "http://localhost:8300"),
+    "git-checkout": os.getenv("SKILL_GIT_CHECKOUT_URL", "http://localhost:8300"),
+    "git-log": os.getenv("SKILL_GIT_LOG_URL", "http://localhost:8300"),
+    "pip-install": os.getenv("SKILL_PIP_INSTALL_URL", "http://localhost:8300"),
+    "pip-list": os.getenv("SKILL_PIP_LIST_URL", "http://localhost:8300"),
+    "web-browse-navigate": os.getenv("SKILL_WEB_BROWSE_NAVIGATE_URL", "http://localhost:8100/browse"),
+    "web-browse-snapshot": os.getenv("SKILL_WEB_BROWSE_SNAPSHOT_URL", "http://localhost:8100/browse"),
+    "web-browse-click": os.getenv("SKILL_WEB_BROWSE_CLICK_URL", "http://localhost:8100/browse"),
+    "web-browse-type": os.getenv("SKILL_WEB_BROWSE_TYPE_URL", "http://localhost:8100/browse"),
+    "web-browse-press": os.getenv("SKILL_WEB_BROWSE_PRESS_URL", "http://localhost:8100/browse"),
+    "web-browse-scroll": os.getenv("SKILL_WEB_BROWSE_SCROLL_URL", "http://localhost:8100/browse"),
+    "web-browse-back": os.getenv("SKILL_WEB_BROWSE_BACK_URL", "http://localhost:8100/browse"),
+    "web-browse-console": os.getenv("SKILL_WEB_BROWSE_CONSOLE_URL", "http://localhost:8100/browse"),
+    "web-browse-vision": os.getenv("SKILL_WEB_BROWSE_VISION_URL", "http://localhost:8100/browse"),
+    "web-browse-images": os.getenv("SKILL_WEB_BROWSE_IMAGES_URL", "http://localhost:8100/browse"),
+    "get-secret": "inline",
     "memory-save": "inline",
     "memory-delete": "inline",
     "memory-search": "inline",
     "send-message": "inline",
+    "create-kanban-task": "inline",
+    "create-engineering-plan": "inline",
+    "ui-components": "inline",
+    "notify-user": "inline",
 }
 
 # Metadata exposed via GET /v1/skills for dynamic skill discovery.
@@ -41,62 +84,242 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
     "web-fetch": {
         "description": "Fetch content from a URL and return structured data.",
         "type": "external",
+        "category": "web",
     },
     "summarize": {
         "description": "Summarize long text into a concise summary.",
         "type": "external",
+        "category": "content",
     },
     "translate": {
         "description": "Translate text between languages.",
         "type": "external",
+        "category": "content",
     },
     "shell-exec": {
         "description": "Execute a shell command safely.",
         "type": "external",
+        "category": "system",
     },
     "web-search": {
         "description": "Search the web using local SearXNG instance.",
         "type": "external",
+        "category": "web",
+    },
+    "web-browse-navigate": {
+        "description": "Navigate a browser to a URL. Creates or reuses a persistent session per agent.",
+        "type": "external",
+        "category": "web",
+    },
+    "web-browse-snapshot": {
+        "description": "Take an accessibility-tree snapshot of the current page. Returns compact text with @ref IDs for interactive elements.",
+        "type": "external",
+        "category": "web",
+    },
+    "web-browse-click": {
+        "description": "Click an element by its @ref ID from the last snapshot.",
+        "type": "external",
+        "category": "web",
+    },
+    "web-browse-type": {
+        "description": "Type text into an input field by its @ref ID.",
+        "type": "external",
+        "category": "web",
+    },
+    "web-browse-press": {
+        "description": "Press a keyboard key (Enter, Tab, Escape, etc.).",
+        "type": "external",
+        "category": "web",
+    },
+    "web-browse-scroll": {
+        "description": "Scroll the page up or down.",
+        "type": "external",
+        "category": "web",
+    },
+    "web-browse-back": {
+        "description": "Navigate back in browser history.",
+        "type": "external",
+        "category": "web",
+    },
+    "web-browse-console": {
+        "description": "Return browser console logs captured since the last call.",
+        "type": "external",
+        "category": "web",
+    },
+    "web-browse-vision": {
+        "description": "Take a screenshot of the current page and return it as base64.",
+        "type": "external",
+        "category": "web",
+    },
+    "web-browse-images": {
+        "description": "List all image elements on the current page with src and alt text.",
+        "type": "external",
+        "category": "web",
     },
     "file-read": {
         "description": "Read a file from the agent workspace.",
         "type": "external",
+        "category": "workspace",
     },
     "file-write": {
         "description": "Write or overwrite a file in the agent workspace.",
         "type": "external",
+        "category": "workspace",
     },
     "file-list": {
         "description": "List files and directories in the agent workspace.",
         "type": "external",
+        "category": "workspace",
     },
     "file-delete": {
         "description": "Delete a file from the agent workspace.",
         "type": "external",
+        "category": "workspace",
     },
     "summarize-text": {
         "description": "Summarize text using the Keeper sidecar.",
         "type": "external",
+        "category": "content",
     },
     "embed-text": {
         "description": "Generate text embeddings using the Keeper sidecar.",
         "type": "external",
+        "category": "content",
+    },
+    "test-skill": {
+        "description": "Dry-run test dynamic skill code in a sandbox.",
+        "type": "external",
+        "category": "engineering",
+    },
+    "register-skill": {
+        "description": "Register a new dynamic skill after successful testing.",
+        "type": "external",
+        "category": "engineering",
+    },
+    "update-skill": {
+        "description": "Update metadata of an existing dynamic skill.",
+        "type": "external",
+        "category": "engineering",
+    },
+    "interactive-debugger": {
+        "description": "Run code in an interactive debugger with breakpoints and variable inspection.",
+        "type": "external",
+        "category": "engineering",
+    },
+    "speech-to-text": {
+        "description": "Transcribe audio to text using local Whisper STT.",
+        "type": "external",
+        "category": "audio",
+    },
+    "text-to-speech": {
+        "description": "Synthesize speech from text using local Piper TTS.",
+        "type": "external",
+        "category": "audio",
+    },
+    "db-query": {
+        "description": "Run a read-only SQL query against the ISLI database. Returns structured tabular results. Only SELECT statements on allowed schemas are permitted.",
+        "type": "external",
+        "category": "database",
+    },
+    "git-clone": {
+        "description": "Clone a remote git repository into the agent's workspace. Supports optional branch selection.",
+        "type": "external",
+        "category": "git",
+    },
+    "git-status": {
+        "description": "Show the working tree status of a git repository: modified, staged, and untracked files.",
+        "type": "external",
+        "category": "git",
+    },
+    "git-commit": {
+        "description": "Stage files and commit changes in a git repository with a message.",
+        "type": "external",
+        "category": "git",
+    },
+    "git-push": {
+        "description": "Push the current or specified branch to a remote repository.",
+        "type": "external",
+        "category": "git",
+    },
+    "git-pull": {
+        "description": "Pull changes from a remote repository into the current branch.",
+        "type": "external",
+        "category": "git",
+    },
+    "git-branch-list": {
+        "description": "List all branches in a git repository, indicating the current branch.",
+        "type": "external",
+        "category": "git",
+    },
+    "git-branch-create": {
+        "description": "Create a new branch in a git repository, optionally checking it out.",
+        "type": "external",
+        "category": "git",
+    },
+    "git-checkout": {
+        "description": "Checkout (switch to) an existing branch in a git repository.",
+        "type": "external",
+        "category": "git",
+    },
+    "git-log": {
+        "description": "Show the commit history of a git repository.",
+        "type": "external",
+        "category": "git",
+    },
+    "pip-install": {
+        "description": "Install Python packages from PyPI into the agent's workspace. Uses pip install --target so packages persist across restarts.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "pip-list": {
+        "description": "List Python packages installed in the agent's workspace via pip-install.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "get-secret": {
+        "description": "Retrieve a secret value from the agent's secure vault by name. Used to access API keys, database credentials, or tokens without hardcoding them.",
+        "type": "inline",
+        "category": "system",
     },
     "memory-save": {
         "description": "Save a fact to the agent's semantic memory.",
         "type": "inline",
+        "category": "memory",
     },
     "memory-delete": {
         "description": "Delete a fact from the agent's semantic memory.",
         "type": "inline",
+        "category": "memory",
     },
     "memory-search": {
         "description": "Search the agent's semantic memory for relevant facts.",
         "type": "inline",
+        "category": "memory",
     },
     "send-message": {
         "description": "Send a message to a user via their channel.",
         "type": "inline",
+        "category": "communication",
+    },
+    "create-kanban-task": {
+        "description": "Create a task on the Kanban board (enables self-delegation).",
+        "type": "inline",
+        "category": "kanban",
+    },
+    "create-engineering-plan": {
+        "description": "Generate a structured SE implementation plan (PLAN.md).",
+        "type": "inline",
+        "category": "engineering",
+    },
+    "ui-components": {
+        "description": "Render interactive UI components (tables, cards, buttons) inline in chat.",
+        "type": "inline",
+        "category": "system",
+    },
+    "notify-user": {
+        "description": "Send a notification to a user through the unified notification system. Respects user preferences, quiet hours, and rate limits (max 20/hour per user per agent).",
+        "type": "inline",
+        "category": "communication",
     },
 }
 
@@ -112,6 +335,7 @@ class SkillMetadataOut(BaseModel):
     name: str
     description: str
     type: str
+    category: str = "uncategorized"
     url: str | None = None
 
 
@@ -122,6 +346,7 @@ async def list_skills():
     Used by agents at startup for dynamic skill discovery and tool auto-registration.
     """
     skills = []
+    # Static skills
     for name, base_url in SKILL_REGISTRY.items():
         meta = SKILL_METADATA.get(name, {})
         skills.append(
@@ -129,10 +354,60 @@ async def list_skills():
                 name=name,
                 description=meta.get("description", ""),
                 type=meta.get("type", "external"),
+                category=meta.get("category", "uncategorized"),
                 url=base_url if base_url != "inline" else None,
             )
         )
+    
+    # Dynamic skills
+    dynamic_meta = skill_manager.get_skill_metadata()
+    for skill_id, meta in dynamic_meta.items():
+        skills.append(
+            SkillMetadataOut(
+                name=skill_id,
+                description=meta.get("description", "Installed via Skills Store"),
+                type="dynamic",
+                category=meta.get("category", "custom"),
+                url=None,
+            )
+        )
+
     return skills
+
+
+@router.post("/install")
+async def install_skill(
+    request: SkillInstallRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Clones a skill from a git repository and registers it locally."""
+    settings = get_settings()
+    target_dir = os.path.join(settings.installed_skills_path, request.skill_id)
+
+    if os.path.exists(target_dir):
+        logger.info("skills.install_already_exists", skill_id=request.skill_id)
+        # Optionally perform git pull here
+        try:
+            subprocess.run(["git", "-C", target_dir, "pull"], check=True)
+        except subprocess.CalledProcessError as e:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to update skill: {str(e)}"
+            ) from e
+    else:
+        try:
+            logger.info(
+                "skills.install_cloning", skill_id=request.skill_id, url=request.git_url
+            )
+            subprocess.run(["git", "clone", request.git_url, target_dir], check=True)
+        except subprocess.CalledProcessError as e:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to clone skill repository: {str(e)}"
+            ) from e
+
+    # Refresh registry
+    skill_manager.refresh_registry()
+
+    return {"status": "success", "skill_id": request.skill_id, "path": target_dir}
 
 
 @router.post("/{skill_name}/{action}")
@@ -143,8 +418,14 @@ async def skill_proxy(
     db: AsyncSession = Depends(get_db),
 ):
     base_url = SKILL_REGISTRY.get(skill_name)
+    
+    # Check if it's a dynamic skill if not in static registry
+    is_dynamic = False
     if not base_url:
-        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not registered")
+        if skill_name in skill_manager.get_skill_metadata():
+            is_dynamic = True
+        else:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not registered")
 
     # Verify internal auth header from caller
     try:
@@ -157,6 +438,49 @@ async def skill_proxy(
             raise
 
     body_bytes = await request.body()
+
+    # Dynamic skill handler
+    if is_dynamic:
+        handler = skill_manager.get_handler(skill_name)
+        if not handler:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Handler for dynamic skill '{skill_name}' could not be loaded",
+            )
+
+        try:
+            body_json = (
+                json.loads(body_bytes.decode("utf-8", errors="ignore"))
+                if body_bytes
+                else {}
+            )
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from e
+
+        # Assume dynamic skills have a 'handle' function or similar
+        if hasattr(handler, "handle"):
+            try:
+                # Dynamic skills can be async or sync
+                if asyncio.iscoroutinefunction(handler.handle):
+                    return await handler.handle(action, body_json, db)
+                else:
+                    return handler.handle(action, body_json, db)
+            except Exception as e:
+                logger.error(
+                    "skills.dynamic_handler_failed",
+                    skill=skill_name,
+                    action=action,
+                    error=str(e),
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Dynamic skill execution failed: {str(e)}",
+                ) from e
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Dynamic skill '{skill_name}' missing 'handle' function",
+            )
 
     # Inline handlers for memory skills (executed directly in Core, no external proxy)
     if base_url == "inline":
@@ -221,8 +545,13 @@ async def skill_proxy(
             channel = body_json.get("channel")
             channel_user_id = body_json.get("channel_user_id")
             text = body_json.get("text")
+            audio_b64 = body_json.get("audio_b64")
             if not all([agent_id, channel, channel_user_id, text]):
                 raise HTTPException(status_code=400, detail="Missing required fields: agent_id, channel, channel_user_id, text")
+
+            # Validate audio_b64 size at schema level (5 MB raw ~ 6.7 MB base64)
+            if audio_b64 and len(audio_b64) > 6_700_000:
+                raise HTTPException(status_code=413, detail="audio_b64 exceeds maximum size of 5 MB decoded")
 
             from sqlalchemy import select
             from isli_core.models import Agent, Session, ChannelMessage
@@ -270,23 +599,64 @@ async def skill_proxy(
                 sess.expires_at = now + timedelta(hours=24)
                 sess.last_activity_at = now
 
-            sess.messages = (sess.messages or []) + [
-                {"role": "assistant", "content": text, "timestamp": now.isoformat()}
-            ]
+            # --- Audio handling for send-message skill ---
+            audio_url: str | None = None
+            audio_b64_for_channels = audio_b64
+            if audio_b64_for_channels:
+                try:
+                    MAX_AUDIO_BYTES = 5 * 1024 * 1024
+                    audio_bytes = base64.b64decode(audio_b64_for_channels)
+                    if len(audio_bytes) > MAX_AUDIO_BYTES:
+                        logger.warning(
+                            "skills.send_message_audio_too_large",
+                            agent_id=agent_id,
+                            size=len(audio_bytes),
+                        )
+                        audio_b64_for_channels = None
+                    else:
+                        from isli_core.routers.workspaces import upload_bytes_to_workspace
+                        audio_filename = f"{uuid4()}.wav"
+                        workspace_path = f"_attachments/audio/{session_id}/{audio_filename}"
+                        await upload_bytes_to_workspace(
+                            agent_id=agent_id,
+                            path=workspace_path,
+                            data=audio_bytes,
+                            scope="attachment",
+                            scope_id=session_id,
+                        )
+                        audio_url = f"/v1/sessions/{session_id}/audio/{audio_filename}"
+                        logger.info(
+                            "skills.send_message_audio_uploaded",
+                            agent_id=agent_id,
+                            filename=audio_filename,
+                            size=len(audio_bytes),
+                        )
+                except Exception as exc:
+                    logger.warning("skills.send_message_audio_upload_failed", agent_id=agent_id, error=str(exc))
+                    audio_b64_for_channels = None
+
+            msg = {"role": "assistant", "content": text, "timestamp": now.isoformat()}
+            if audio_url:
+                msg["audio_url"] = audio_url
+            sess.messages = (sess.messages or []) + [msg]
             sess.last_message_at = now
             await db.commit()
             await db.refresh(sess)
 
             # 3. Audit outbound message
-            msg = ChannelMessage(
+            channel_msg = ChannelMessage(
                 session_id=session_id,
                 sequence_number=len(sess.messages),
                 channel=channel,
                 direction="outbound",
                 content=text,
-                raw_payload={"source": "send_message_skill", "agent_id": agent_id},
+                raw_payload={
+                    "source": "send_message_skill",
+                    "agent_id": agent_id,
+                    "audio_url": audio_url,
+                },
             )
-            db.add(msg)
+            db.add(channel_msg)
             await db.commit()
 
             # 4. Forward to channels service (only for external channels)
@@ -294,16 +664,33 @@ async def skill_proxy(
                 settings = get_settings()
 
                 async def _send_to_channels():
+                    payload_channels = {
+                        "channel": channel,
+                        "channel_user_id": channel_user_id,
+                        "text": text,
+                        "agent_id": agent_id,
+                    }
+                    if audio_b64_for_channels:
+                        payload_channels["audio_b64"] = audio_b64_for_channels
                     async with httpx.AsyncClient() as client:
                         resp = await client.post(
                             f"{settings.channels_url}/send",
-                            json={"channel": channel, "channel_user_id": channel_user_id, "text": text, "agent_id": agent_id},
+                            json=payload_channels,
                             timeout=10.0,
                         )
                         resp.raise_for_status()
 
                 try:
-                    await exponential_backoff(_send_to_channels, max_retries=3, base_delay=1.0, max_delay=10.0)
+                    from isli_core.dynamic_config import get_setting
+                    max_retries = await get_setting(db, "default_max_retries", scope="general", default=3)
+                    base_delay = await get_setting(db, "default_base_delay_seconds", scope="general", default=1.0)
+                    max_delay = await get_setting(db, "default_max_delay_seconds", scope="general", default=10.0)
+                    await exponential_backoff(
+                        _send_to_channels,
+                        max_retries=max_retries,
+                        base_delay=base_delay,
+                        max_delay=max_delay,
+                    )
                 except Exception as exc:
                     logger.error("skills.send_message_failed", agent_id=agent_id, channel=channel, error=str(exc))
             else:
@@ -314,6 +701,90 @@ async def skill_proxy(
                 )
 
             return {"status": "sent", "session_id": session_id}
+
+        if skill_name == "notify-user" and action == "send":
+            agent_id = body_json.get("agent_id")
+            user_id = body_json.get("user_id")
+            title = body_json.get("title")
+            message = body_json.get("message", "")
+            priority = body_json.get("priority", "normal")
+
+            if not all([agent_id, user_id, title]):
+                raise HTTPException(status_code=400, detail="Missing required fields: agent_id, user_id, title")
+
+            # Rate limit check (same logic as notifications router)
+            AGENT_NOTIFY_RATE_LIMIT = 20
+            try:
+                from isli_core.redis_client import get_redis
+                redis = await get_redis()
+                rate_key = f"notif:agent_rate:{agent_id}:{user_id}"
+                count = await redis.incr(rate_key)
+                if count == 1:
+                    await redis.expire(rate_key, 3600)
+                if count > AGENT_NOTIFY_RATE_LIMIT:
+                    raise HTTPException(status_code=429, detail="Notification rate limit exceeded for this agent (max 20/hour per user)")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.warning("skills.notify_user_rate_limit_redis_failed", error=str(exc))
+
+            from isli_core.models import Notification
+            from datetime import datetime, timezone
+
+            notif = Notification(
+                user_id=user_id,
+                event_type="agent:proactive",
+                category=priority,
+                title=title,
+                body=message or None,
+                agent_id=agent_id,
+            )
+            db.add(notif)
+            await db.commit()
+            await db.refresh(notif)
+
+            # Emit WS event
+            from isli_core.event_manager import EventManager
+            await EventManager.emit(
+                "notification:new",
+                {
+                    "notification_id": notif.id,
+                    "user_id": user_id,
+                    "event_type": "agent:proactive",
+                    "category": priority,
+                    "title": title,
+                    "body": message,
+                    "created_at": notif.created_at.isoformat() if notif.created_at else None,
+                    "agent_id": agent_id,
+                },
+            )
+
+            return {"ok": True, "notification_id": notif.id}
+
+        if skill_name == "get-secret" and action == "get":
+            secret_name = body_json.get("name")
+            if not secret_name:
+                raise HTTPException(status_code=400, detail="Missing name in request body")
+
+            from isli_core.secrets_service import get_secret_value
+            from isli_core.audit_writer import AuditWriter
+
+            value = await get_secret_value(db, agent_id, secret_name)
+            if value is None:
+                raise HTTPException(status_code=404, detail=f"Secret '{secret_name}' not found")
+
+            # Audit every secret read (value never logged)
+            await AuditWriter.write(
+                session=db,
+                actor_type="agent",
+                actor_id=agent_id,
+                action="secret.read",
+                target_type="secret",
+                target_id=secret_name,
+                payload={"agent_id": agent_id, "secret_name": secret_name},
+            )
+            await db.commit()
+            return {"status": "ok", "name": secret_name, "value": value}
 
         raise HTTPException(status_code=404, detail=f"Action '{action}' not found for skill '{skill_name}'")
 
@@ -373,8 +844,21 @@ async def skill_proxy(
             skill_name, _call_skill, max_retries=3
         )
 
+        # Notify isli-skills about usage for telemetry (Hygiene)
+        # Avoid double-counting if the skill is already hosted by isli-skills (8100)
+        SKILLS_SERVICE_URL = os.getenv("SKILL_WEB_FETCH_URL", "http://localhost:8100").rstrip("/")
+        if result.is_valid and ":8100" not in base_url:
+            async def _notify_usage():
+                async with httpx.AsyncClient() as client:
+                    token = create_internal_token("core-api", scopes=["skill:telemetry"], expires_minutes=1)
+                    await client.post(
+                        f"{SKILLS_SERVICE_URL}/skills/{skill_name}/usage",
+                        headers={"X-Internal-Auth": token}
+                    )
+            asyncio.create_task(_notify_usage())
+
         # Phase 2: Local Skill Cleaning (Signal Harvesting)
-        HEAVY_SKILLS = {"web-fetch", "shell-exec"}
+        HEAVY_SKILLS = {"web-fetch", "shell-exec", "web-browse-snapshot", "web-browse-vision"}
         if result.is_valid and skill_name in HEAVY_SKILLS:
             logger.info("skills.harvesting.cleaning", skill=skill_name)
             # Use the action or a generic goal for cleaning

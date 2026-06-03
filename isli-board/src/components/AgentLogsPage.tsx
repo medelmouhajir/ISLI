@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { ChevronLeft, Terminal, Trash2, Download, Search, Settings2 } from 'lucide-react'
+import { ChevronLeft, Terminal, Trash2, Download, Search, Settings2, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { ConfirmationModal } from '@/components/ui/ConfirmationModal'
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
+import { AuditLogBlock } from './AuditLogBlock'
 
 interface LogEntry {
   timestamp?: string
@@ -19,12 +21,71 @@ export function AgentLogsPage() {
   const agent = useMemo(() => agents.find((a) => a.id === id), [agents, id])
 
   const [logs, setLogs] = useState<LogEntry[]>([])
+  const isHistoryLoadedRef = useRef(false)
+  const pendingLogsRef = useRef<LogEntry[]>([])
   const [filter, setFilter] = useState('')
   const [autoScroll, setAutoScroll] = useState(true)
   const [isConnected, setIsConnected] = useState(false)
   
+  const [historyOffset, setHistoryOffset] = useState(100)
+  const [hasMoreHistory, setHasMoreHistory] = useState(true)
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [confirmModal, setConfirmModal] = useState<{
+    open: boolean;
+    title: string;
+    description: string;
+    onConfirm: () => void | Promise<void>;
+  }>({
+    open: false,
+    title: '',
+    description: '',
+    onConfirm: () => {},
+  })
+
   const scrollRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
+
+  const loadOlderHistory = async () => {
+    if (!id || isLoadingHistory || !hasMoreHistory) return
+    
+    setIsLoadingHistory(true)
+    const container = scrollRef.current
+    const prevScrollHeight = container?.scrollHeight || 0
+    
+    try {
+      const res = await fetch(`/api/v1/agents/${id}/logs/history?limit=100&offset=${historyOffset}`)
+      const olderLogs = await res.json()
+      
+      if (Array.isArray(olderLogs)) {
+        if (olderLogs.length < 100) {
+          setHasMoreHistory(false)
+        }
+        
+        // Dedup against existing logs
+        const existingKeys = new Set(logs.map(l => `${l.timestamp}-${l.event}-${JSON.stringify(l.args || {})}`))
+        const filteredOlder = olderLogs.filter(l => !existingKeys.has(`${l.timestamp}-${l.event}-${JSON.stringify(l.args || {})}`))
+        
+        if (filteredOlder.length > 0) {
+          setLogs(prev => [...filteredOlder, ...prev])
+          setHistoryOffset(prev => prev + 100)
+          
+          // Anchor scroll position
+          requestAnimationFrame(() => {
+            if (container) {
+              container.scrollTop += container.scrollHeight - prevScrollHeight
+            }
+          })
+        } else if (olderLogs.length > 0) {
+          // All were duplicates but we got some, try next page
+          setHistoryOffset(prev => prev + 100)
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load older history:', err)
+    } finally {
+      setIsLoadingHistory(false)
+    }
+  }
 
   useEffect(() => {
     if (!id) return
@@ -33,6 +94,7 @@ export function AgentLogsPage() {
     const host = window.location.host
     const wsUrl = `${protocol}//${host}/api/v1/agents/${id}/logs/stream`
 
+    // 1. Start WebSocket and buffer incoming events
     const connect = () => {
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
@@ -45,7 +107,11 @@ export function AgentLogsPage() {
       ws.onmessage = (event) => {
         try {
           const entry = JSON.parse(event.data)
-          setLogs((prev) => [...prev, entry].slice(-1000)) // Keep last 1000 logs
+          if (!isHistoryLoadedRef.current) {
+            pendingLogsRef.current.push(entry)
+          } else {
+            setLogs((prev) => [...prev, entry].slice(-1000))
+          }
         } catch (e) {
           console.error('Failed to parse log entry:', e)
         }
@@ -66,10 +132,30 @@ export function AgentLogsPage() {
 
     connect()
 
+    // 2. Fetch history and flush buffer
+    fetch(`/api/v1/agents/${id}/logs/history?limit=100`)
+      .then((res) => res.json())
+      .then((history) => {
+        if (Array.isArray(history)) {
+          setLogs([...history, ...pendingLogsRef.current].slice(-1000))
+        }
+        isHistoryLoadedRef.current = true
+        pendingLogsRef.current = []
+      })
+      .catch((err) => {
+        console.error('Failed to fetch log history:', err)
+        isHistoryLoadedRef.current = true // Allow live logs to start flowing anyway
+      })
+
     return () => {
       if (wsRef.current) {
         wsRef.current.close()
       }
+      isHistoryLoadedRef.current = false
+      pendingLogsRef.current = []
+      setHistoryOffset(100)
+      setHasMoreHistory(true)
+      setIsLoadingHistory(false)
     }
   }, [id])
 
@@ -100,7 +186,12 @@ export function AgentLogsPage() {
   }
 
   const clearLogs = () => {
-    setLogs([])
+    setConfirmModal({
+      open: true,
+      title: 'Clear Session Logs',
+      description: 'Are you sure you want to clear the logs in the current view? This will only clear your local terminal view and will not delete history from the server.',
+      onConfirm: () => setLogs([]),
+    })
   }
 
   return (
@@ -173,41 +264,98 @@ export function AgentLogsPage() {
             </div>
           ) : (
             <div className="space-y-1">
-              {filteredLogs.map((log, i) => (
-                <div key={i} className="group flex gap-3 py-0.5 hover:bg-white/5 px-2 rounded -mx-2 transition-colors">
-                  <span className="text-text-muted flex-shrink-0 w-32 select-none">
-                    {log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '---'}
+              <div className="flex flex-col items-center py-4 border-b border-white/5 mb-4">
+                {hasMoreHistory ? (
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    onClick={loadOlderHistory} 
+                    disabled={isLoadingHistory}
+                    className="text-[10px] font-mono-data uppercase tracking-widest text-accent-cyan hover:bg-accent-cyan/10"
+                  >
+                    {isLoadingHistory ? 'Synchronizing History...' : 'Load Older Logs'}
+                  </Button>
+                ) : (
+                  <span className="text-[10px] font-mono-data uppercase tracking-widest text-text-muted opacity-50">
+                    Showing oldest available logs (1000 max)
                   </span>
-                  <span className={cn(
-                    "flex-shrink-0 w-16 font-bold uppercase select-none",
-                    log.level === 'error' ? 'text-accent-red' : 
-                    log.level === 'warning' ? 'text-accent-amber' : 
-                    log.level === 'debug' ? 'text-text-muted' : 
-                    'text-accent-cyan'
-                  )}>
-                    {log.level || 'info'}
-                  </span>
-                  <div className="flex-1 flex flex-col">
-                    <span className="text-text-primary">
-                      <span className="text-accent-purple font-bold mr-2">{log.event}:</span>
-                      {Object.entries(log)
-                        .filter(([k]) => !['timestamp', 'level', 'event'].includes(k))
-                        .map(([k, v]) => (
-                          <span key={k} className="mr-3">
-                            <span className="text-text-muted">{k}=</span>
-                            <span className="text-accent-amber">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</span>
-                          </span>
-                        ))
-                      }
+                )}
+              </div>
+
+              {filteredLogs.map((log, i) => {
+                // 1. Audit Logs (Industrial Anchor)
+                if (log.event === 'runner.tool_execution' || log.event === 'runner.tool_validation_failed') {
+                  return <AuditLogBlock key={i} log={log} />
+                }
+
+                // 2. Circuit Breaker Transitions (Industrial Signaling)
+                if (log.event === 'circuit_breaker.transition') {
+                  const stateColor = 
+                    log.state === 'OPEN' ? 'text-[#FF3B30]' : 
+                    log.state === 'HALF_OPEN' ? 'text-[#FFB800]' : 
+                    'text-[#C6FF4A]'
+                  
+                  return (
+                    <div key={i} className={cn("flex gap-3 py-1 px-2 rounded -mx-2 bg-white/5 border border-white/10 my-1")}>
+                      <span className="text-text-muted flex-shrink-0 w-32 select-none">
+                        {log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '---'}
+                      </span>
+                      <div className="flex-1 flex items-center gap-2">
+                        {log.state === 'OPEN' ? <ShieldAlert className={cn("w-4 h-4", stateColor)} /> : <ShieldCheck className={cn("w-4 h-4", stateColor)} />}
+                        <span className="text-text-primary font-bold">
+                          CIRCUIT_BREAKER: <span className={cn("uppercase", stateColor)}>{log.name}</span> TRANSITIONED TO <span className={cn("font-black underline", stateColor)}>{log.state}</span>
+                        </span>
+                      </div>
+                    </div>
+                  )
+                }
+
+                // 3. Standard Logs
+                return (
+                  <div key={i} className="group flex gap-3 py-0.5 hover:bg-white/5 px-2 rounded -mx-2 transition-colors">
+                    <span className="text-text-muted flex-shrink-0 w-32 select-none">
+                      {log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '---'}
                     </span>
+                    <span className={cn(
+                      "flex-shrink-0 w-16 font-bold uppercase select-none",
+                      log.level === 'error' ? 'text-accent-red' : 
+                      log.level === 'warning' ? 'text-accent-amber' : 
+                      log.level === 'debug' ? 'text-text-muted' : 
+                      'text-accent-cyan'
+                    )}>
+                      {log.level || 'info'}
+                    </span>
+                    <div className="flex-1 flex flex-col">
+                      <span className="text-text-primary">
+                        <span className="text-accent-purple font-bold mr-2">{log.event}:</span>
+                        {Object.entries(log)
+                          .filter(([k]) => !['timestamp', 'level', 'event'].includes(k))
+                          .map(([k, v]) => (
+                            <span key={k} className="mr-3">
+                              <span className="text-text-muted">{k}=</span>
+                              <span className="text-accent-amber">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</span>
+                            </span>
+                          ))
+                        }
+                      </span>
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
               <div className="h-4" /> {/* Spacer for bottom */}
             </div>
           )}
         </div>
       </div>
+      <ConfirmationModal
+        open={confirmModal.open}
+        title={confirmModal.title}
+        description={confirmModal.description}
+        variant="warning"
+        confirmText="Clear View"
+        onConfirm={confirmModal.onConfirm}
+        onClose={() => setConfirmModal(prev => ({ ...prev, open: false }))}
+      />
     </div>
   )
 }

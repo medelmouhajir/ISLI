@@ -1,0 +1,70 @@
+# ISLI — Local Development Overrides
+# Place this file next to docker-compose.yml. Docker Compose merges it automatically.
+
+services:
+  core:
+    build:
+      context: ./isli-core
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+      # Use the main postgres service instead of local sqlite
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
+      REDIS_URL: redis://redis:6379/0
+      ANONYMIZED_TELEMETRY: "FALSE"
+      AGENT_SDK_HOST_PATH: ${PROJECT_ROOT}/isli-agent-sdk/src
+      # Container-internal path: Core has isli-agent-sdk mounted at /opt/isli/isli-agent-sdk
+      AGENT_RUNNER_BUILD_CONTEXT: /opt/isli/isli-agent-sdk
+      WORKSPACE_BASE_PATH: /workspaces
+    volumes:
+      - ./isli-core/src/isli_core:/app/src/isli_core
+      - ./prompts.yaml:/app/prompts.yaml
+      - ./isli-agent-sdk:/opt/isli/isli-agent-sdk:ro
+      - ./workspaces:/workspaces
+
+  keeper:
+    build:
+      context: ./isli-keeper
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
+    volumes:
+      - ./isli-keeper/src:/app/src:ro
+      - ./prompts.yaml:/app/prompts.yaml
+
+  channels:
+    build:
+      context: ./isli-channels
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+    volumes:
+      - ./isli-channels/src:/app/src:ro
+
+  skills:
+    build:
+      context: ./isli-skills
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+    volumes:
+      - ./isli-skills/src:/app/src:ro
+      - ./workspaces:/workspaces:ro
+
+  workspace:
+    build:
+      context: ./isli-workspace
+      dockerfile: Dockerfile
+    environment:
+      ISLI_ENV: development
+      WORKSPACE_BASE_PATH: /workspaces
+      REDIS_URL: redis://redis:6379/4
+    volumes:
+      - ./isli-workspace/src:/app/src:ro
+      - ./workspaces:/workspaces
+
+  board:
+    build:
+      context: ./isli-board
+      dockerfile: Dockerfile

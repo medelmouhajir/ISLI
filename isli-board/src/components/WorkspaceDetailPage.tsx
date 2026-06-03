@@ -27,6 +27,7 @@ import {
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
+import { ConfirmationModal } from '@/components/ui/ConfirmationModal'
 import { Textarea } from '@/components/ui/Textarea'
 import { downloadFileBlob } from '@/lib/api'
 import type { WorkspaceEntry } from '@/types'
@@ -39,6 +40,18 @@ export function WorkspaceDetailPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [editingContent, setEditingContent] = useState('')
   const [isDirty, setIsDirty] = useState(false)
+  const [confirmModal, setConfirmModal] = useState<{
+    open: boolean;
+    title: string;
+    description: string;
+    onConfirm: () => void | Promise<void>;
+    variant?: 'primary' | 'danger' | 'warning';
+  }>({
+    open: false,
+    title: '',
+    description: '',
+    onConfirm: () => {},
+  })
 
   const { data, isLoading, refetch, isRefetching } = useWorkspaceFiles(agentId!, currentPath)
   const { data: fileData, isLoading: isLoadingFile } = useReadWorkspaceFile(agentId!, selectedFile ? (currentPath ? `${currentPath}/${selectedFile}` : selectedFile) : null)
@@ -64,7 +77,18 @@ export function WorkspaceDetailPage() {
   }
 
   const handleCloseEditor = () => {
-    if (isDirty && !confirm('You have unsaved changes. Close anyway?')) {
+    if (isDirty) {
+      setConfirmModal({
+        open: true,
+        title: 'Unsaved Changes',
+        description: 'You have unsaved changes in this file. Are you sure you want to close and discard them?',
+        onConfirm: () => {
+          setSelectedFile(null)
+          setEditingContent('')
+          setIsDirty(false)
+        },
+        variant: 'warning',
+      })
       return
     }
     setSelectedFile(null)
@@ -87,14 +111,21 @@ export function WorkspaceDetailPage() {
   const handleDelete = async (e: React.MouseEvent, entry: WorkspaceEntry) => {
     e.stopPropagation()
     if (!agentId) return
-    if (!confirm(`Are you sure you want to delete ${entry.name}?`)) return
-
-    const fullPath = currentPath ? `${currentPath}/${entry.name}` : entry.name
-    try {
-      await deleteMutation.mutateAsync({ agentId, path: fullPath })
-    } catch (err) {
-      alert('Failed to delete: ' + (err instanceof Error ? err.message : String(err)))
-    }
+    
+    setConfirmModal({
+      open: true,
+      title: `Delete ${entry.type === 'directory' ? 'Folder' : 'File'}`,
+      description: `Are you sure you want to delete "${entry.name}"? This action cannot be undone.`,
+      onConfirm: async () => {
+        const fullPath = currentPath ? `${currentPath}/${entry.name}` : entry.name
+        try {
+          await deleteMutation.mutateAsync({ agentId, path: fullPath })
+        } catch (err) {
+          alert('Failed to delete: ' + (err instanceof Error ? err.message : String(err)))
+        }
+      },
+      variant: 'danger',
+    })
   }
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -341,6 +372,15 @@ export function WorkspaceDetailPage() {
           )}
         </div>
       </Modal>
+      <ConfirmationModal
+        open={confirmModal.open}
+        title={confirmModal.title}
+        description={confirmModal.description}
+        variant={confirmModal.variant}
+        onConfirm={confirmModal.onConfirm}
+        onClose={() => setConfirmModal(prev => ({ ...prev, open: false }))}
+        isLoading={deleteMutation.isPending}
+      />
     </div>
   )
 }

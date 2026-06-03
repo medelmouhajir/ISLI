@@ -1,46 +1,201 @@
+import json
 import os
+import shutil
 from contextlib import asynccontextmanager
-from typing import Any
-
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File, Form
+import httpx
+import structlog
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-import structlog
 
-from .config import settings
-from .sandbox import read_file, write_file, list_dir, delete_file, write_file_bytes, create_dir, resolve_path
 from .auth import require_internal_auth
+from .config import settings
+from .sandbox import (
+    check_quota,
+    create_dir,
+    delete_file,
+    list_dir,
+    read_file,
+    resolve_path,
+    write_file,
+    write_file_bytes,
+)
+from .git_ops import (
+    git_clone,
+    git_status,
+    git_commit,
+    git_push,
+    git_pull,
+    git_branch_list,
+    git_branch_create,
+    git_checkout,
+    git_log,
+    GitNotRepoError,
+    GitAuthError,
+    GitConflictError,
+    GitRemoteError,
+    GitInvalidOperationError,
+)
+from .package_ops import (
+    pip_install,
+    pip_list,
+    PackageInstallError,
+    PackageInvalidError,
+    PackageTimeoutError,
+)
 
 SERVICE_NAME = "isli-workspace"
 logger = structlog.get_logger()
 
+ScopeType = Literal["agent", "attachment", "shared"]
 
-class ReadRequest(BaseModel):
+class BaseWorkspaceRequest(BaseModel):
     agent_id: str
+    scope: ScopeType = "agent"
+    scope_id: str | None = None  # If None, defaults to agent_id
+
+    @property
+    def effective_scope_id(self) -> str:
+        return self.scope_id or self.agent_id
+
+
+class ReadRequest(BaseWorkspaceRequest):
     path: str
 
 
-class WriteRequest(BaseModel):
-    agent_id: str
+class WriteRequest(BaseWorkspaceRequest):
     path: str
     content: str
 
 
-class ListRequest(BaseModel):
-    agent_id: str
+class ListRequest(BaseWorkspaceRequest):
     path: str = ""
 
 
-class DeleteRequest(BaseModel):
-    agent_id: str
+class DeleteRequest(BaseWorkspaceRequest):
     path: str
 
 
-class MkdirRequest(BaseModel):
-    agent_id: str
+class MkdirRequest(BaseWorkspaceRequest):
     path: str
+
+
+class AttachRequest(BaseModel):
+    agent_id: str
+    task_id: str
+    source_path: str
+    target_path: str
+
+
+class PullRequest(BaseModel):
+    agent_id: str
+    task_id: str
+    source_path: str
+    target_path: str
+
+
+class PromoteRequest(BaseModel):
+    agent_id: str
+    source_scope: ScopeType
+    source_scope_id: str
+    source_path: str
+    target_workspace_id: str
+    target_path: str
+    delete_source: bool = False
+    quota_bytes: int | None = None
+
+
+class GitCloneRequest(BaseWorkspaceRequest):
+    path: str
+    url: str
+    branch: str | None = None
+
+
+class GitStatusRequest(BaseWorkspaceRequest):
+    path: str
+
+
+class GitCommitRequest(BaseWorkspaceRequest):
+    path: str
+    message: str
+    files: list[str] | None = None
+
+
+class GitPushRequest(BaseWorkspaceRequest):
+    path: str
+    remote: str = "origin"
+    branch: str | None = None
+
+
+class GitPullRequest(BaseWorkspaceRequest):
+    path: str
+    remote: str = "origin"
+    branch: str | None = None
+
+
+class GitBranchListRequest(BaseWorkspaceRequest):
+    path: str
+
+
+class GitBranchCreateRequest(BaseWorkspaceRequest):
+    path: str
+    branch_name: str
+    checkout: bool = False
+
+
+class GitCheckoutRequest(BaseWorkspaceRequest):
+    path: str
+    branch_name: str
+
+
+class GitLogRequest(BaseWorkspaceRequest):
+    path: str
+    max_count: int = 10
+
+
+class PipInstallRequest(BaseWorkspaceRequest):
+    packages: list[str]
+    upgrade: bool = False
+
+
+class PipListRequest(BaseWorkspaceRequest):
+    pass
+
+
+async def check_access(agent_id: str, scope: ScopeType, scope_id: str):
+    """
+    Verify if the agent has access to the given scope.
+    Calls isli-core for verification.
+    """
+    if scope == "agent":
+        if agent_id != scope_id:
+            logger.warning("workspace.access_denied", agent_id=agent_id, scope=scope, scope_id=scope_id)
+            raise HTTPException(status_code=403, detail="Cannot access another agent's workspace directly")
+        return
+
+    # For shared and attachment scopes, we verify with isli-core
+    # In a production environment, this would ideally be cached in Redis
+    try:
+        from .auth import create_internal_token
+        token = create_internal_token("isli-workspace", scopes=["core"], expires_minutes=1)
+        headers = {"X-Internal-Auth": f"Bearer {token}"}
+
+        core_url = os.getenv("CORE_API_INTERNAL_URL", "http://core:8000")
+
+        async with httpx.AsyncClient() as client:
+            endpoint = f"/v1/internal/verify-access?agent_id={agent_id}&scope={scope}&scope_id={scope_id}"
+            resp = await client.get(f"{core_url}{endpoint}", headers=headers)
+            if resp.status_code != 200:
+                logger.warning("workspace.access_denied", agent_id=agent_id, scope=scope, scope_id=scope_id, status=resp.status_code)
+                raise HTTPException(status_code=403, detail=f"Access denied to {scope} {scope_id}")
+    except httpx.RequestError as exc:
+        logger.error("workspace.core_connection_error", error=str(exc))
+        # Fail closed for security
+        raise HTTPException(status_code=503, detail="Cannot verify access rights")
 
 
 @asynccontextmanager
@@ -77,8 +232,9 @@ async def live():
 
 @app.post("/read")
 async def read(body: ReadRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
-        result = read_file(body.agent_id, settings.workspace_base_path, body.path)
+        result = read_file(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
         return {"status": "ok", **result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -90,9 +246,10 @@ async def read(body: ReadRequest, _auth: dict = Depends(require_internal_auth)):
 
 
 @app.post("/write")
-async def write(body: WriteRequest, _auth: dict = Depends(require_internal_auth)):
+async def write(body: WriteRequest, quota_bytes: int | None = None, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
-        result = write_file(body.agent_id, settings.workspace_base_path, body.path, body.content)
+        result = write_file(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path, body.content, quota_bytes)
         return {"status": "ok", **result}
     except PermissionError as exc:
         logger.error("workspace.permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
@@ -105,8 +262,9 @@ async def write(body: WriteRequest, _auth: dict = Depends(require_internal_auth)
 
 @app.post("/list")
 async def list_files(body: ListRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
-        result = list_dir(body.agent_id, settings.workspace_base_path, body.path)
+        result = list_dir(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
         return {"status": "ok", **result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -119,8 +277,9 @@ async def list_files(body: ListRequest, _auth: dict = Depends(require_internal_a
 
 @app.post("/delete")
 async def delete(body: DeleteRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
-        result = delete_file(body.agent_id, settings.workspace_base_path, body.path)
+        result = delete_file(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
         return {"status": "ok", **result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -134,13 +293,18 @@ async def delete(body: DeleteRequest, _auth: dict = Depends(require_internal_aut
 @app.post("/upload")
 async def upload(
     agent_id: str = Form(...),
+    scope: ScopeType = Form("agent"),
+    scope_id: str | None = Form(None),
     path: str = Form(...),
     file: UploadFile = File(...),
+    quota_bytes: int | None = Form(None),
     _auth: dict = Depends(require_internal_auth)
 ):
+    effective_scope_id = scope_id or agent_id
+    await check_access(agent_id, scope, effective_scope_id)
     try:
         content = await file.read()
-        result = write_file_bytes(agent_id, settings.workspace_base_path, path, content)
+        result = write_file_bytes(scope, effective_scope_id, settings.workspace_base_path, path, content, quota_bytes)
         return {"status": "ok", **result}
     except PermissionError as exc:
         logger.error("workspace.permission_denied", agent_id=agent_id, path=path, error=str(exc))
@@ -155,15 +319,19 @@ async def upload(
 async def download(
     agent_id: str,
     path: str,
+    scope: ScopeType = "agent",
+    scope_id: str | None = None,
     _auth: dict = Depends(require_internal_auth)
 ):
+    effective_scope_id = scope_id or agent_id
+    await check_access(agent_id, scope, effective_scope_id)
     try:
-        file_path = resolve_path(agent_id, settings.workspace_base_path, path)
+        file_path = resolve_path(scope, effective_scope_id, settings.workspace_base_path, path)
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {path}")
         if file_path.is_dir():
             raise HTTPException(status_code=400, detail="Cannot download a directory")
-        
+
         return FileResponse(
             path=file_path,
             filename=file_path.name,
@@ -180,11 +348,328 @@ async def download(
 
 @app.post("/mkdir")
 async def mkdir(body: MkdirRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
-        result = create_dir(body.agent_id, settings.workspace_base_path, body.path)
+        result = create_dir(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
         return {"status": "ok", **result}
     except PermissionError as exc:
         logger.error("workspace.permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
         raise HTTPException(status_code=403, detail=str(exc))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/attachments/attach")
+async def attach(body: AttachRequest, _auth: dict = Depends(require_internal_auth)):
+    """Copy a file from agent workspace to task attachment."""
+    await check_access(body.agent_id, "attachment", body.task_id)
+    try:
+        src = resolve_path("agent", body.agent_id, settings.workspace_base_path, body.source_path)
+        dst = resolve_path("attachment", body.task_id, settings.workspace_base_path, body.target_path)
+
+        if not src.exists() or src.is_dir():
+            raise HTTPException(status_code=400, detail="Invalid source file")
+
+        dst.parent.mkdir(parents=True, exist_ok=True, mode=0o777)
+        shutil.copy2(src, dst)
+
+        stat = dst.stat()
+        return {
+            "status": "ok",
+            "path": body.target_path,
+            "size_bytes": stat.st_size,
+            "attached_at": datetime.now(UTC).isoformat()
+        }
+    except Exception as exc:
+        logger.error("workspace.attach_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/attachments/pull")
+async def pull(body: PullRequest, _auth: dict = Depends(require_internal_auth)):
+    """Pull an attachment from task to agent workspace, with metadata."""
+    await check_access(body.agent_id, "attachment", body.task_id)
+    try:
+        src = resolve_path("attachment", body.task_id, settings.workspace_base_path, body.source_path)
+        dst = resolve_path("agent", body.agent_id, settings.workspace_base_path, body.target_path)
+
+        if not src.exists() or src.is_dir():
+            raise HTTPException(status_code=400, detail="Invalid source attachment")
+
+        dst.parent.mkdir(parents=True, exist_ok=True, mode=0o777)
+        shutil.copy2(src, dst)
+
+        # Write metadata sidecar
+        meta_path = dst.with_suffix(dst.suffix + ".metadata.json")
+        metadata = {
+            "source_ref": {
+                "task_id": body.task_id,
+                "original_path": body.source_path
+            },
+            "pulled_at": datetime.now(UTC).isoformat(),
+            "pulled_by": body.agent_id
+        }
+        meta_path.write_text(json.dumps(metadata, indent=2))
+
+        return {"status": "ok", "path": body.target_path}
+    except Exception as exc:
+        logger.error("workspace.pull_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/shared/promote")
+async def promote(body: PromoteRequest, _auth: dict = Depends(require_internal_auth)):
+    """Promote a file from agent/task to shared workspace."""
+    await check_access(body.agent_id, body.source_scope, body.source_scope_id)
+    await check_access(body.agent_id, "shared", body.target_workspace_id)
+
+    try:
+        src = resolve_path(body.source_scope, body.source_scope_id, settings.workspace_base_path, body.source_path)
+        dst = resolve_path("shared", body.target_workspace_id, settings.workspace_base_path, body.target_path)
+
+        if not src.exists() or src.is_dir():
+            raise HTTPException(status_code=400, detail="Invalid source file")
+
+        # Check shared workspace quota before writing
+        size = src.stat().st_size
+        if not check_quota("shared", body.target_workspace_id, settings.workspace_base_path, size, body.quota_bytes):
+            raise HTTPException(status_code=413, detail="Shared workspace quota exceeded")
+
+        dst.parent.mkdir(parents=True, exist_ok=True, mode=0o777)
+
+        if body.delete_source:
+            shutil.move(src, dst)
+        else:
+            shutil.copy2(src, dst)
+
+        return {"status": "ok", "path": body.target_path}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("workspace.promote_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─── Git endpoints ────────────────────────────────────────────────
+
+@app.post("/git/clone")
+async def git_clone_endpoint(body: GitCloneRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await git_clone(
+            body.scope, body.effective_scope_id, settings.workspace_base_path,
+            body.path, body.url, body.branch,
+        )
+        return result
+    except GitInvalidOperationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except GitAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except GitRemoteError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.git_clone_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/git/status")
+async def git_status_endpoint(body: GitStatusRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await git_status(
+            body.scope, body.effective_scope_id, settings.workspace_base_path, body.path,
+        )
+        return result
+    except GitNotRepoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except GitRemoteError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.git_status_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/git/commit")
+async def git_commit_endpoint(body: GitCommitRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await git_commit(
+            body.scope, body.effective_scope_id, settings.workspace_base_path,
+            body.path, body.message, body.files,
+        )
+        return result
+    except GitNotRepoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except GitInvalidOperationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.git_commit_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/git/push")
+async def git_push_endpoint(body: GitPushRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await git_push(
+            body.scope, body.effective_scope_id, settings.workspace_base_path,
+            body.path, body.remote, body.branch,
+        )
+        return result
+    except GitNotRepoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except GitAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except GitRemoteError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.git_push_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/git/pull")
+async def git_pull_endpoint(body: GitPullRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await git_pull(
+            body.scope, body.effective_scope_id, settings.workspace_base_path,
+            body.path, body.remote, body.branch,
+        )
+        return result
+    except GitNotRepoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except GitConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except GitAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except GitRemoteError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.git_pull_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/git/branch/list")
+async def git_branch_list_endpoint(body: GitBranchListRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await git_branch_list(
+            body.scope, body.effective_scope_id, settings.workspace_base_path, body.path,
+        )
+        return result
+    except GitNotRepoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.git_branch_list_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/git/branch/create")
+async def git_branch_create_endpoint(body: GitBranchCreateRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await git_branch_create(
+            body.scope, body.effective_scope_id, settings.workspace_base_path,
+            body.path, body.branch_name, body.checkout,
+        )
+        return result
+    except GitNotRepoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except GitInvalidOperationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.git_branch_create_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/git/checkout")
+async def git_checkout_endpoint(body: GitCheckoutRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await git_checkout(
+            body.scope, body.effective_scope_id, settings.workspace_base_path,
+            body.path, body.branch_name,
+        )
+        return result
+    except GitNotRepoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except GitInvalidOperationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.git_checkout_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/git/log")
+async def git_log_endpoint(body: GitLogRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await git_log(
+            body.scope, body.effective_scope_id, settings.workspace_base_path,
+            body.path, body.max_count,
+        )
+        return result
+    except GitNotRepoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.git_log_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ─── Package Manager endpoints ────────────────────────────────────
+
+@app.post("/pip/install")
+async def pip_install_endpoint(body: PipInstallRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await pip_install(
+            body.scope, body.effective_scope_id, settings.workspace_base_path,
+            body.packages, body.upgrade,
+        )
+        return result
+    except PackageInvalidError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PackageTimeoutError as exc:
+        raise HTTPException(status_code=408, detail=str(exc))
+    except PackageInstallError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.pip_install_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/pip/list")
+async def pip_list_endpoint(body: PipListRequest, _auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = await pip_list(
+            body.scope, body.effective_scope_id, settings.workspace_base_path,
+        )
+        return result
+    except PackageInstallError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error("workspace.pip_list_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))

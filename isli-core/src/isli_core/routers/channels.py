@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
+from isli_core.access import resolve_access
 from isli_core.auth import verify_webhook_signature
 from isli_core.db import get_db
 from isli_core.models import ChannelMessage, Task, Session, UserConsent
@@ -46,22 +47,28 @@ async def channel_webhook(channel: str, request: Request, db: AsyncSession = Dep
             logger.info("channels.dedup_drop", channel=channel, dedup_id=dedup_key)
             return {"status": "deduplicated"}
 
-    # Consent gate
     user_id = payload.get("user_id")
     if user_id is not None:
         user_id = str(user_id)
-        consent = await db.execute(
-            select(UserConsent).where(
-                UserConsent.user_id == user_id,
-                UserConsent.channel == channel,
-                UserConsent.granted == True,
-            )
-        )
-        if not consent.scalar_one_or_none():
-            logger.warning("channels.consent_missing", channel=channel, user_id=user_id)
-            raise HTTPException(status_code=403, detail="User consent not granted")
 
     agent_id = payload.get("agent_id")
+
+    # Mode-aware access control (opt_in / open / whitelist / closed / scheduled)
+    if agent_id:
+        await resolve_access(db, agent_id, user_id, channel)
+    else:
+        # Fallback path: simple consent gate for non-session messages
+        if user_id is not None:
+            consent = await db.execute(
+                select(UserConsent).where(
+                    UserConsent.user_id == user_id,
+                    UserConsent.channel == channel,
+                    UserConsent.granted == True,
+                )
+            )
+            if not consent.scalar_one_or_none():
+                logger.warning("channels.consent_missing", channel=channel, user_id=user_id)
+                raise HTTPException(status_code=403, detail="consent_required")
 
     if agent_id:
         # Session conversation path: direct 1:1 chat with the agent

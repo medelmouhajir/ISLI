@@ -25,6 +25,14 @@ RATE_CARD: dict[str, ModelRate] = {
     "claude-opus-4-7-thinking": ModelRate("claude-opus-4-7-thinking", "anthropic", 7.50, 30.00, reasoning_per_1k=15.00),
     "qwen3:1.7b": ModelRate("qwen3:1.7b", "ollama", 0.0, 0.0, is_local=True),
     "qwen3:0.6b": ModelRate("qwen3:0.6b", "ollama", 0.0, 0.0, is_local=True),
+    # Gemini 2.5 (2026-05-31)
+    "gemini-2.5-pro": ModelRate("gemini-2.5-pro", "google", 0.00125, 0.01),
+    "gemini-2.5-flash": ModelRate("gemini-2.5-flash", "google", 0.0003, 0.0025),
+    "gemini-2.5-flash-lite": ModelRate("gemini-2.5-flash-lite", "google", 0.0001, 0.0004),
+    # Gemini 3 & 3.1 (2026-05-31)
+    "gemini-3.1-pro": ModelRate("gemini-3.1-pro", "google", 0.002, 0.012),
+    "gemini-3.0-flash": ModelRate("gemini-3.0-flash", "google", 0.0005, 0.003),
+    "gemini-3.1-flash-lite": ModelRate("gemini-3.1-flash-lite", "google", 0.00025, 0.0015),
 }
 
 

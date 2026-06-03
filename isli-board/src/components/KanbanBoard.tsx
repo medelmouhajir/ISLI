@@ -108,6 +108,8 @@ export function KanbanBoard({ tasks, onMove, onSchedule, onDelete, onShowDetail,
           return taskDate >= startOfWeek(now, { weekStartsOn: 1 }) // Monday start
         case 'month':
           return taskDate >= startOfMonth(now)
+        case 'upcoming':
+          return taskDate > now
         default:
           return true
       }

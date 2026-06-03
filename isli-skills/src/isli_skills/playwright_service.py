@@ -17,7 +17,9 @@ async def browse_url(url: str, wait_for_selector: str | None = None, screenshot:
         
         try:
             logger.info("playwright.navigate", url=url)
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            response = await page.goto(url, wait_until="networkidle", timeout=30000)
+            
+            status_code = response.status if response else 0
             
             if wait_for_selector:
                 await page.wait_for_selector(wait_for_selector, timeout=10000)
@@ -28,7 +30,8 @@ async def browse_url(url: str, wait_for_selector: str | None = None, screenshot:
             result: dict[str, Any] = {
                 "title": title,
                 "content": content,
-                "url": page.url
+                "url": page.url,
+                "status_code": status_code
             }
             
             if screenshot:

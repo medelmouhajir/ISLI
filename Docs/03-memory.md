@@ -174,6 +174,28 @@ CREATE TABLE message_archive (
 
 ---
 
+## Memory Observability
+
+To mitigate **Context Drift (F4)** and **History Loss (F8)**, ISLI provides real-time and historical visibility into the memory lifecycle via the Kanban Board UI. Memory events are persisted in a bounded Redis List (last 50 events) to ensure state survives UI reloads.
+
+### 1. Structured Journal Diffs
+Visualizes the compaction process from Tier 1 (Session) to Tier 2 (Episodic).
+- **Log Event**: `memory:journal_updated`
+- **UI View**: Side-by-side line-level diff showing what the Keeper added or removed from the persistent session journal.
+
+### 2. RAG Retrieval Inspector
+Exposes the specific memories retrieved from Tier 2 and Tier 3 during context injection.
+- **Log Event**: `memory:context_injected`
+- **UI View**: Confidence bars showing cosine similarity scores, source tiers, and the raw memory fragments.
+- **Metrics**: Total tokens injected vs. available context window.
+
+### 3. Context Truncation Alerts
+Warns when the agent's memory exceeds the model's `max_injection_tokens`.
+- **Log Event**: `memory:context_truncated`
+- **UI View**: Warning banner showing token counts before and after pruning, ensuring operators know when critical history was discarded to fit the window.
+
+---
+
 ## Scoped Memory: Agent vs Global
 
 | Scope | What it contains | Who can read | Who can write |
@@ -205,7 +227,7 @@ Keeper assembles Fast-Path Block (Zero LLM Latency)
       │
       ▼
 Agent prepends block to system prompt
-Agent calls its model API with: [block] + [agent persona] + [task]
+Agent prepends the block to its system prompt (which already contains persona via the SDK) and calls its model API.
 ```
 
 ---
@@ -216,7 +238,8 @@ Agent calls its model API with: [block] + [agent persona] + [task]
 2. **Session memory expires.** Redis TTL = 24 hours by default.
 3. **No raw message content in Episodic memory.** Only Keeper-generated summaries.
 4. **Importance decay**: episodic memories lose importance weight over time unless re-accessed.
-5. **Cross-agent contamination prevention**: Agent A cannot read Agent B's episodic memory without explicit delegation.
+5. **Scheduled physical deletion**: `MemoryGCWorker` (Core) runs every 24 hours, applying exponential-decay importance scoring (30-day half-life) and hard-deleting memories that fall below threshold `0.1`. Soft-deleted rows are purged after 30 days.
+6. **Cross-agent contamination prevention**: Agent A cannot read Agent B's episodic memory without explicit delegation.
 
 ---
 
@@ -240,22 +263,22 @@ The following gaps were identified during a parallel 12-agent research review:
 
 ### Critical
 - **Embedding model version drift unhandled** — updating `nomic-embed-text` invalidates the entire vector corpus with no migration pipeline.
-- **No ChromaDB backup/restore strategy** — vectors live at `./data/vectors` with zero snapshots or tested recovery.
+- ~~**No ChromaDB backup/restore strategy**~~ — **Fixed 2026-05-30**. `scripts/chromadb_backup.py` supports backup/restore with SHA-256 integrity verification. `scripts/backup.sh` includes ChromaDB snapshots with sidecar checksums and S3 upload. `ChromaBackupWorker` runs every 6 hours, stores metadata in `chromadb_backups` table, auto-verifies checksums, and enforces retention. Admin endpoints (`POST /v1/admin/backups/chromadb/trigger`, `GET /v1/admin/backups/chromadb`, `POST /v1/admin/backups/chromadb/restore`) provide on-demand control and restore runbook URL.
 
 ### High
 - **No guarantee that episodic summary matches its embedding** — summary generation and embedding are separate, unvalidated steps.
 - **Compaction information loss rate unmeasured** — a 1.7B model compresses to 200 tokens with no benchmarks.
 - **Tier 4 archival append-only with no partitioning/retention** — violates GDPR Art. 5(1)(e); no cold storage migration.
-- **Redis session data has no persistence guarantee** — RDB/AOF not mentioned; restart wipes active sessions.
+- ~~**Redis session data has no persistence guarantee**~~ — **Fixed**. `docker-compose.yml` configures Redis with `--appendonly yes` (AOF persistence); `docker-compose.scale-out.yml` replicates with AOF.
 - **Vector DB lacks agent-level isolation** — cross-agent guard is query-layer `agent_id` filter only, not DB-level.
 - **No memory inconsistency detection or repair** — no checksums, reconciliation jobs, or cross-tier audits.
-- **Dual-write (PostgreSQL + ChromaDB) lacks atomicity** — no transaction coordinator, outbox, or saga.
+- ~~**Dual-write (PostgreSQL + ChromaDB) lacks atomicity**~~ — **Fixed 2026-05-19**. `OutboxPublisher` + `OutboxWorker` (`isli_core/memory/outbox.py` and `jobs/outbox_worker.py`) provide atomic outbox pattern with retry logic.
 
 ### Medium
 - **Semantic memory deduplication missing** — explicit saves can create redundant vectors.
-- **Episodic importance decay undefined** — mentioned as hygiene rule but no algorithm or physical GC.
+- ~~**Episodic importance decay undefined**~~ — **Fixed 2026-05-28**. `MemoryGCWorker` runs every 24h, applies exponential-decay importance scoring (30-day half-life), and physically deletes memories below threshold `0.1`. Soft-deleted rows are purged after 30 days.
 - **Semantic cache no invalidation** — Redis 1-hour cache not invalidated on ChromaDB updates.
-- **Hardcoded vector dimension without guard** — `VECTOR(768)` is fixed with no runtime model-size check.
-- **Archival tables lack performance indexes** — no composite indexes on `(agent_id, created_at)`.
+- ~~**Hardcoded vector dimension without guard**~~ — **Fixed 2026-05-19**. SQLAlchemy model strictly enforces `VECTOR(768)`; dimension mismatch is rejected at the DB layer.
+- ~~**Archival tables lack performance indexes**~~ — **Fixed 2026-05-30**. `episodic_memories` has `ix_episodic_memories_agent_id_created_at`; `channel_messages` has `ix_channel_messages_session_seq` and `ix_channel_messages_channel`.
 
-> See `Memory/ISLI-Research-Report.md` for full details and recommendations.etails and recommendations.
+> See `Memory/ISLI-Research-Report.md` for full details and recommendations.

@@ -63,13 +63,13 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
             exit={{ opacity: 0, y: 40, scale: 0.96 }}
             transition={{ type: 'spring', damping: 25, stiffness: 350 }}
             className={cn(
-              'relative bg-bg-surface border border-border-bright rounded-t-2xl sm:rounded-2xl',
+              'relative bg-bg-surface border border-border-bright rounded-none',
               'w-full sm:max-w-md shadow-2xl',
               'max-h-[90vh] sm:max-h-[85vh] overflow-y-auto',
               className
             )}
           >
-            <div className="sticky top-0 z-10 flex items-center justify-between px-5 sm:px-6 py-4 border-b border-border-dim bg-bg-surface/95 backdrop-blur-sm rounded-t-2xl sm:rounded-t-2xl"
+            <div className="sticky top-0 z-10 flex items-center justify-between px-5 sm:px-6 py-4 border-b border-border-dim bg-bg-surface/95 backdrop-blur-sm rounded-none"
             >
               <h2 id="modal-title" className="text-lg font-display font-semibold text-text-primary">
                 {title}
@@ -77,7 +77,7 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
               <button
                 onClick={onClose}
                 aria-label="Close dialog"
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-elevated transition-colors border border-transparent hover:border-border-dim"
+                className="w-8 h-8 rounded-none flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-elevated transition-colors border border-transparent hover:border-border-dim"
               >
                 <X className="w-4 h-4" />
               </button>

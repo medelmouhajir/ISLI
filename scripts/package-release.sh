@@ -11,7 +11,7 @@ RELEASE_DIR="${PROJECT_ROOT}/isli-release-${VERSION}"
 IMAGES_DIR="${RELEASE_DIR}/images"
 
 SERVICES=(isli-core isli-keeper isli-channels isli-skills isli-board)
-REGISTRY="ghcr.io/medelmouhajir"
+REGISTRY="${DOCKER_REGISTRY:-ghcr.io/medelmouhajir}"
 
 echo "[package-release] Packaging ISLI release ${VERSION}"
 

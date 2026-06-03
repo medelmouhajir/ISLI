@@ -9,10 +9,10 @@ APPROVAL_DEPTH = 2
 
 
 class DepthLimitError(HTTPException):
-    def __init__(self, depth: int):
+    def __init__(self, depth: int, max_depth: int = MAX_DEPTH):
         super().__init__(
             status_code=403,
-            detail=f"Delegation depth limit ({MAX_DEPTH}) exceeded at depth {depth}. Human approval required.",
+            detail=f"Delegation depth limit ({max_depth}) exceeded at depth {depth}. Human approval required.",
         )
 
 
@@ -40,13 +40,22 @@ async def get_task_chain(session: AsyncSession, parent_task_id: str | None) -> l
 
 
 async def validate_delegation(
-    session: AsyncSession, parent_task_id: str | None, proposed_agent_id: str | None
+    session: AsyncSession,
+    parent_task_id: str | None,
+    proposed_agent_id: str | None,
+    max_depth: int | None = None,
+    approval_depth: int | None = None,
 ) -> int:
+    if max_depth is None:
+        max_depth = MAX_DEPTH
+    if approval_depth is None:
+        approval_depth = APPROVAL_DEPTH
+
     chain = await get_task_chain(session, parent_task_id)
     depth = len(chain)
 
-    if depth >= MAX_DEPTH:
-        raise DepthLimitError(depth)
+    if depth >= max_depth:
+        raise DepthLimitError(depth, max_depth)
 
     # Cycle detection: check if any ancestor has the same agent assignment
     if proposed_agent_id is not None and parent_task_id is not None:
@@ -74,5 +83,7 @@ async def validate_delegation(
     return depth
 
 
-async def needs_human_approval(depth: int) -> bool:
-    return depth >= APPROVAL_DEPTH
+async def needs_human_approval(depth: int, approval_depth: int | None = None) -> bool:
+    if approval_depth is None:
+        approval_depth = APPROVAL_DEPTH
+    return depth >= approval_depth

@@ -81,7 +81,7 @@ async def _check_token_revocation(payload: dict[str, Any]) -> None:
             if token_iat < issued_at_ts:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token has been revoked",
+                    detail="Token has been revoked (policy violation)",
                 )
 
 

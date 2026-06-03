@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from threading import Lock
 from typing import Any
 
+import numpy as np
+
 
 class KeeperMetrics:
     """Lightweight in-memory metrics collector for the Keeper dashboard."""
@@ -25,6 +27,8 @@ class KeeperMetrics:
         endpoint: str,
         model: str | None,
         latency_ms: float,
+        inference_ms: float | None = None,
+        queue_wait_ms: float | None = None,
         prompt: str = "",
         completion: str = "",
         tokens_in: int | None = None,
@@ -52,6 +56,8 @@ class KeeperMetrics:
                     "endpoint": endpoint,
                     "model": model or "unknown",
                     "latency_ms": round(latency_ms, 2),
+                    "inference_ms": round(inference_ms, 2) if inference_ms is not None else None,
+                    "queue_wait_ms": round(queue_wait_ms, 2) if queue_wait_ms is not None else None,
                     "prompt": prompt,
                     "completion": completion,
                     "prompt_preview": prompt[:80],
@@ -67,19 +73,50 @@ class KeeperMetrics:
         with self._lock:
             self._active_requests += 1
 
-    def get_snapshot(self) -> dict[str, Any]:
+    def get_snapshot(self, queue_depths: dict[int, int] | None = None) -> dict[str, Any]:
         with self._lock:
             total = max(self._total_requests, 1)
             avg_latency = round(self._total_latency_ms / total, 2)
-            return {
+            
+            # Calculate percentiles for successful inferences
+            latencies = [log["latency_ms"] for log in self._inference_log if log["status"] == "success"]
+            p50 = round(float(np.percentile(latencies, 50)), 2) if latencies else 0
+            p95 = round(float(np.percentile(latencies, 95)), 2) if latencies else 0
+            p99 = round(float(np.percentile(latencies, 99)), 2) if latencies else 0
+
+            # Determine SLO status
+            # Threshold: P95 < 30s for critical path (context_inject is P0)
+            # This is a simple heuristic for now
+            slo_status = "healthy"
+            if p95 > 30000:
+                slo_status = "degraded"
+            if p95 > 60000:
+                slo_status = "critical"
+
+            snapshot = {
                 "start_time_iso": datetime.fromtimestamp(self._start_time, tz=UTC).isoformat(),
                 "active_requests": self._active_requests,
                 "total_requests": self._total_requests,
                 "avg_latency_ms": avg_latency,
+                "percentiles": {
+                    "p50_ms": p50,
+                    "p95_ms": p95,
+                    "p99_ms": p99,
+                },
+                "slos": {
+                    "status": slo_status,
+                },
                 "agent_calls": dict(self._agent_calls),
                 "error_counts": dict(self._error_counts),
                 "recent_inferences": list(self._inference_log),
             }
+
+            if queue_depths:
+                snapshot["queue"] = {
+                    f"p{k}_depth": v for k, v in queue_depths.items()
+                }
+
+            return snapshot
 
 
 _metrics = KeeperMetrics()

@@ -1,7 +1,10 @@
 import structlog
+import subprocess
 from typing import Any
 
 logger = structlog.get_logger()
+
+MAX_VOICE_DURATION_SEC = 300
 
 MIME_ALIASES = {
     "image/jpg": "image/jpeg",
@@ -57,6 +60,33 @@ def validate_for_channel(media_type: str, size_bytes: int, channel: str) -> None
         raise ValueError(
             f"File size {size_mb:.1f}MB exceeds {channel} limit of {config['max_size_mb']}MB"
         )
+
+
+def convert_wav_to_opus_ogg(wav_bytes: bytes) -> bytes:
+    """Convert WAV audio bytes to Opus/OGG using ffmpeg.
+
+    Raises RuntimeError if ffmpeg fails.
+    """
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-i", "-",
+            "-f", "ogg",
+            "-c:a", "libopus",
+            "-b:a", "24k",
+            "-vbr", "on",
+            "-compression_level", "10",
+            "-",
+        ],
+        input=wav_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="ignore")[:500]
+        logger.error("ffmpeg.wav_to_opus_failed", stderr=stderr)
+        raise RuntimeError(f"ffmpeg WAV→OGG conversion failed: {stderr}")
+    return proc.stdout
 
 
 def convert_attachment(attachment: dict[str, Any], target_channel: str) -> dict[str, Any]:

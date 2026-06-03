@@ -13,6 +13,7 @@ from isli_core.config import get_settings
 from isli_core.event_manager import EventManager
 from isli_core.routers.tasks import TaskOut
 from isli_core.fallback import FallbackManager
+from isli_core.dynamic_config import get_setting
 
 logger = structlog.get_logger()
 
@@ -28,7 +29,8 @@ class CheckpointRecoveryWorker:
         settings = get_settings()
         now = datetime.now(timezone.utc)
         heartbeat_cutoff = now - timedelta(minutes=stale_minutes)
-        lease_minutes = settings.task_lease_minutes
+        lease_minutes = await get_setting(session, "task_lease_minutes", scope="general", default=settings.task_lease_minutes)
+        max_retries = await get_setting(session, "default_max_retries", scope="general", default=3)
         
         # 1. Tasks with stale heartbeats
         stale_stmt = select(Task, Agent).join(Agent, Task.agent_id == Agent.id).where(
@@ -101,18 +103,25 @@ class CheckpointRecoveryWorker:
                 continue
 
             # 1. Apply Hard Retry E-Stop
-            if task.retry_count >= 3:
-                logger.error("checkpoint.e_stop", task_id=task.id, retries=task.retry_count)
+            if task.retry_count >= max_retries:
+                logger.error("checkpoint.e_stop", task_id=task.id, retries=task.retry_count, max_retries=max_retries)
                 task.status = "failed"
-                task.blocked_reason = f"Max retries (3) exceeded. Poison Pill detected."
+                task.blocked_reason = f"Max retries ({max_retries}) exceeded. Poison Pill detected."
                 task.updated_at = now
                 await session.flush()
-                
+
                 await EventManager.emit("task:moved", {
                     "task_id": task.id,
                     "from": "doing",
                     "to": "failed",
                     "task": TaskOut.model_validate(task).model_dump(mode="json")
+                })
+                await EventManager.emit("system:alert", {
+                    "severity": "critical",
+                    "message": f"Task {task.id} E-Stopped after {max_retries} retries (Poison Pill).",
+                    "task_id": task.id,
+                    "agent_id": task.agent_id,
+                    "category": "agent_crash",
                 })
                 continue
 

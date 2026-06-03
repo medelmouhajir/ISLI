@@ -1,5 +1,6 @@
 import asyncio
 import structlog
+import traceback
 from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 from sqlalchemy import select, update
@@ -94,11 +95,13 @@ class OutboxWorker:
                     logger.info("outbox.processed", outbox_id=msg.id, topic=msg.topic)
                 except Exception as exc:
                     error_str = str(exc)
+                    tb = traceback.format_exc()
                     logger.error(
                         "outbox.handler_failed",
                         outbox_id=msg.id,
                         topic=msg.topic,
                         error=error_str,
+                        traceback=tb,
                     )
                     await session.execute(
                         update(Outbox)

@@ -20,7 +20,14 @@ chromadb==0.5.23
 greenlet==3.2.1
 jsonschema==4.23.0
 cryptography==44.0.2
+pywebpush==2.2.0
+py-vapid==1.7.0
 prometheus-client==0.25.0
 onnxruntime>=1.17.0
 python-multipart==0.0.12
 pyyaml==6.0.2
+litellm==1.62.1
+websockets==15.0
+google-genai>=0.8.0
+docker>=7.0
+croniter==6.0.0

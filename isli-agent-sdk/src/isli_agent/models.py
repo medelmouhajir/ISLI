@@ -7,13 +7,20 @@ class AgentConfig(BaseModel):
     name: str
     description: Optional[str] = None
     persona: Optional[str] = None
-    model_provider: str
-    model_id: str
+    model_provider: Optional[str] = None
+    model_id: Optional[str] = None
     channels: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
+    known_agent_ids: list[str] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
     token_budget: Optional[int] = None
+    api_key: Optional[str] = None
     heartbeat_interval: int = 180
+    model_routing_enabled: bool = False
+    secondary_models: list[dict] = Field(default_factory=list)
+    # Forward-compatible fields from Core Agent record (may be absent in config endpoint)
+    status: Optional[str] = None
+    status_reason: Optional[str] = None
 
 class Task(BaseModel):
     id: str
@@ -26,6 +33,11 @@ class Task(BaseModel):
     context_summary: Optional[str] = None
     payload: Optional[dict[str, Any]] = None
     scheduled_at: Optional[datetime] = None
+    complexity_score: Optional[int] = None
+    complexity_tier: Optional[str] = None
+    routed_model_provider: Optional[str] = None
+    routed_model_id: Optional[str] = None
+    routed_model_reason: Optional[str] = None
 
 class ContextInjection(BaseModel):
     context_summary: str

@@ -7,18 +7,25 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'mask-icon.svg'],
+      includeAssets: ['favicon.png', 'apple-touch-icon.png', 'mask-icon.svg'],
       manifest: {
         name: 'ISLI Board',
         short_name: 'ISLI',
         description: 'ISLI Intelligent Kanban Board',
         theme_color: '#000000',
+        background_color: '#000000',
+        display: 'standalone',
+        start_url: '/',
+        orientation: 'portrait',
         icons: [
           {
-            src: 'vite.svg',
-            sizes: 'any',
-            type: 'image/svg+xml',
+            src: 'favicon.png',
+            sizes: '64x64',
+            type: 'image/png',
             purpose: 'any'
           },
           {
@@ -36,6 +43,22 @@ export default defineConfig({
             sizes: '512x512',
             type: 'image/png',
             purpose: 'any maskable'
+          }
+        ],
+        shortcuts: [
+          {
+            name: 'System Dashboard',
+            short_name: 'Dashboard',
+            description: 'View system node telemetry',
+            url: '/',
+            icons: [{ src: 'favicon.png', sizes: '64x64', type: 'image/png' }]
+          },
+          {
+            name: 'Kanban Board',
+            short_name: 'Kanban',
+            description: 'Manage agent tasks',
+            url: '/kanban',
+            icons: [{ src: 'favicon.png', sizes: '64x64', type: 'image/png' }]
           }
         ]
       },
@@ -72,6 +95,11 @@ export default defineConfig({
         target: process.env.CORE_API_URL || 'http://isli-core:8000',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+      '/channels-api': {
+        target: process.env.CHANNELS_API_URL || 'http://isli-channels:8200',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/channels-api/, ''),
       },
       '/ws': {
         target: process.env.CORE_API_URL || 'http://isli-core:8000',

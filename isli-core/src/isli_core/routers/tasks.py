@@ -1,21 +1,25 @@
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
+from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from isli_core.config import get_settings
 from isli_core.db import get_db
 from isli_core.models import Task
 from isli_core.locking import increment_task_version
 from isli_core.audit_writer import AuditWriter
 from isli_core.security.content_scanner import ContentScanner
 from isli_core.security.policy_engine import PolicyEngine
-from isli_core.memory.keeper_client import KeeperClient
 from isli_core.event_manager import EventManager
 from isli_core.checkpoint import CheckpointManager
-from isli_core.auth import require_admin_auth
+from isli_core.auth import require_admin_auth, require_internal_auth, create_internal_token
+from isli_core.delegation import validate_delegation, needs_human_approval
+from isli_core.dynamic_config import get_setting
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -37,6 +41,24 @@ class TaskCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     idempotency_key: str | None = None
     scheduled_at: datetime | None = None
+    cron_expression: str | None = None
+
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not croniter.is_valid(v):
+            raise ValueError("Invalid cron expression")
+        
+        # Check for minimum interval of 5 minutes
+        now = datetime.now(timezone.utc)
+        it = croniter(v, now)
+        t1 = it.get_next(datetime)
+        t2 = it.get_next(datetime)
+        if (t2 - t1).total_seconds() < 300:
+            raise ValueError("Cron interval must be at least 5 minutes")
+        return v
 
 
 class TaskUpdate(BaseModel):
@@ -54,6 +76,32 @@ class TaskUpdate(BaseModel):
     token_usage: dict[str, Any] | None = None
     saga_log: list[dict[str, Any]] | None = None
     scheduled_at: datetime | None = None
+    cron_expression: str | None = None
+    attachments: list[dict[str, Any]] | None = None
+    retain_attachments: bool | None = None
+
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not croniter.is_valid(v):
+            raise ValueError("Invalid cron expression")
+        
+        # Check for minimum interval of 5 minutes
+        now = datetime.now(timezone.utc)
+        it = croniter(v, now)
+        t1 = it.get_next(datetime)
+        t2 = it.get_next(datetime)
+        if (t2 - t1).total_seconds() < 300:
+            raise ValueError("Cron interval must be at least 5 minutes")
+        return v
+
+
+class CheckpointCreate(BaseModel):
+    turn_number: int
+    messages: list[dict[str, Any]]
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class TaskOut(BaseModel):
@@ -87,6 +135,15 @@ class TaskOut(BaseModel):
     retry_count: int
     idempotency_key: str | None
     scheduled_at: datetime | None
+    cron_expression: str | None
+    last_triggered_at: datetime | None
+    attachments: list[dict[str, Any]]
+    retain_attachments: bool
+    complexity_score: int | None
+    complexity_tier: str | None
+    routed_model_provider: str | None
+    routed_model_id: str | None
+    routed_model_reason: str | None
 
     model_config = {"from_attributes": True}
 
@@ -96,6 +153,7 @@ async def list_tasks(
     status: str | None = None,
     agent_id: str | None = None,
     db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
 ):
     stmt = select(Task).where(Task.deleted_at.is_(None))
     if status:
@@ -162,13 +220,24 @@ async def create_task(
         parent_task = parent.scalar_one_or_none()
         if not parent_task:
             raise HTTPException(status_code=404, detail="Parent task not found")
-        depth = parent_task.depth + 1
-        if depth > 3:
-            raise HTTPException(status_code=400, detail="Max delegation depth exceeded")
+
+        max_depth = await get_setting(db, "delegation_max_depth", scope="general", default=3)
+        depth = await validate_delegation(db, payload.parent_task_id, payload.agent_id, max_depth=max_depth)
+        if await needs_human_approval(depth, approval_depth=await get_setting(db, "delegation_approval_depth", scope="general", default=2)):
+            # Store the approval requirement in the task payload for downstream handling
+            if payload.payload is None:
+                payload.payload = {}
+            payload.payload["needs_human_approval"] = True
 
     # Determine initial status
     now = datetime.now(timezone.utc)
-    if payload.scheduled_at and payload.scheduled_at > now:
+    
+    scheduled_at = payload.scheduled_at
+    if payload.cron_expression and not scheduled_at:
+        it = croniter(payload.cron_expression, now)
+        scheduled_at = it.get_next(datetime)
+
+    if scheduled_at and scheduled_at > now:
         initial_status = "pending"
     else:
         initial_status = "pending_context" if payload.agent_id else "inbox"
@@ -189,7 +258,8 @@ async def create_task(
         depth=depth,
         tags=payload.tags,
         idempotency_key=payload.idempotency_key,
-        scheduled_at=payload.scheduled_at,
+        scheduled_at=scheduled_at,
+        cron_expression=payload.cron_expression,
     )
     
     db.add(task)
@@ -345,13 +415,13 @@ async def append_saga_entry(
 @router.post("/{task_id}/checkpoint", response_model=dict)
 async def save_checkpoint(
     task_id: str,
-    turn_number: int,
-    messages: list[dict[str, Any]],
-    tool_calls: list[dict[str, Any]] | None = None,
+    payload: CheckpointCreate,
     db: AsyncSession = Depends(get_db),
     _admin: str = Depends(require_admin_auth)
 ):
-    cp = await CheckpointManager.save(db, task_id, turn_number, messages, tool_calls)
+    cp = await CheckpointManager.save(
+        db, task_id, payload.turn_number, payload.messages, payload.tool_calls
+    )
     await db.commit()
     return {"status": "ok", "checkpoint_id": cp.id}
 
@@ -369,6 +439,115 @@ async def get_latest_checkpoint(task_id: str, db: AsyncSession = Depends(get_db)
         "tool_calls": cp.tool_calls,
         "created_at": cp.created_at.isoformat() if cp.created_at else None
     }
+
+
+class TaskAttachRequest(BaseModel):
+    agent_id: str
+    source_path: str
+    target_path: str
+
+
+class TaskPullRequest(BaseModel):
+    agent_id: str
+    source_path: str
+    target_path: str
+
+
+@router.post("/{task_id}/attachments/attach", response_model=dict)
+async def attach_to_task(
+    task_id: str,
+    payload: TaskAttachRequest,
+    db: AsyncSession = Depends(get_db),
+    _auth: dict = Depends(require_internal_auth)
+):
+    # Verify task exists and agent has access (handled by require_internal_auth and internal check later)
+    result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    settings = get_settings()
+    url = f"{settings.workspace_url}/attachments/attach"
+    token = create_internal_token("core-api", scopes=["workspace"], expires_minutes=1)
+    
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            url,
+            json={
+                "agent_id": payload.agent_id,
+                "task_id": task_id,
+                "source_path": payload.source_path,
+                "target_path": payload.target_path
+            },
+            headers={"X-Internal-Auth": f"Bearer {token}"}
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        
+        ws_result = resp.json()
+        
+    # Update task attachments in DB
+    current_attachments = list(task.attachments or [])
+    new_attachment = {
+        "name": payload.target_path.split("/")[-1],
+        "path": payload.target_path,
+        "size_bytes": ws_result.get("size_bytes"),
+        "attached_by": payload.agent_id,
+        "attached_at": ws_result.get("attached_at")
+    }
+    current_attachments.append(new_attachment)
+    task.attachments = current_attachments
+    task.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    
+    await AuditWriter.write(
+        db, actor_type="agent", actor_id=payload.agent_id, action="attach_to_task",
+        target_type="task", target_id=task_id,
+        payload=new_attachment
+    )
+    await db.commit()
+    
+    return {"status": "ok", "attachment": new_attachment}
+
+
+@router.post("/{task_id}/attachments/pull", response_model=dict)
+async def pull_from_task(
+    task_id: str,
+    payload: TaskPullRequest,
+    db: AsyncSession = Depends(get_db),
+    _auth: dict = Depends(require_internal_auth)
+):
+    result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    settings = get_settings()
+    url = f"{settings.workspace_url}/attachments/pull"
+    token = create_internal_token("core-api", scopes=["workspace"], expires_minutes=1)
+    
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            url,
+            json={
+                "agent_id": payload.agent_id,
+                "task_id": task_id,
+                "source_path": payload.source_path,
+                "target_path": payload.target_path
+            },
+            headers={"X-Internal-Auth": f"Bearer {token}"}
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        
+    await AuditWriter.write(
+        db, actor_type="agent", actor_id=payload.agent_id, action="pull_from_task",
+        target_type="task", target_id=task_id,
+        payload={"source_path": payload.source_path, "target_path": payload.target_path}
+    )
+    await db.commit()
+    
+    return {"status": "ok"}
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)

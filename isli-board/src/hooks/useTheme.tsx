@@ -1,10 +1,19 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 
-type Theme = 'light' | 'dark' | 'system'
+type Theme =
+  | 'light'
+  | 'dark'
+  | 'system'
+  | 'midnight'
+  | 'obsidian'
+  | 'dusk'
+  | 'terminal'
+  | 'canvas'
+  | 'sandstone'
 
 interface ThemeContextType {
   theme: Theme
-  resolvedTheme: 'light' | 'dark'
+  resolvedTheme: string
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
 }
@@ -13,6 +22,18 @@ const ThemeContext = createContext<ThemeContextType | null>(null)
 
 const STORAGE_KEY = 'isli-theme'
 
+const THEMES: Theme[] = [
+  'light',
+  'dark',
+  'system',
+  'midnight',
+  'obsidian',
+  'dusk',
+  'terminal',
+  'canvas',
+  'sandstone',
+]
+
 function getSystemTheme(): 'light' | 'dark' {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
@@ -20,7 +41,7 @@ function getSystemTheme(): 'light' | 'dark' {
 function getInitialTheme(): Theme {
   try {
     const stored = localStorage.getItem(STORAGE_KEY) as Theme | null
-    if (stored && ['light', 'dark', 'system'].includes(stored)) return stored
+    if (stored && THEMES.includes(stored)) return stored
   } catch {
     // localStorage may be unavailable
   }
@@ -29,7 +50,7 @@ function getInitialTheme(): Theme {
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(getInitialTheme)
-  const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>(() => {
+  const [resolvedTheme, setResolvedTheme] = useState<string>(() => {
     const initial = getInitialTheme()
     return initial === 'system' ? getSystemTheme() : initial
   })

@@ -11,7 +11,7 @@ A bad release has caused degraded service. You need to revert to the previous st
 If you use explicit SHA tags:
 
 ```bash
-docker images ghcr.io/medelmouhajir/isli-core
+docker images ghcr.io/your-org/isli-core
 # Find the previous stable SHA tag
 ```
 
@@ -19,7 +19,7 @@ If you use `latest` and need to pull an older version:
 
 ```bash
 # Pull the previous known-good image explicitly
-docker pull ghcr.io/medelmouhajir/isli-core:<previous-sha>
+docker pull ghcr.io/your-org/isli-core:<previous-sha>
 ```
 
 ### 2. Update docker-compose.yml
@@ -29,13 +29,13 @@ Edit `docker-compose.yml` and pin the image for the affected service(s):
 ```yaml
 services:
   core:
-    image: ghcr.io/medelmouhajir/isli-core:<previous-sha>
+    image: ghcr.io/your-org/isli-core:<previous-sha>
 ```
 
 Or use an environment variable override in `.env`:
 
 ```bash
-CORE_API_IMAGE=ghcr.io/medelmouhajir/isli-core:<previous-sha>
+CORE_API_IMAGE=ghcr.io/your-org/isli-core:<previous-sha>
 ```
 
 ### 3. Restart the Service

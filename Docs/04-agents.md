@@ -16,14 +16,37 @@ An agent is:
 ## Agent Lifecycle
 
 ```
-REGISTERED → ONLINE → IDLE → ACTIVE → IDLE
-                  ↓               ↓
-               PAUSED          BLOCKED (waiting for delegation)
-                  ↓
-              OFFLINE
+REGISTERED → STARTING → ONLINE → IDLE → ACTIVE → IDLE
+                 ↓         ↓               ↓
+              CRASHED    PAUSED          BLOCKED (waiting for delegation)
+                 ↓         ↓
+              STOPPED ← OFFLINE
+                 ↑
+              REBUILDING
 ```
 
-State transitions are managed by Core API and broadcast to the Kanban board.
+State transitions are managed by Core API (and the internal **Agent Process Manager**) and broadcast to the Kanban board.
+
+- **REGISTERED**: The agent configuration is saved in the database, but no process has been started.
+- **STARTING**: Core API has spawned the agent container/process and is waiting for the first heartbeat.
+- **ONLINE**: The agent has successfully connected via WebSocket and is sending heartbeats.
+- **STOPPED**: The agent process has been manually terminated via the Core API/Board.
+- **CRASHED**: The agent process exited with a non-zero return code.
+- **OFFLINE**: The agent failed to send heartbeats for more than 180 seconds.
+- **REBUILDING**: The agent-runner Docker image is being rebuilt in the background before a fresh container is spawned (triggered by **Rebuild & Restart** in the Board UI).
+
+### Live SDK Reloading (Development)
+
+To accelerate development of new skills and SDK features, ISLI supports **Live SDK Reloading**.
+
+When `AGENT_SDK_HOST_PATH` is configured in ISLI Core (usually via `docker-compose.override.yml`), the **Agent Process Manager** mounts the host's `isli-agent-sdk/src` directory into every dynamically spawned agent container at `/app/src`.
+
+The agent-runner image Dockerfile sets `PYTHONPATH=/app/src` and installs the package as editable (`pip install -e .`), so the live mount overlays the baked-in source without breaking the editable-install metadata.
+
+**Benefits:**
+- **Zero-Build Cycle:** Modify code in `isli-agent-sdk/src` and instantly see changes after clicking **Restart Agent** in the Board UI — no `docker build` needed.
+- **Dynamic Skill Sync:** Use with the Board UI to add new tools to an agent's configuration and register them on-the-fly without rebuilding images.
+- **Rebuild When Needed:** Click **Rebuild & Restart** to produce a fresh `isli-agent-runner:latest` image (e.g. after `requirements.txt` or `Dockerfile` changes).
 
 ---
 
@@ -39,11 +62,32 @@ agent:
   version: "1.0.0"
 
   model:
-    provider: anthropic          # anthropic | openai | google | mistral | custom
-    model_id: claude-sonnet-4-6
-    api_key_env: ANTHROPIC_API_KEY
+    provider: anthropic          # chosen from the provider registry (see Settings)
+    model_id: claude-sonnet-4-6   # chosen from the provider's permitted-models list
+    api_key: null                # optional per-agent override; null falls back to provider key
     max_tokens: 4096
     temperature: 0.3
+
+  # Model Routing (added 2026-05-31)
+  # See "Model Routing" section below for full details
+  model_routing:
+    enabled: false
+    secondary_models:
+      - provider: openai
+        model_id: gpt-4o-mini
+        label: "Cheap"
+        description: "Fast and inexpensive for simple tasks"
+        cost_tier: local          # local | standard | premium
+      - provider: openai
+        model_id: gpt-4o
+        label: "Standard"
+        description: "Good balance of quality and cost"
+        cost_tier: standard
+      - provider: anthropic
+        model_id: claude-opus-4-8
+        label: "Premium"
+        description: "Best quality for complex reasoning"
+        cost_tier: premium
 
   persona: |
     You are a meticulous research specialist. You gather accurate information,
@@ -55,6 +99,23 @@ agent:
       bot_token_env: TELEGRAM_RESEARCH_BOT_TOKEN
       allowed_user_ids: []           # empty = all
 
+  # WhatsApp access mode (added 2026-05-29)
+  # See Docs/07-channels.md for full details
+  whatsapp:
+    access_mode: opt_in              # opt_in | open | whitelist | closed | scheduled
+    allowed_jids: []                 # for whitelist mode
+    allowed_user_id: null            # for closed mode (single owner)
+    open_rate_limit:                 # for open mode (optional)
+      max_msgs: 20
+      window_seconds: 3600
+    schedule:                        # for scheduled mode
+      timezone: "Africa/Casablanca"
+      windows:
+        - days: [1, 2, 3, 4, 5]
+          from: "09:00"
+          to: "18:00"
+      off_hours_reply: "We're offline. Try again during business hours."
+
   skills:
     - web-search
     - pdf-extract
@@ -62,6 +123,31 @@ agent:
     - file-write
     - file-list
     - file-delete
+    - speech-to-text      # transcribe audio via isli-audio
+    - text-to-speech      # synthesize voice via isli-audio
+    - interactive-debugger  # run code with breakpoints and variable inspection
+    - ui-components       # render tables, cards, buttons, forms, JSON, timelines, metrics inline in chat (see Docs/13-immersive-chat-ui.md)
+    - git-clone           # clone remote repositories into workspace
+    - git-status          # show modified/staged/untracked files
+    - git-commit          # stage and commit changes
+    - git-push            # push branch to remote
+    - git-pull            # pull changes from remote
+    - git-branch-list     # list branches
+    - git-branch-create   # create new branch
+    - git-checkout        # switch branch
+    - git-log             # view commit history
+    - get-secret          # retrieve API keys, DB credentials, tokens from encrypted vault
+    - notify-user         # send in-app + Telegram notifications to users (rate-limited, priority-aware)
+    - web-browse-navigate # navigate a browser to a URL (persistent session per agent)
+    - web-browse-snapshot # take accessibility-tree snapshot with @ref IDs
+    - web-browse-click    # click an element by @ref ID
+    - web-browse-type     # type text into an input by @ref ID
+    - web-browse-press    # press a keyboard key (Enter, Tab, Escape)
+    - web-browse-scroll   # scroll up/down on the current page
+    - web-browse-back     # navigate back in browser history
+    - web-browse-console  # retrieve browser console logs (delta since last call)
+    - web-browse-vision   # take a screenshot of the current page
+    - web-browse-images   # list all images with src/alt/dimensions
 
   memory:
     scope: agent:research
@@ -78,22 +164,397 @@ agent:
     - research
     - summarization
     - fact-check
-    - web-scrape
+    - browser-automation
 
 ```
+
+---
+
+## API Key Fallback Chain
+
+Each agent uses a **three-layer fallback** for its LLM API key:
+
+1. **Agent override** — `Agent.api_key` (set per-agent via board or API)
+2. **Provider global** — `LlmProvider.api_key` (set in Settings → Model API Keys)
+3. **Environment variable** — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc. (classic `.env` fallback)
+
+The runner calls `self.client.register()`, which internally calls `GET /v1/agents/{id}/config` using admin or agent-scoped JWT to receive the **fully resolved key**. 
+
+**Fixed 2026-05-22 (Credential Sync):** Previously, the SDK's `register()` method would sync the agent's configuration using the sanitized `AgentOut` model from the `/v1/agents` endpoint. This caused the `api_key` to be stripped (set to `None`) immediately after login. The SDK now explicitly calls the `/config` endpoint after registration to preserve the resolved API key.
+
+### Secret Vault (`get-secret`) — Added 2026-05-31
+
+Agents can access encrypted secrets at runtime via the `get_secret` tool. This keeps sensitive credentials (API keys, database passwords, tokens) **out of agent config and out of source code**.
+
+**How it works:**
+1. An admin creates a secret for an agent via the Board UI (`/agents/:id/secrets`) or `POST /v1/secrets`.
+2. The secret is encrypted with AES-256-GCM and stored in PostgreSQL.
+3. The agent calls `get_secret("secret_name")` during its ReAct loop.
+4. Core decrypts the value on demand, returns it to the agent, and writes an audit log entry.
+
+**Example agent usage:**
+```python
+# Inside an agent's ReAct turn
+api_key = await get_secret("stripe_api_key")
+# api_key now holds the decrypted string "sk_live_..."
+```
+
+**Benefits over `api_key` override:**
+- `Agent.api_key` is a single LLM provider key stored in plaintext.
+- The secret vault supports **multiple named secrets per agent** (e.g., `stripe_api_key`, `db_password`, `slack_webhook_url`).
+- Values are **encrypted at rest** and **audit-logged on every read**.
+- Secrets can be **rotated independently** without restarting the agent process.
+
+**Prerequisite:** Add `get-secret` to the agent's `skills` list. The `AgentRunner` auto-registers the `get_secret` tool on startup.
+
+### Proactive User Notifications (`notify_user`) — Added 2026-06-01
+
+Agents can send notifications to users through the unified notification system via the `notify_user` tool. Unlike `send_message` (which delivers a chat message immediately), `notify_user` respects user preferences, quiet hours, and rate limits.
+
+**How it works:**
+1. The agent calls `notify_user(user_id, title, message, priority)` during its ReAct loop.
+2. Core validates the agent's rate limit (`notif:agent_rate:{agent_id}:{user_id}` — max 20/hour).
+3. Core checks the user's `NotificationPreference` (quiet hours, timezone, per-category toggles).
+4. Core inserts a `Notification` row and emits `notification:new` to Board WebSockets.
+5. If the user has Telegram enabled and the event is critical or outside quiet hours, Core escalates via `isli-channels`.
+
+**Example agent usage:**
+```python
+# Inside an agent's ReAct turn — alert a user that their task is done
+result = await notify_user(
+    user_id="123456789",
+    title="Task completed",
+    message="Your research task on 'quantum computing' is finished.",
+    priority="high",  # critical | high | normal | low
+)
+# Returns: {"ok": True, "notification_id": "..."}
+```
+
+**Typed exceptions for graceful ReAct recovery:**
+- `NotificationRateLimitError` — Agent has sent too many notifications to this user this hour. The agent should back off or batch updates.
+- `NotificationDeliveryError` — Core could not deliver the notification. The agent should log and retry later.
+
+**Prerequisite:** Add `notify-user` to the agent's `skills` list. The `AgentRunner` auto-registers the tool on startup via `add_notification_tools()`.
+
+**Comparison with `send_message`:**
+| | `send_message` | `notify_user` |
+|---|---|---|
+| Channel | Telegram / WhatsApp only | in_app + Telegram |
+| Respects quiet hours | ❌ No | ✅ Yes |
+| Rate limited | ❌ No | ✅ Yes (20/hour per user per agent) |
+| Priority levels | ❌ No | ✅ Yes (critical bypasses quiet hours) |
+| Batched digests | ❌ No | ✅ Yes (low priority) |
+| User preferences | ❌ No | ✅ Yes (per-category toggles) |
+
+**Tool Description Neutralization (Fixed 2026-06-01):**
+The original tool description used caution-triggering language ("unified notification system", "may escalate to Telegram", "proactive outreach"). This caused certain LLMs (e.g., Kimi K2.6) to apply a self-imposed safety protocol and refuse to execute the tool even when explicitly requested by the user.
+
+- **Neutral description** now reads: *"Display a notification card in the user's web UI. Use this when the user asks you to send a notification, reminder, or alert."*
+- **System prompt instruction** added: *"When the user asks you to send a notification, use notify_user immediately. The user's request is their approval — do not ask for additional confirmation."*
+
+### Browser Automation (Added 2026-06-01)
+
+Agents with browser skills can navigate websites, interact with forms, and extract structured data using Playwright-backed persistent browser sessions.
+
+**Available Tools:**
+
+| Tool | Purpose | Key Parameter |
+|------|---------|---------------|
+| `browser_navigate` | Load a URL | `url` |
+| `browser_snapshot` | Get page as accessible text with `@ref` IDs | `full` (default false = interactive only) |
+| `browser_click` | Click an element | `ref` (e.g., `"@e3"`) |
+| `browser_type` | Type into an input | `ref`, `text`, `clear` |
+| `browser_press` | Press a key | `key` (e.g., `"Enter"`) |
+| `browser_scroll` | Scroll the page | `direction`, `amount` |
+| `browser_back` | Go back in history | — |
+| `browser_console` | Get JS console logs | `since_cursor` |
+| `browser_vision` | Take a screenshot | `question` (optional) |
+| `browser_get_images` | List all images | — |
+
+**Example ReAct Turn:**
+```
+User: "Check the weather in Casablanca"
+
+Agent:
+  browser_navigate(url="https://weather.com")
+  → {success: true, url: "https://weather.com", title: "The Weather Channel"}
+
+  browser_snapshot()
+  → {snapshot: "[1] input[text] 'Search City or Zip Code' @e1\n[2] button 'Search' @e2"}
+
+  browser_type(ref="@e1", text="Casablanca, Morocco")
+  → {success: true}
+
+  browser_click(ref="@e2")
+  → {success: true}
+
+  browser_snapshot()
+  → {snapshot: "[1] heading 'Casablanca, Morocco Weather'\n[2] div '72° F' @e3..."}
+
+  browser_click(ref="@e3")
+  → {success: true}
+
+  browser_snapshot(full=true)
+  → {snapshot: "...full page with forecast details..."}
+
+Reply: "The weather in Casablanca is 72°F with partly cloudy skies..."
+```
+
+**Important Notes:**
+- `@ref` IDs are **invalidated on every navigate/back**. Always re-snapshot after navigation.
+- If a `click` or `type` returns `400 Ref not found — re-run snapshot`, the agent must call `browser_snapshot()` again.
+- `browser_snapshot` default (`full=false`) returns only interactive elements. Set `full=true` for complete page content.
+- `browser_vision` returns a base64 PNG — use it for CAPTCHAs or when the accessibility tree is insufficient.
+- Browser sessions are **persistent per agent** (cookies, localStorage survive). Each agent gets its own browser profile.
+- Max 5 concurrent browser sessions per `isli-skills` instance. If exceeded, the skill returns `503 Retry-After: 30`.
+
+**Prerequisites:**
+1. Add `web-browse-navigate` and `web-browse-snapshot` to the agent's `skills` list (minimum viable set)
+2. Optionally add `web-browse-click`, `web-browse-type`, `web-browse-press` for interaction
+3. Optionally add `web-browse-vision` for screenshot fallback
+4. Rebuild and restart the agent-runner to compile the new SDK tools
+
+### Session Metadata Injection (Added 2026-06-01)
+
+The `AgentRunner` injects a `=== CURRENT SESSION ===` block into every system prompt for session-based conversations (web, Telegram, WhatsApp). This ensures the agent always knows who it is talking to and can call user-facing tools (`notify_user`, `send_message`) without asking for parameters.
+
+```
+=== CURRENT SESSION ===
+User ID: 0446c690-44e4-4c3c-8975-c90145b9ecb8
+Channel: web
+Session ID: 0446c690-44e4-4c3c-8975-c90145b9ecb8
+Use the User ID above when calling tools that require a user_id parameter.
+```
+
+**`effective_user_id` fallback:** Web channel sessions often have `user_id = NULL` in the database (the Board UI does not authenticate users with a persistent identity). In this case, the runner falls back to the `session_id` as the effective user identifier, ensuring `notify_user` always has a valid target.
+
+### Gemini & Google Provider Hardening (Fixed 2026-05-22)
+
+Gemini models (via LiteLLM) have specific schema requirements that differ from OpenAI/Anthropic. The `isli-agent-sdk` includes automatic hardening for Gemini:
+
+- **Environment Fallback**: The runner explicitly sets `os.environ["GEMINI_API_KEY"]` before calling LiteLLM to ensure compatibility across all SDK versions.
+- **Schema Sanitization**: Automatically strips `function_call: None` and empty `tool_calls: []` lists from message history, which previously caused 400 Bad Request errors from the Gemini API.
+- **Robust Tool Arguments**: Handles cases where Gemini returns tool arguments as pre-parsed Python dictionaries instead of JSON strings, preventing `json.loads` type errors.
+
+---
+
+## Model Routing (Added 2026-05-31)
+
+When `model_routing.enabled: true`, ISLI dynamically selects the best LLM for each task or session instead of hardcoding a single model per agent. This reduces costs on trivial tasks and reserves expensive models for complex reasoning.
+
+### How It Works
+
+1. **User configures secondary models** in the Board UI (`Agent Detail → Model Strategy`) or via `PUT /v1/agents/{id}`:
+   ```json
+   {
+     "model_routing_enabled": true,
+     "secondary_models": [
+       {"provider": "openai", "model_id": "gpt-4o-mini", "cost_tier": "local"},
+       {"provider": "openai", "model_id": "gpt-4o", "cost_tier": "standard"},
+       {"provider": "anthropic", "model_id": "claude-opus-4-8", "cost_tier": "premium"}
+     ]
+   }
+   ```
+
+2. **Before each task or session**, Core runs a **hybrid A+B router** in parallel with context injection:
+   - **A — Core Heuristic Scorer** (`TaskComplexityScorer.score_task_input()`): Fast, zero-cost analysis of the task description. Returns a `complexity_score` (0.0–1.0) and a `complexity_tier` (`local` | `standard` | `premium`).
+   - **B — Keeper LLM Router** (`POST /model/route`): The Keeper local model reads the task description, complexity score, and the filtered model list, then returns a JSON decision: `{provider, model_id, reason}`.
+
+3. **The routed model is locked for the task/session lifetime.** Once chosen, it is stored in `tasks.routed_model_id` or `sessions.routed_model_id`. Subsequent messages in the same session reuse the same model without re-invoking the router (session-lifetime lock).
+
+4. **The agent runner uses the routed model** via `_model_with_fallback()`:
+   - Attempt 1: Routed model (if present and valid)
+   - Attempt 2: Agent's **default** model (`model.provider` / `model.model_id`) — **never skipped**
+   - If both fail, the runner raises `RuntimeError` and halts (never silently falls back to an unconfigured model)
+
+### Cost-Tier Filtering
+
+The heuristic scorer filters the secondary_models list before sending it to the Keeper. Models whose `cost_tier` is strictly more expensive than the computed tier are dropped. This ensures the Keeper only chooses from economically appropriate candidates.
+
+| Task Complexity | Eligible Tiers | Example |
+|-----------------|----------------|---------|
+| `local` (score ≤ 0.33) | `local` only | "What time is it?" → `gpt-4o-mini` |
+| `standard` (score 0.34–0.66) | `local`, `standard` | "Summarize this article" → `gpt-4o` |
+| `premium` (score > 0.66) | `local`, `standard`, `premium` | "Design a distributed system" → `claude-opus-4-8` |
+
+If filtering leaves zero models (e.g., no `local` model configured), the system **fail-opens** and returns the full unfiltered list, letting the Keeper decide.
+
+### Session-Lifetime Lock
+
+Sessions route **once** on the first message. The chosen model is written to `sessions.routed_model_id` and never changes for the life of that session. This prevents:
+- Re-routing latency on every follow-up message
+- Model switching mid-conversation, which breaks context continuity
+- Inconsistent tone/capability jumps
+
+Tasks (Kanban cards) route individually because each task has independent scope and complexity.
+
+### Board UI Integration
+
+The `AgentDetailPage.tsx` Model Strategy card now includes:
+- **Toggle switch**: Enable/disable model routing per agent
+- **JSON textarea**: Edit `secondary_models` array with live validation
+- **Per-model fields**: `provider`, `model_id`, `label`, `description`, `cost_tier`
+
+### Database Schema
+
+Added to `agents`, `tasks`, and `sessions`:
+- `model_routing_enabled` (boolean) on `agents`
+- `secondary_models` (JSON) on `agents`
+- `complexity_score`, `complexity_tier` on `tasks` and `sessions`
+- `routed_model_provider`, `routed_model_id`, `routed_model_reason` on `tasks` and `sessions`
+
+### Prompts
+
+The Keeper uses the `keeper:model_router` prompt template from `prompts.yaml`. It receives:
+- `{task_description}` — the raw user message or task input
+- `{complexity_score}` and `{complexity_tier}` — from the heuristic scorer
+- `{model_list}` — prose-formatted filtered secondary models (numbered lines)
+- `{default_model}` — the agent's default model for fallback reference
+
+The prompt instructs the Keeper to return a JSON block with `provider`, `model_id`, and `reason`. If the Keeper returns invalid JSON or an unknown model, the system falls back to the agent's default model.
+
+---
+
+## Dynamic Skill & Configuration Sync (Added 2026-05-24)
+
+Agents now support real-time configuration updates without requiring a process restart. This allows users to add/remove skills or modify personas via the Board UI and have those changes take effect immediately.
+
+### How it Works
+1. **Event Trigger**: When an agent's properties (skills, persona, model, etc.) are updated via `PUT /v1/agents/{id}`, the Core API emits an `agent:config_updated` event to Redis.
+2. **WebSocket Routing**: The Core WebSocket gateway (`ws.py`) listens for these events and routes them to the specific agent's open WebSocket connection.
+3. **SDK Sync**: The `AgentRunner` in the SDK receives the event and:
+   - Re-authenticates and fetches the fresh configuration from the `/config` endpoint.
+   - Clears its internal tool registry.
+   - Re-registers tools based on the new skills list.
+   - Re-assembles the system prompt template for the next interaction.
+
+This ensures that the agent's "capabilities" are always in sync with the state defined on the Board.
+
+---
+
+## Tool Result Stashing (UI Components)
+
+Agents that have the `ui-components` skill can render interactive React components inline in the chat stream. The runner uses a **tool result stashing pattern** for this:
+
+1. During a ReAct turn, the LLM calls the `ui_components` tool with component props.
+2. The runner executes the tool and **stashes the result dict** in `self._pending_components`.
+3. A clean confirmation string is injected as the tool result so the LLM knows it succeeded.
+4. After the final LLM response (no more tool calls), the runner sends all stashed components alongside the text reply via `reply_to_session(session_id, text, components=[...])`.
+
+This avoids fragile text scanning — the runner never needs to parse JSON out of the LLM's prose output. See [`Docs/13-immersive-chat-ui.md`](./13-immersive-chat-ui.md) for full details.
+
+---
+
+## Tool Call Format Fallbacks (Added 2026-05-29)
+
+Not all models output tool calls using the OpenAI-compatible `message.tool_calls` array. Local models via Ollama (especially Qwen 2.5) and some Anthropic-trained models embed tool calls inside the message `content` as raw text. The `AgentRunner` includes a **three-tier fallback parser** that activates when `message.tool_calls` is empty:
+
+### Tier 1 — OpenAI Structured (`tool_calls` array)
+
+**Primary path.** Used by OpenAI, Claude via Anthropic API, and Gemini via LiteLLM. The LLM returns a structured array of `ToolCall` objects with `id`, `function.name`, and `function.arguments`.
+
+### Tier 2 — Anthropic-Style XML (`<function_calls>`)
+
+**Fallback for Qwen and other Anthropic-trained models.** When `tool_calls` is empty, the runner scans `message.content` for `<function_calls>` blocks:
+
+```xml
+<function_calls>
+  <invoke name="ui_components">
+    <arg name="component_type">card</arg>
+    <arg name="props">{"title":"Demo"}</arg>
+    <arg name="action_id">demo_001</arg>
+  </invoke>
+</function_calls>
+```
+
+The runner uses `xml.etree.ElementTree` to parse each `<invoke>`, JSON-decode argument values, and convert them into synthetic `_ParsedToolCall` objects that mimic the OpenAI interface. The XML block is stripped from the final response text before delivery.
+
+### Tier 3 — JSON-in-Text Blob (`{"name":..., "arguments":...}`)
+
+**Fallback for models that output raw JSON objects inline.** When neither structured `tool_calls` nor XML is found, the runner performs brace-matching on `message.content` to find top-level JSON objects:
+
+```json
+{"name":"ui_components","arguments":{"component_type":"card","action_id":"demo_001"}}
+```
+
+A JSON blob is accepted as a tool call only if it:
+1. Is a valid JSON object (`dict`)
+2. Has both `"name"` and `"arguments"` keys
+3. `"arguments"` is itself a `dict`
+4. `"name"` matches a **registered tool** in `self.tools`
+
+This prevents ordinary JSON prose (e.g., a code example or data payload) from being misinterpreted as a tool call.
+
+### Stripping & History Cleanup
+
+When either XML or JSON fallback is triggered, the runner:
+- Removes the markup from `message.content` before sending the final reply to the user
+- Injects synthetic `tool_calls` into the conversation history `msg_dict` so LiteLLM replay remains valid
+- Logs the extraction at `debug` level for observability
+
+### Supported Patterns
+
+| Model Family | Format Detected | Fallback Used |
+|--------------|----------------|---------------|
+| GPT-4, Claude API, Gemini | `message.tool_calls[]` | Tier 1 (native) |
+| Qwen 2.5 via Ollama | `<function_calls>` XML | Tier 2 |
+| Qwen 2.5 via Ollama (variant) | Raw JSON blob in text | Tier 3 |
+| Llama 3.1 via Ollama | `message.tool_calls[]` | Tier 1 (native) |
+
+> **Note:** The XML fallback requires `xml.etree.ElementTree` (stdlib). The JSON fallback requires no extra dependencies. Both are backward-compatible — agents using Tier 1 models are unaffected.
+
+---
+
+## Agent Process Manager
+
+In order to simplify deployment and management, `isli-core` includes an embedded **Agent Process Manager**. This service is responsible for spawning, monitoring, and terminating agent containers (Docker mode) or Python processes (native mode).
+
+### Capabilities
+- **Auto-Start**: New agents are automatically spawned upon creation (if `auto_start=true`).
+- **Lifecycle Control**: Start, Stop, **Restart**, and **Rebuild & Restart** agents via the Board UI or API.
+- **Health Monitoring**: Detects container/process crashes and tracks crash counts.
+- **Log Aggregation**: Captures agent stdout/stderr and routes it to `isli-core` logs and Redis for live streaming.
+- **Image Rebuild**: Rebuilds the `isli-agent-runner:latest` image from the host build context (`AGENT_RUNNER_BUILD_CONTEXT`) in the background when **Rebuild & Restart** is triggered.
+
+### Configuration
+| Variable | Purpose |
+|----------|---------|
+| `AGENT_RUNNER_IMAGE` | Docker image tag used for spawned agent containers (default: `isli-agent-runner:latest`) |
+| `AGENT_SDK_HOST_PATH` | Absolute host path to `isli-agent-sdk/src` for live volume mount in dev mode |
+| `AGENT_RUNNER_BUILD_CONTEXT` | Absolute host path to `isli-agent-sdk` root for Docker image rebuilds |
+| `AGENT_NETWORK` | Docker network name for agent containers (default: `isli_isli`) |
 
 ---
 
 ## Agent Registration Flow
 
 ```
-1. Agent process starts
-2. POST /v1/agents/register  { agent_id, name, capabilities, channel_config }
-3. Core API issues JWT token for this agent
-4. Agent opens WebSocket connection to /ws/agents/{agent_id}
-5. Core API sends: { type: "registered", keeper_endpoint, ... }
-6. Agent begins heartbeat loop
+1. User creates agent via Board UI (POST /v1/agents)
+2. Core API saves agent record (status: "registered")
+3. Core API (Process Manager) spawns container: isli-agent-{agent_id}
+4. Agent status becomes "starting"
+5. Agent process initializes, fetches config, and opens WebSocket
+6. First heartbeat arrives → status becomes "online"
 7. Kanban board shows agent card as ONLINE
+```
+
+### Restart Flow
+```
+1. User clicks "Restart Agent" in Board UI
+2. POST /v1/agents/{id}/restart (rebuild=false)
+3. Core API stops existing container, removes it
+4. Core API spawns a new container from the existing image
+5. Status → "starting" → "online"
+```
+
+### Rebuild & Restart Flow
+```
+1. User clicks "Rebuild & Restart" in Board UI
+2. POST /v1/agents/{id}/restart?rebuild=true
+3. Core API stops existing container, sets status → "rebuilding"
+4. Background task rebuilds agent-runner image from AGENT_RUNNER_BUILD_CONTEXT
+5. On success: spawns new container; status → "starting" → "online"
+6. On failure: status → "stopped" with reason logged
 ```
 
 ---
@@ -121,21 +582,30 @@ def _assemble_system_prompt(self, context_summary: str) -> str:
         persona_line=persona_line,
         tools_list=tools_list,
         context_summary=context_summary,
+        context_timestamp=datetime.now(timezone.utc).isoformat()
     )
-
-async def execute_task(task: Task):
-    # 1. Get Keeper context injection (includes identity, journal, and memories)
-    context_summary = task.context_summary
-    if not context_summary:
-        context_summary = await keeper.get_context_injection(...)
-
-    # 2. Build system prompt
-    system_prompt = self._assemble_system_prompt(context_summary)
-
-    # 3. Run agent loop (ReAct pattern)
-    messages = [{"role": "user", "content": task.input}]
-    ...
 ```
+
+### Protocol Constraints & Decision Logic (Tiered Prompting)
+
+To enforce the Shared Blackboard architecture, all agents are injected with mandatory **Protocol Constraints** and **Decision Logic** in their system prompt.
+
+#### 1. Protocol Constraints
+Agents are strictly forbidden from direct communication.
+- **Shared Blackboard**: All coordination must happen via the Kanban.
+- **Halt on Approval**: If a task is flagged `needs_human_approval: true`, the agent MUST halt, surface its state, and wait for human review in the **Review** column.
+
+#### 2. Decision Logic
+Before acting, agents run a 4-branch internal check:
+1. **Full capability** → Proceed autonomously.
+2. **Partial capability** → Execute known portion, create Kanban task for the remainder.
+3. **No capability / High-risk** → Do NOT attempt; create a Kanban task immediately.
+4. **Approval Gate** → HALT and surface state.
+
+#### 3. Context Freshness
+The `{context_timestamp}` is injected every turn to allow agents to detect stale memory or infrastructure-level latency, closing the gap between the last Keeper summary and the current system time.
+
+---
 
 ### Prompt Configuration (`prompts.yaml`)
 
@@ -155,7 +625,7 @@ The agent system prompt template and all 15 tool descriptions are loaded from `p
 ```
 Before turn:  Keeper.context_inject()  → enriches agent prompt
 During turn:  Agent runs independently  → Keeper uninvolved
-After turn:   Keeper.store_episodic()   → writes to Tier 2 memory
+After turn:   Journal/MemoryWorker     → asynchronous Tier 2 memory extraction (cursor-backed polling)
 On heartbeat: Keeper.validate()         → anomaly detection
 ```
 
@@ -176,6 +646,63 @@ ISLI does not pre-define agent names or personas. You define your own. But these
 
 ---
 
+## Agent Peer Awareness (Added 2026-06-01)
+
+Agents do not automatically know about every other agent in the system. Instead, each agent has an explicit **delegation target list** (`known_agent_ids`) that the operator configures via the Board UI.
+
+### Why Asymmetric?
+
+If Agent A knows Agent B, it does **not** mean B knows A. This is intentional:
+- **Directional delegation** — A can assign tasks to B, but B has no reason to delegate back to A unless the operator explicitly enables it.
+- **Least privilege** — Agents only see peers they might actually need to collaborate with.
+- **Prevents surprise loops** — An agent cannot be pulled into a delegation chain by a peer it doesn't know about.
+
+### Data Model
+
+```python
+class Agent:
+    id: str
+    name: str
+    ...
+    known_agent_ids: list[str]   # JSON column; default []
+```
+
+- Stored as a JSON array of agent IDs on the `agents` table (same pattern as `channels` and `skills`).
+- Updated via `PUT /v1/agents/{id}` with `{"known_agent_ids": ["agent-b", "agent-c"]}`.
+- Emits `agent:config_updated` when changed so the runner can refresh context.
+
+### Board UI
+
+The `AgentDetailPage` includes a card titled **"Agents this agent can delegate to"**:
+- Toggle pills for every other agent (self excluded).
+- Each pill shows: status dot (green/yellow/grey) + agent name + model.
+- Dirty detection, Save/Discard bar — follows the same per-section pattern as Model Strategy and Channels.
+
+### Runtime Discovery
+
+Agents query their peers at runtime via the SDK or directly against Core:
+
+```
+GET /v1/agents/{agent_id}/peers
+→ Returns list[AgentOut] with full metadata for each known agent
+```
+
+This endpoint resolves `known_agent_ids` into name, description, skills, status, and model — everything an agent needs to decide "who should I delegate this to?"
+
+### Integration with Keeper Context Injection (Future)
+
+A planned enhancement will pre-inject a compact peer summary into the agent's system prompt when `known_agent_ids` is non-empty:
+
+```
+--- Available Peers ---
+• agent-research (Research Assistant) — web research, summarization
+• agent-code (Code Reviewer) — git diff analysis, linting
+```
+
+This eliminates an extra tool-call roundtrip for the common delegation case.
+
+---
+
 ## Agent Permissions Model
 
 Agents operate under a capability-scoped permission system enforced by Core API:
@@ -183,37 +710,47 @@ Agents operate under a capability-scoped permission system enforced by Core API:
 | Permission | Description |
 |-----------|-------------|
 | `tasks:read` | Read tasks from Kanban |
-| `tasks:create` | Create new tasks (delegation) |
+| `tasks:create` | Create new tasks (delegation via `create-kanban-task`) |
 | `tasks:update:own` | Update own task status/output |
 | `memory:read:own` | Read own agent memory |
 | `memory:write:own` | Write to own agent memory |
 | `skills:invoke` | Call skills via proxy |
 | `channels:send` | Send messages via assigned channels |
 | `agents:list` | See other registered agents |
+| `agents:read:peers` | Resolve own `known_agent_ids` into full metadata |
 
 Agents cannot read each other's memory, read each other's task details, or impersonate other agents.
+
+### Software Engineering Workflows (Added 2026-05-24)
+
+Agents can now leverage specialized Software Engineering skills to improve implementation reliability:
+- **`create-engineering-plan`**: Agents are encouraged to call this skill before starting complex tasks to generate a `PLAN.md` in their workspace. This mimics the "plan-first" philosophy of high-end frameworks.
 
 ---
 
 ## Adding a New Agent
 
-### Method 1: Docker Compose Profile (Recommended)
+### Method 1: Board UI / API (Recommended)
 
-Agents are started via the `agent-runner` service with Docker Compose profiles:
+Create the agent via the Board UI or `POST /v1/agents`, then start it with **Start Agent**. The Core API's Process Manager dynamically spawns a dedicated Docker container (`isli-agent-{agent_id}`) from the `isli-agent-runner:latest` image.
+
+In development, the live SDK mount makes `isli-agent-sdk/src` code changes immediate — use **Restart Agent** to pick them up. Use **Rebuild & Restart** after changing `requirements.txt`, `Dockerfile`, or when you need a completely clean image.
+
+### Method 2: Docker Compose Profile (Legacy)
+
+The `agent-runner` service exists in `docker-compose.yml` as a **build target** (`replicas: 0`, `command: ["true"]`). It is not a long-running service; Core spawns containers from this image at runtime.
 
 ```bash
-# Start a specific agent
-AGENT_ID=kimi-02 docker compose --profile agents up -d agent-runner
+# Ensure the image is up to date
+docker compose build agent-runner
 
-# Start another agent
-AGENT_ID=my-new-agent docker compose --profile agents up -d agent-runner
+# The image is referenced by Core when spawning agents dynamically
 ```
 
 The `agent-runner` service:
-- Fetches agent config dynamically from Core API
-- Recovers a fresh token on startup (handles 409 for existing agents)
-- Connects via WebSocket and begins listening for events
-- Does NOT auto-start with the core stack (`profiles: [agents]`)
+- Serves as the Docker build target for the agent-runner image
+- Does NOT auto-start with the core stack (`deploy.replicas: 0`)
+- Core's Process Manager uses `AGENT_RUNNER_IMAGE` to spawn individual agent containers
 
 ### Method 2: Native Python
 
@@ -252,10 +789,12 @@ For backward compatibility, you can still register manually:
 from isli_agent import AgentRunner, AgentConfig
 from isli_agent.tools.channels import send_message, SEND_MESSAGE_DEF
 from isli_agent.tools.workspace import file_read, FILE_READ_DEF
+from isli_agent.tools.audio import speech_to_text, SPEECH_TO_TEXT_DEF
 
 runner = AgentRunner(config, core_url)
 runner.add_workspace_tools()   # file_read, file_write, file_list, file_delete
 runner.add_channel_tools()     # send_message
+runner.add_audio_tools()     # speech_to_text, text_to_speech
 runner.add_tool("my_custom", my_func, MY_CUSTOM_DEF)
 ```
 
@@ -288,6 +827,31 @@ runner.add_workspace_tools()  # One-liner registration
 
 These tools (`file_read`, `file_write`, `file_list`, `file_delete`) are automatically bound to the agent's ID and Core client via runtime injection. They raise typed exceptions (`WorkspaceNotFoundError`, `WorkspacePathError`, `WorkspaceQuotaError`) so the ReAct loop can recover gracefully.
 
+### Shared Workspace Tools
+
+Agents that are members of a shared workspace can access it via additional SDK tools. These use `scope="shared"` and `scope_id={workspace_id}` under the hood:
+
+| Tool | Description | Required Skill |
+|------|-------------|----------------|
+| `shared_file_read` | Read a file from a shared workspace | `shared-file-read` |
+| `shared_file_write` | Write a file to a shared workspace | `shared-file-write` |
+| `shared_file_list` | List files in a shared workspace | `shared-file-list` |
+| `shared_file_delete` | Delete a file from a shared workspace | `shared-file-delete` |
+| `promote_output` | Copy/move a file from agent scope to shared workspace | `promote-output` |
+
+**Registration:**
+
+```python
+runner.add_shared_workspace_tools()  # shared_file_read, shared_file_write, shared_file_list, shared_file_delete
+```
+
+**Typed exceptions:**
+- `WorkspaceNotFoundError` — workspace does not exist or agent is not a member.
+- `WorkspacePathError` — path traversal attempt or invalid path.
+- `WorkspaceQuotaError` — write would exceed the workspace's `quota_bytes`.
+
+**Promote output:** Agents can publish deliverables to a shared workspace by calling `promote_output(agent_id, workspace_id, source_path, target_path, delete_source=False)`. Core verifies the agent is a member before proxying to the workspace service.
+
 ### Token Recovery and Revocation
 
 When an agent already exists, `POST /v1/agents` returns 409. The SDK automatically calls `POST /v1/agents/{id}/token` with admin auth to recover a fresh token. This endpoint sets `agent.token_issued_at`, which invalidates any previous tokens via `require_internal_auth`. Old tokens become unusable the moment a new one is issued.
@@ -297,6 +861,121 @@ When an agent already exists, `POST /v1/agents` returns 409. The SDK automatical
 **Important implementation detail (fixed 2026-05-18):** The heartbeat endpoint must update `token_issued_at` **after** all side effects complete and the new token is guaranteed to be returned. If revocation is committed before the response is sent, a failure in `AuditWriter`, telemetry, or event emission leaves the agent with a revoked token and no replacement — causing a permanent 401 lockout.
 
 **Task API auth note (fixed 2026-05-18):** Task mutation endpoints (`PUT /tasks/{id}`, `POST /tasks/{id}/move`, `POST /tasks/{id}/checkpoint`) require the admin API key, not the agent JWT. The agent SDK uses `use_admin=True` when calling these endpoints from `complete_task()`, `move_task()`, and `save_checkpoint()`.
+
+---
+
+## Streaming Modes (Added 2026-05-31)
+
+Agents now support **live response streaming** across all channels (Web, Telegram, WhatsApp). Instead of silent batch processing (send → context injection → nothing → full response), the agent emits structured events during its turn. These events flow agent → Core → Board via the existing bidirectional WebSocket, or agent → Core → channel adapter for external channels.
+
+### Mode Taxonomy
+
+| Mode | Key | Events Emitted | UX |
+|------|-----|----------------|-----|
+| **Silent** | `silent` | None | Final text delivered at once (legacy behavior) |
+| **Live Text** | `text` | `turn_start`, `token_delta`, `draft_complete`, `turn_end`, `cost_report` | Text appears word-by-word with a blinking cursor |
+| **Live + Tools** | `tools` | All Mode A events + `tool_call` (started/done with duration) | Skill cards appear above the text stream |
+| **Process Trace** | `trace` | All Mode B events + `phase_start`, `phase_end` for context_inject/checkpoint | Collapsible timeline pane shows full execution trace |
+| **Debug** | `debug` | All Mode C events + `debug_prompt`, `debug_response` | Same as trace + raw prompt/response previews (admin-only) |
+
+**Default:** `silent` — existing agents behave exactly as before until explicitly reconfigured.
+
+### Agent Configuration
+
+Three new fields in `Agent.config` JSONB:
+
+```json
+{
+  "streaming_mode": "text",
+  "stream_chunk_size": 5,
+  "stream_delay_ms": 20
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `streaming_mode` | `string` | `"silent"` | One of `silent`, `text`, `tools`, `trace`, `debug` |
+| `stream_chunk_size` | `int` | `5` | Characters per chunk when revealing text |
+| `stream_delay_ms` | `int` | `20` | Milliseconds between chunks |
+
+Validation (Pydantic in `agents.py`):
+- `streaming_mode` must be in the allowed set
+- `stream_chunk_size` clamped to `1–100`
+- `stream_delay_ms` clamped to `0–5000`
+
+### Per-Session Override
+
+A session can override the agent's default streaming mode for one-off debugging:
+
+```json
+POST /v1/sessions/{id}/message
+{
+  "text": "...",
+  "metadata": { "streaming_mode": "debug" }
+}
+```
+
+The override is stored in the session's `session_metadata` JSONB column and takes precedence over the agent config for that session only.
+
+### Event Types
+
+The `AgentRunner` instruments both `_execute_session_message()` and `_execute_task()` with these hooks:
+
+| Event | When | Payload |
+|-------|------|---------|
+| `phase_start` | Before context injection or checkpoint recovery | `{phase: "context_inject"}` |
+| `phase_end` | After context injection/checkpoint completes | `{phase: "context_inject", duration_ms: 1200}` |
+| `turn_start` | Before first LLM call | `{}` |
+| `tool_call` | Before/after each tool execution | `{tool: "file_read", status: "started"}` / `{status: "done", duration_ms: 45}` |
+| `token_delta` | After each streamed text chunk | `{text: " chunk"}` |
+| `draft_complete` | After full response assembled | `{text: "full response..."}` |
+| `turn_end` | After reply sent to Core | `{}` |
+| `cost_report` | After LiteLLM usage extracted | `{input_tokens: 124, output_tokens: 89, model: "claude-sonnet-4-6"}` |
+| `debug_prompt` | After system prompt assembled | `{prompt: "..."}` |
+| `debug_response` | After LLM response received | `{response: "..."}` |
+
+**Important:** `debug_prompt` and `debug_response` are **never broadcast over WebSocket**. They are stored in a Redis list (`session:{id}:debug_trace`) and exposed via an admin-only REST endpoint `GET /v1/sessions/{id}/debug-trace`. This prevents prompt injection data exposure through the public event bus.
+
+### Graceful Degradation
+
+Every `_emit_stream_event()` call is wrapped in a broad `try/except` that logs a warning and swallows the exception. Streaming failures never crash the agent or delay the final response. The draft text is also persisted to Redis (`session:{id}:draft`) so Board clients reconnecting mid-stream can recover the partial response.
+
+### Architecture
+
+```
+Agent ReAct loop
+  ├─ _emit_stream_event("phase_start", {phase: "context_inject"})
+  ├─ Keeper context injection
+  ├─ _emit_stream_event("phase_end", {phase: "context_inject", duration_ms: ...})
+  ├─ _emit_stream_event("turn_start")
+  ├─ LLM call
+  │   ├─ _emit_stream_event("tool_call", {tool: "...", status: "started"})
+  │   ├─ Skill execution
+  │   └─ _emit_stream_event("tool_call", {tool: "...", status: "done", duration_ms: ...})
+  ├─ _stream_text() → chunks text per config, emits "token_delta" + "draft_complete"
+  ├─ _emit_stream_event("cost_report", {...})
+  ├─ _emit_stream_event("turn_end")
+  └─ reply_to_session(text, ...)
+
+Agent WS loop
+  ├─ outgoing_queue accumulates events
+  └─ _drain_outgoing_queue() sends "agent:stream_event" frames to Core
+
+Core WS gateway
+  ├─ Receives "agent:stream_event"
+  ├─ Appends token_delta to Redis draft
+  ├─ Stores debug_prompt/debug_response in Redis trace list
+  └─ Fans out everything else as "session:stream_event" to Board WebSockets
+
+Board UI
+  ├─ StreamingMessageBubble.tsx — monospace text + blinking cursor
+  ├─ ToolCallBar.tsx / ToolCallCard.tsx — spinner→checkmark transition
+  └─ ProcessTracePane.tsx — collapsible timeline
+```
+
+### Board UI Integration
+
+The `AgentDetailPage.tsx` Model Strategy card includes a **Streaming Mode** `<Select>` dropdown with the 5 options. Changes are saved into `Agent.config` via `PUT /v1/agents/{id}` and take effect on the next session message.
 
 ---
 
@@ -320,25 +999,65 @@ agent-runner:
 ```
 
 ### UI Access
-Users can view live logs by navigating to the **Agent Detail** page and clicking the **"Live Logs"** button. This opens a dedicated terminal view with support for real-time streaming, text filtering, and log downloading.
+Users can view live logs by navigating to the **Agent Detail** page and clicking the **"Live Logs"** button. Additionally, the centralized **Observability Hub** (`/logs`) provides a high-level overview of all execution streams across the entire swarm.
 
 ---
 
 ## Agent Runner Error Handling
 
-When a session message fails (e.g., LLM provider overloaded, network timeout), the agent runner sends an error reply to the user via the channel adapter.
+When a model call fails (e.g., LLM provider overloaded, network timeout, invalid API key), the agent runner classifies the error, applies retry/backoff where appropriate, and sends a user-friendly message instead of raw exception text.
 
-**Before 2026-05-18:** A broad `except Exception` sent the static string:
-> "Sorry, I encountered an error processing your message. Please try again."
+### Error Classification (Implemented 2026-06-01)
 
-This was opaque — users couldn't distinguish model overload from a local bug.
+The runner imports LiteLLM exception types and maps them to categories:
 
-**After 2026-05-18:** The runner classifies the exception string:
-- `"overloaded"` / `"temporarily"` → "The AI model is temporarily overloaded. Please try again in a moment."
-- `"APIConnectionError"` / `"timeout"` → "Connection to the AI model timed out. Please try again shortly."
-- Other exceptions → Original generic fallback
+| Category | LiteLLM Exception | User Message |
+|---|---|---|
+| `auth` | `AuthenticationError`, `BadRequestError` with "api key" | "The AI model's API key is invalid or has expired. Please contact the administrator." |
+| `rate_limit` | `RateLimitError` | "The AI model is currently rate-limited. Please try again in a moment." |
+| `timeout` | `Timeout`, connection errors | "Connection to the AI model timed out. Please try again shortly." |
+| `overloaded` | `ServiceUnavailableError` | "The AI model is temporarily overloaded. Please try again in a moment." |
+| `bad_request` | `BadRequestError` | "The request could not be processed by the AI model. It may be too long or contain unsupported content." |
+| `unknown` | Catch-all | "An unexpected error occurred while talking to the AI model. The administrator has been notified." |
 
-The `acompletion` call also has `timeout=120` to fail fast instead of hanging indefinitely. An optional `LITELLM_DEBUG=true` env var enables LiteLLM verbose logging for future diagnosis.
+Classification uses `isinstance` checks as the primary path; string inspection is a fallback for provider-specific errors LiteLLM doesn't wrap.
+
+### Retry with Jitter
+
+Transient errors (`rate_limit`, `timeout`, `overloaded`) are retried up to 3 times with exponential backoff and ±50% jitter:
+
+```
+delay = min(1.0 * 2^attempt, 30.0)
+delay = delay * (0.5 + random() * 0.5)   # ±50% jitter
+```
+
+Auth errors and bad requests are **not retried** — they will fail identically on every attempt.
+
+### Model Fallback
+
+`_model_with_fallback()` attempts the routed model first, then the agent's default model. If both fail, the turn halts with `RuntimeError`. Auth errors **short-circuit fallback** — the same dead API key would fail on every model, so the runner raises immediately without wasting tokens.
+
+### Configurable Timeout
+
+The `acompletion` call includes `timeout=self.config.config.get("litellm_timeout", 120)` (seconds). Heavy-reasoning agents can override this per-agent via their `config` field.
+
+### Circuit Breaker for Sustained Auth Failures
+
+After 3 consecutive authentication errors, the runner opens a **circuit breaker**:
+- All new tasks/sessions fail fast for 5 minutes (`CIRCUIT_HALF_OPEN_AFTER = 300`)
+- After 5 minutes, one **half-open probe** is allowed through
+  - If the key was fixed → probe succeeds → circuit closes
+  - If still broken → trips again → another 5 minute cooldown
+- On runner restart, if Core shows `status="flagged"` with `auth_error`, the circuit restores immediately with the half-open window already elapsed — so an operator who fixed the key and restarted gets instant recovery
+- Core is notified via `POST /v1/agents/{id}/model_error` so the Board UI shows the agent as flagged
+
+### Ops Signaling
+
+Two new Core endpoints enable durable ops visibility:
+- `POST /v1/agents/{id}/model_error` — Core sets `Agent.status = "flagged"`, `status_reason = "auth_error(...)"`
+- `POST /v1/agents/{id}/model_recovery` — Core sets `Agent.status = "online"` when the runner reports recovery
+
+The recovery endpoint logs a noop message (`agents.model_recovery_noop`) if the agent was already manually set to `online`, preventing silent confusion during debugging.
 
 ### Session Messaging Loop
 
@@ -370,17 +1089,18 @@ The following gaps were identified during a parallel 12-agent research review:
 
 ### Critical
 - ~~**Token budget enforcement (F15) entirely unimplemented**~~ — **Implemented 2026-05-21**. `POST /v1/agents/{id}/usage` endpoint records CostLedger, enforces agent/task/user/org budgets, and pauses agents on exceed. Agent SDK extracts `response.usage` from LiteLLM and reports back after every turn.
-- **No delegation cycle detection** — `can_delegate_to` enforces edges but not acyclicity; A→B→C→A loops forever.
-- **Unbounded delegation chain length** — no `max_depth` enforced; 2026 research shows >3-agent chains degrade to ~22.5% accuracy.
+- ~~**No delegation cycle detection**~~ — **Implemented 2026-05-30**. `isli_core/delegation.py` enforces `MAX_DEPTH = 3` and raises `CycleDetectedError` on agent-id recurrence in ancestor chains.
+- ~~**Unbounded delegation chain length**~~ — **Implemented 2026-05-30**. `MAX_DEPTH = 3` enforced in `validate_delegation()`; human approval required at depth ≥ 2.
 
 ### High
 - **No global timeout for delegation chains** — individual tasks expire after 5 min, but cumulative chain timeout is absent.
-- **No fallback agents when primary fails** — `OFFLINE` state exists but no auto-reassignment or hot-standby.
-- **No model fallback strategy** — agents have one statically assigned model with no downgrade path.
+- ~~**No fallback agents when primary fails**~~ — **Implemented 2026-05-30**. `Agent.fallback_agent_id` column + `isli_core/fallback.py` `FallbackManager`; `CheckpointRecoveryWorker` triggers fallback on max-retries exceeded.
+- ~~**No model fallback strategy**~~ — **Implemented 2026-05-21**. `isli_core/cost/tiering.py` `ModelTiering.attempt_with_fallback()` implements three-tier fallback (premium → standard → local → pause) based on rate card and remaining budget.
 - **Insufficient defense against consensus inertia** — F6 mitigations are passive isolation only; no active BICR "Challenge" step.
 - **No deadlock detection** — BLOCKED agents waiting for child tasks can circularly wait with no breaker.
 - ~~**JWTs long-lived with no rotation**~~ — **Fixed 2026-05-18**. `token_issued_at` column enables revocation. `POST /v1/agents/{id}/token` issues fresh tokens and invalidates old ones. Heartbeat renewals also update `token_issued_at`.
 - ~~**Heartbeat validator flags agents on single flaky LLM response**~~ — **Fixed 2026-05-18**. Redis counter requires 3 consecutive anomalies before `flagged`; valid heartbeats auto-unflag.
+- ~~**Heartbeat validator false-positives from stale episodic memories**~~ — **Fixed 2026-05-28**. Activity log entries now prefixed with timestamps; prompt instructs LLM to disregard entries older than 24h unless they show a persistent pattern.
 - ~~**WebSocket auth bypasses token revocation**~~ — **Fixed 2026-05-18**. WebSocket endpoint now calls `_check_token_revocation` after `verify_internal_token`.
 
 ### Medium
@@ -389,6 +1109,6 @@ The following gaps were identified during a parallel 12-agent research review:
 - **No priority inversion detection** — high-priority tasks can be blocked behind low-priority ones.
 - **No conflict resolution for simultaneous assignments** — two tasks to the same agent may contradict each other.
 - **No monitoring for exponential relay degradation** — chain length and semantic drift are not measured.
-- **Agent turn loop ignores `token_budget`** — it is a soft hint, not a hard limit enforced by Core API.
+- ~~**Agent turn loop ignores `token_budget`**~~ — **Implemented 2026-05-21**. `isli_core/budget.py` enforces hard caps via `BudgetExceededError`; agent status set to `paused` on exceed. SDK reports LiteLLM `usage` after every turn.
 
 > See `Memory/ISLI-Research-Report.md` for full details and recommendations.

@@ -31,12 +31,27 @@ class Settings(BaseSettings):
     pii_encryption_key: str = secrets.token_urlsafe(32) if IS_DEV else ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    # Channels adapter signs all webhooks with the single WEBHOOK_SECRET env var.
+    # Core must use the same value for every channel it verifies.
+    _webhook_secret: str = os.getenv("WEBHOOK_SECRET") or "telegram-secret"
     webhook_secrets: dict[str, str] = {
-        "telegram": "telegram-secret",
-        "whatsapp": "whatsapp-secret",
+        "telegram": _webhook_secret,
+        "whatsapp": _webhook_secret,
     }
     task_lease_minutes: int = 30
     workspace_base_path: str = "./workspaces" if IS_DEV else "/workspaces"
+    agent_runner_image: str = "isli-agent-runner:latest"
+    agent_network: str = "isli_isli"
+    agent_sdk_host_path: str | None = None
+    agent_runner_build_context: str | None = None
+    default_local_model: str = "qwen3:1.7b"
+    audio_url: str = "http://localhost:8400"
+    installed_skills_path: str = "./data/installed_skills" if IS_DEV else "/data/installed_skills"
+
+    # Web Push VAPID Keys
+    vapid_private_key: str = ""
+    vapid_public_key: str = ""
+    vapid_claims_email: str = "admin@isli-ai.local"
 
     @model_validator(mode="after")
     def _validate(self):

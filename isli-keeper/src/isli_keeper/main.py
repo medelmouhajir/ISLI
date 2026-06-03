@@ -1,19 +1,22 @@
 import json
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any
 
 import httpx
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .auth import require_internal_auth
 from .config import get_settings
 from .db import close_db, get_recent_memories, get_relevant_memories, init_db
 from .metrics import get_metrics
+from .model_manager import ModelManager
 from .ollama_client import OllamaClient
-from .prompts_loader import get_prompts
+from .priority_queue import get_priority_manager, P0, P1, P2, P3
+from .prompts_loader import get_prompts, clear_prompts_cache
 from .telemetry import get_trace_id, instrument_fastapi
 
 SERVICE_NAME = "isli-keeper"
@@ -23,6 +26,15 @@ logger = structlog.get_logger()
 settings = get_settings()
 DEFAULT_EMBED_MODEL = settings.ollama_embed_model
 DEFAULT_GEN_MODEL = settings.ollama_gen_model
+
+model_manager = ModelManager()
+priority_manager = get_priority_manager()
+
+def get_gen_model() -> str:
+    return model_manager.get_model("gen")
+
+def get_embed_model() -> str:
+    return model_manager.get_model("embed")
 
 
 def _extract_json_block(text: str) -> str | None:
@@ -41,30 +53,55 @@ def _extract_json_block(text: str) -> str | None:
     return None
 
 
-def _compress_activity_log(entries: list[str], max_entries: int = 20, max_chars: int = 2000) -> str:
-    # Deduplicate consecutive identical entries
-    deduped = []
-    prev = None
+def _compress_activity_log(
+    entries: list[tuple[datetime, str]],
+    max_entries: int = 20,
+    max_chars: int = 2000,
+) -> str:
+    """Compress timestamped activity entries for the heartbeat validator prompt.
+
+    Deduplicates consecutive entries with identical *summary* text (ignoring
+    timestamp), prefixes each with its timestamp, and truncates from the end.
+    """
+    # Deduplicate consecutive identical summaries
+    deduped: list[tuple[datetime, str]] = []
+    prev_summary: str | None = None
     count = 1
-    for entry in entries:
-        if entry == prev:
+    first_ts = None
+    for ts, summary in entries:
+        if summary == prev_summary:
             count += 1
         else:
-            if prev is not None:
+            if prev_summary is not None and first_ts is not None:
                 suffix = f" (repeated {count}x)" if count > 1 else ""
-                deduped.append(f"{prev}{suffix}")
-            prev = entry
+                deduped.append((first_ts, f"{prev_summary}{suffix}"))
+            prev_summary = summary
             count = 1
-    if prev:
+            first_ts = ts
+    if prev_summary and first_ts is not None:
         suffix = f" (repeated {count}x)" if count > 1 else ""
-        deduped.append(f"{prev}{suffix}")
-    
-    # Take last N unique entries
+        deduped.append((first_ts, f"{prev_summary}{suffix}"))
+
+    # Take last N unique entries (oldest first in the list, but entries come newest-first)
+    # Reverse so oldest appears at top of prompt, then take last max_entries
+    deduped.reverse()
     recent = deduped[-max_entries:]
-    
-    # Hard cap on total characters
-    result = "\n".join(recent)
+
+    # Format with ISO-ish timestamps
+    lines = [f"[{ts.strftime('%Y-%m-%d %H:%M')}] {text}" for ts, text in recent]
+
+    result = "\n".join(lines)
     return result[-max_chars:] if len(result) > max_chars else result
+
+
+async def _ollama_generate_task(model: str, prompt: str, timeout: float | None = None, format: str | None = None) -> dict:
+    async with OllamaClient().session() as client:
+        return await client.generate(model, prompt, timeout=timeout, format=format)
+
+
+async def _ollama_embed_task(model: str, input_text: str) -> list[float]:
+    async with OllamaClient().session() as client:
+        return await client.embed(model, input_text)
 
 
 async def _generate_with_ollama(
@@ -73,45 +110,50 @@ async def _generate_with_ollama(
     agent_id: str | None = None,
     endpoint: str = "generate",
     timeout: float | None = None,
+    format: str | None = None,
+    priority: int = P2,
 ) -> dict:
+    # Default timeouts by priority if not specified
+    if timeout is None:
+        if priority == P0:
+            timeout = 45.0
+        elif priority <= P2:
+            timeout = 120.0
+        else:
+            timeout = 300.0
+
+    metadata = {
+        "agent_id": agent_id,
+        "endpoint": endpoint,
+        "model": model,
+        "prompt": prompt[:100],
+    }
+
     metrics = get_metrics()
     metrics.start_request()
-    start = time.monotonic()
     try:
-        async with OllamaClient().session() as client:
-            result = await client.generate(model, prompt, timeout=timeout)
-        latency = (time.monotonic() - start) * 1000
-        metrics.record_inference(
-            agent_id=agent_id,
-            endpoint=endpoint,
-            model=model,
-            latency_ms=latency,
-            prompt=prompt,
-            completion=result.get("response", ""),
-            tokens_in=len(prompt) // 4,
-            tokens_out=len(result.get("response", "")) // 4,
-            status="success",
+        return await priority_manager.submit(
+            priority, timeout, _ollama_generate_task, metadata, model, prompt, timeout, format
         )
-        return result
-    except Exception as exc:
-        latency = (time.monotonic() - start) * 1000
-        metrics.record_inference(
-            agent_id=agent_id,
-            endpoint=endpoint,
-            model=model,
-            latency_ms=latency,
-            prompt=prompt,
-            status="error",
-            error=str(exc),
-        )
+    except asyncio.TimeoutError:
+        logger.error("keeper.timeout", endpoint=endpoint, timeout=timeout, agent_id=agent_id)
+        raise HTTPException(status_code=503, detail=f"Keeper timeout ({timeout}s) for {endpoint}")
+    except RuntimeError as e:
+        if "depth exceeded" in str(e):
+            raise HTTPException(status_code=429, detail=str(e))
         raise
+    except Exception as exc:
+        logger.error("keeper.inference_error", endpoint=endpoint, error=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("keeper.startup", service=SERVICE_NAME)
     await init_db()
+    priority_manager.start()
     yield
+    await priority_manager.stop()
     await close_db()
     logger.info("keeper.shutdown", service=SERVICE_NAME)
 
@@ -126,7 +168,7 @@ instrument_fastapi(app, SERVICE_NAME)
 
 class EmbedRequest(BaseModel):
     input: str
-    model: str = DEFAULT_EMBED_MODEL
+    model: str = Field(default_factory=get_embed_model)
     agent_id: str | None = None
 
 
@@ -138,7 +180,7 @@ class SummarizeRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     prompt: str
-    model: str = DEFAULT_GEN_MODEL
+    model: str = Field(default_factory=get_gen_model)
     options: dict[str, Any] | None = None
     agent_id: str | None = None
 
@@ -149,8 +191,24 @@ class ContextInjectRequest(BaseModel):
     task_description: str | None = None
     agent_name: str | None = None
     agent_description: str | None = None
-    agent_persona: str | None = None
     memory_similarity_threshold: float = 0.4
+    known_agent_ids: list[str] | None = None
+
+
+class ModelRouteRequest(BaseModel):
+    agent_id: str
+    task_description: str
+    complexity_score: int
+    complexity_tier: str
+    secondary_models: list[dict[str, Any]]
+    default_provider: str | None = None
+    default_model: str | None = None
+
+
+class ModelRouteResponse(BaseModel):
+    recommended_provider: str
+    recommended_model_id: str
+    reason: str
 
 
 class HeartbeatRequest(BaseModel):
@@ -222,33 +280,28 @@ async def embed(
     _auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
+    metadata = {
+        "agent_id": agent_id,
+        "endpoint": "embed",
+        "model": req.model,
+        "prompt": req.input[:100],
+    }
+
     metrics = get_metrics()
     metrics.start_request()
-    start = time.monotonic()
     try:
-        async with OllamaClient().session() as client:
-            embedding = await client.embed(req.model, req.input)
-        latency = (time.monotonic() - start) * 1000
-        metrics.record_inference(
-            agent_id=agent_id,
-            endpoint="embed",
-            model=req.model,
-            latency_ms=latency,
-            prompt=req.input,
-            status="success",
+        # Embeddings are usually background (P3)
+        embedding = await priority_manager.submit(
+            P3, 300.0, _ollama_embed_task, metadata, req.model, req.input
         )
         return {"embedding": embedding, "model": req.model}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Keeper timeout (300s) for embed")
+    except RuntimeError as e:
+        if "depth exceeded" in str(e):
+            raise HTTPException(status_code=429, detail=str(e))
+        raise
     except Exception as exc:
-        latency = (time.monotonic() - start) * 1000
-        metrics.record_inference(
-            agent_id=agent_id,
-            endpoint="embed",
-            model=req.model,
-            latency_ms=latency,
-            prompt=req.input,
-            status="error",
-            error=str(exc),
-        )
         logger.error("keeper.embed_failed", error=str(exc))
         raise HTTPException(status_code=503, detail=str(exc))
 
@@ -265,10 +318,10 @@ async def summarize(
     )
     try:
         result = await _generate_with_ollama(
-            prompt, model=DEFAULT_GEN_MODEL, agent_id=agent_id, endpoint="summarize"
+            prompt, model=get_gen_model(), agent_id=agent_id, endpoint="summarize"
         )
         summary = result.get("response", "")
-        return {"summary": summary, "model": DEFAULT_GEN_MODEL}
+        return {"summary": summary, "model": get_gen_model()}
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
         logger.error("keeper.summarize_failed", error=str(exc))
         raise HTTPException(status_code=503, detail="Keeper LLM unavailable: Ollama unreachable")
@@ -302,10 +355,14 @@ async def journal_update(
 
     try:
         result = await _generate_with_ollama(
-            prompt, model=DEFAULT_GEN_MODEL, agent_id=agent_id, endpoint="journal/update"
+            prompt,
+            model=get_gen_model(),
+            agent_id=agent_id,
+            endpoint="journal/update",
+            priority=P3,
         )
         updated_journal = result.get("response", "")
-        return {"journal": updated_journal, "model": DEFAULT_GEN_MODEL}
+        return {"journal": updated_journal, "model": get_gen_model()}
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
         logger.error("keeper.journal_update_failed", error=str(exc))
         raise HTTPException(status_code=503, detail="Keeper LLM unavailable: Ollama unreachable")
@@ -316,45 +373,33 @@ async def journal_update(
 
 @app.post("/context/inject")
 async def context_inject(req: ContextInjectRequest, _auth: dict = Depends(require_internal_auth)):
+    metrics = get_metrics()
+    metrics.start_request()
+    start = time.monotonic()
     try:
         # 1. Fetch episodic memories (Tier 2) - use semantic search if task description is provided
         memories = []
         if req.task_description:
-            metrics = get_metrics()
-            metrics.start_request()
-            embed_start = time.monotonic()
+            metadata = {
+                "agent_id": req.agent_id,
+                "endpoint": "context/inject:embed",
+                "model": get_embed_model(),
+                "prompt": req.task_description[:100],
+            }
             try:
-                async with OllamaClient().session() as client:
-                    embedding = await client.embed(DEFAULT_EMBED_MODEL, req.task_description)
-                embed_latency = (time.monotonic() - embed_start) * 1000
-                metrics.record_inference(
-                    agent_id=req.agent_id,
-                    endpoint="embed",
-                    model=DEFAULT_EMBED_MODEL,
-                    latency_ms=embed_latency,
-                    prompt=req.task_description,
-                    status="success",
+                embedding = await priority_manager.submit(
+                    P0, 45.0, _ollama_embed_task, metadata, get_embed_model(), req.task_description
                 )
                 memories = await get_relevant_memories(
                     req.agent_id, embedding, threshold=req.memory_similarity_threshold
                 )
-                
+
                 # Conditional Fallback: If semantic search ran but found nothing above threshold,
                 # fall back to recent memories BUT cap at 3 and log it.
                 if not memories:
                     memories = await get_recent_memories(req.agent_id, limit=3)
                     logger.warning("keeper.semantic_search_empty_fallback", agent_id=req.agent_id)
             except Exception as exc:
-                embed_latency = (time.monotonic() - embed_start) * 1000
-                metrics.record_inference(
-                    agent_id=req.agent_id,
-                    endpoint="embed",
-                    model=DEFAULT_EMBED_MODEL,
-                    latency_ms=embed_latency,
-                    prompt=req.task_description,
-                    status="error",
-                    error=str(exc),
-                )
                 logger.warning("keeper.semantic_search_failed", error=str(exc))
                 # Fallback on error: cap at 3
                 memories = await get_recent_memories(req.agent_id, limit=3)
@@ -387,8 +432,6 @@ async def context_inject(req: ContextInjectRequest, _auth: dict = Depends(requir
             identity_parts.append(f"ID: {req.agent_id}")
         if req.agent_description:
             identity_parts.append(f"Description: {req.agent_description}")
-        if req.agent_persona:
-            identity_parts.append(f"Persona: {req.agent_persona}")
 
         if identity_parts:
             identity_block = "=== AGENT IDENTITY ===\n" + "\n".join(identity_parts)
@@ -404,23 +447,166 @@ async def context_inject(req: ContextInjectRequest, _auth: dict = Depends(requir
             memories_text = "\n".join([f"- {m}" for m in memories])
             context_parts.append(f"=== HISTORICAL MEMORIES ===\n{memories_text}")
 
+        if req.known_agent_ids:
+            peer_block = (
+                "=== PEER AGENTS ===\n"
+                "You can delegate tasks to the following agents via the Kanban board:\n"
+            )
+            for peer_id in req.known_agent_ids:
+                peer_block += f"- {peer_id}\n"
+            peer_block += (
+                "\nWhen delegating, use create_task and set assignee to the target agent ID."
+            )
+            context_parts.append(peer_block)
+
         if not context_parts:
+            metrics.record_inference(
+                agent_id=req.agent_id,
+                endpoint="context/inject",
+                model="retrieval-only",
+                latency_ms=(time.monotonic() - start) * 1000,
+                prompt=req.task_description or "",
+                completion="No previous context found.",
+                status="success",
+            )
             return {
                 "context_summary": "No previous context found.",
                 "relevant_memories": [],
-                "model": "fast-path"
+                "model": "retrieval-only"
             }
 
         context_summary = "\n\n".join(context_parts)
 
+        metrics.record_inference(
+            agent_id=req.agent_id,
+            endpoint="context/inject",
+            model="retrieval-only",
+            latency_ms=(time.monotonic() - start) * 1000,
+            prompt=req.task_description or "",
+            completion=context_summary,
+            status="success",
+        )
         return {
             "context_summary": context_summary,
             "relevant_memories": memories,
-            "model": "fast-path"
+            "model": "retrieval-only"
         }
     except Exception as exc:
+        latency = (time.monotonic() - start) * 1000
+        metrics.record_inference(
+            agent_id=req.agent_id,
+            endpoint="context/inject",
+            model="retrieval-only",
+            latency_ms=latency,
+            prompt=req.task_description or "",
+            status="error",
+            error=f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
         logger.error("keeper.context_inject_failed", error=str(exc))
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+def _format_model_list(models: list[dict]) -> str:
+    """Format secondary models into prose for the Ollama prompt."""
+    lines = []
+    for i, m in enumerate(models, 1):
+        tier = m.get("cost_tier", "unknown")
+        lines.append(
+            f"{i}. {m['model_id']} ({m.get('label', 'no label')}) — "
+            f"{m.get('description', 'no description')}; tier={tier}"
+        )
+    return "\n".join(lines) if lines else "(none)"
+
+
+@app.post("/model/route")
+async def model_route(req: ModelRouteRequest, _auth: dict = Depends(require_internal_auth)):
+    """Keeper-side model router: given a task and available models, pick the best one."""
+    metrics = get_metrics()
+    start = time.monotonic()
+
+    model_list = _format_model_list(req.secondary_models)
+    prompt = get_prompts()["keeper"]["model_router"].format(
+        task_description=req.task_description,
+        complexity_score=req.complexity_score,
+        complexity_tier=req.complexity_tier,
+        model_list=model_list,
+        default_model=req.default_model or "(none)",
+    )
+
+    try:
+        result = await _generate_with_ollama(
+            prompt,
+            model=get_gen_model(),
+            agent_id=req.agent_id,
+            endpoint="model/route",
+            format="json",
+            priority=P0,
+        )
+        resp_text = result.get("response", "").strip()
+        block = _extract_json_block(resp_text)
+
+        if block:
+            verdict = json.loads(block)
+            recommended_model_id = verdict.get("recommended_model_id")
+            reason = verdict.get("reason", "No reason provided")
+
+            # Validate that the recommended model exists in the secondary models list
+            valid_ids = {m["model_id"] for m in req.secondary_models}
+            if recommended_model_id not in valid_ids:
+                logger.warning(
+                    "keeper.model_route_invalid_model",
+                    agent_id=req.agent_id,
+                    recommended=recommended_model_id,
+                    valid=list(valid_ids),
+                    fallback=req.default_model,
+                )
+                recommended_model_id = req.default_model
+                reason = f"Keeper returned unknown model; falling back to default ({req.default_model})"
+
+            # Resolve provider from secondary_models or default
+            provider = req.default_provider or ""
+            for m in req.secondary_models:
+                if m["model_id"] == recommended_model_id:
+                    provider = m.get("provider", provider)
+                    break
+
+            latency = (time.monotonic() - start) * 1000
+            metrics.record_inference(
+                agent_id=req.agent_id,
+                endpoint="model/route",
+                model=get_gen_model(),
+                latency_ms=latency,
+                prompt=prompt[:200],
+                completion=resp_text[:200],
+                status="success",
+            )
+            return {
+                "recommended_provider": provider,
+                "recommended_model_id": recommended_model_id,
+                "reason": reason,
+            }
+
+        # No JSON block found
+        logger.warning("keeper.model_route_no_json", agent_id=req.agent_id, raw=resp_text[:200])
+    except Exception as exc:
+        latency = (time.monotonic() - start) * 1000
+        metrics.record_inference(
+            agent_id=req.agent_id,
+            endpoint="model/route",
+            model=get_gen_model(),
+            latency_ms=latency,
+            prompt=prompt[:200],
+            status="error",
+            error=f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
+        logger.error("keeper.model_route_failed", agent_id=req.agent_id, error=str(exc))
+
+    # Fail-open: return the default model
+    return {
+        "recommended_provider": req.default_provider or "",
+        "recommended_model_id": req.default_model or "",
+        "reason": "Keeper routing failed or returned invalid JSON; falling back to default model",
+    }
 
 
 @app.post("/generate")
@@ -438,6 +624,144 @@ async def generate(
         raise HTTPException(status_code=503, detail="Keeper LLM unavailable: Ollama unreachable")
     except Exception as exc:
         logger.error("keeper.generate_failed", error=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc))
+
+class PullRequest(BaseModel):
+    slot: str
+    model_name: str
+
+
+class ActivateRequest(BaseModel):
+    slot: str
+    model_name: str
+
+
+class RemoveRequest(BaseModel):
+    model_name: str
+
+
+@app.post("/admin/activate")
+async def admin_activate(
+    req: ActivateRequest,
+    _auth: dict = Depends(require_internal_auth),
+):
+    if req.slot not in model_manager.config:
+        raise HTTPException(status_code=400, detail=f"Invalid slot: {req.slot}")
+    try:
+        async with OllamaClient().session() as client:
+            exists = await client.model_exists(req.model_name)
+        if not exists:
+            raise HTTPException(
+                status_code=404, detail=f"Model {req.model_name} is not available in Ollama"
+            )
+        model_manager.set_model(req.slot, req.model_name)
+        return {
+            "status": "ok",
+            "slot": req.slot,
+            "model": req.model_name,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("keeper.admin_activate_failed", error=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/admin/remove")
+async def admin_remove(
+    req: RemoveRequest,
+    _auth: dict = Depends(require_internal_auth),
+):
+    try:
+        async with OllamaClient().session() as client:
+            exists = await client.model_exists(req.model_name)
+        if not exists:
+            raise HTTPException(
+                status_code=404, detail=f"Model {req.model_name} is not available in Ollama"
+            )
+
+        # Check if the model is active for any slot
+        was_active = False
+        affected_slot = None
+        for slot, active_model in model_manager.config.items():
+            if active_model == req.model_name:
+                was_active = True
+                affected_slot = slot
+                break
+
+        if was_active and affected_slot:
+            settings = get_settings()
+            fallback = (
+                settings.ollama_gen_model
+                if affected_slot == "gen"
+                else settings.ollama_embed_model
+            )
+            async with OllamaClient().session() as client:
+                fallback_exists = await client.model_exists(fallback)
+            if not fallback_exists:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot remove active model: fallback default not available",
+                )
+
+        # Delete from Ollama
+        async with OllamaClient().session() as client:
+            await client.delete_model(req.model_name)
+
+        # Reset active slot if needed
+        if was_active and affected_slot:
+            fallback = (
+                get_settings().ollama_gen_model
+                if affected_slot == "gen"
+                else get_settings().ollama_embed_model
+            )
+            model_manager.set_model(affected_slot, fallback)
+
+        return {
+            "status": "ok",
+            "removed": req.model_name,
+            "was_active": was_active,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("keeper.admin_remove_failed", error=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/admin/reload-prompts")
+async def reload_prompts(_auth: dict = Depends(require_internal_auth)):
+    clear_prompts_cache()
+    return {"status": "ok", "reloaded": True}
+
+
+@app.get("/admin/config")
+async def admin_config(_auth: dict = Depends(require_internal_auth)):
+    return {
+        "config": {
+            "gen": model_manager.get_model("gen"),
+            "embed": model_manager.get_model("embed"),
+        }
+    }
+
+
+@app.post("/admin/pull")
+async def admin_pull(
+    req: PullRequest,
+    _auth: dict = Depends(require_internal_auth),
+):
+    try:
+        async with OllamaClient().session() as client:
+            result = await client.pull_model(req.model_name)
+        model_manager.set_model(req.slot, req.model_name)
+        return {
+            "status": "ok",
+            "slot": req.slot,
+            "model": req.model_name,
+            "ollama_result": result,
+        }
+    except Exception as exc:
+        logger.error("keeper.admin_pull_failed", error=str(exc))
         raise HTTPException(status_code=503, detail=str(exc))
 
 
@@ -470,7 +794,13 @@ async def heartbeat(req: HeartbeatRequest, _auth: dict = Depends(require_interna
                 activity=activity_text,
             )
 
-            result = await _generate_with_ollama(prompt, model=DEFAULT_GEN_MODEL, agent_id=req.agent_id, endpoint="heartbeat")
+            result = await _generate_with_ollama(
+                prompt,
+                model=get_gen_model(),
+                agent_id=req.agent_id,
+                endpoint="heartbeat",
+                priority=P1,
+            )
             analysis = result.get("response", "NONE").strip()
 
             if analysis != "NONE":
@@ -494,10 +824,11 @@ async def heartbeat(req: HeartbeatRequest, _auth: dict = Depends(require_interna
 @app.post("/heartbeat/validate")
 async def heartbeat_validate(req: HeartbeatValidateRequest, _auth: dict = Depends(require_internal_auth)):
     # Run LLM-based anomaly detection
+    start = time.monotonic()
     try:
         # Fetch recent activity for context
-        from .db import get_recent_memories
-        memories = await get_recent_memories(req.agent_id, limit=20)
+        from .db import get_recent_memories_with_dates
+        memories = await get_recent_memories_with_dates(req.agent_id, limit=20)
         compressed_log = _compress_activity_log(memories)
 
         prompt = get_prompts()["keeper"]["heartbeat_validate"].format(
@@ -508,18 +839,38 @@ async def heartbeat_validate(req: HeartbeatValidateRequest, _auth: dict = Depend
 
         result = await _generate_with_ollama(
             prompt,
-            model=DEFAULT_GEN_MODEL,
+            model=get_gen_model(),
             agent_id=req.agent_id,
             endpoint="heartbeat/validate",
-            timeout=30.0
+            timeout=180.0,
+            format="json",
+            priority=P1,
         )
         resp_text = result.get("response", "{\"is_valid\": true}").strip()
 
         block = _extract_json_block(resp_text)
         if block:
-            return json.loads(block)
+            verdict = json.loads(block)
+            # Post-process: the 1.7B model hallucinates many benign states as anomalies.
+            # We only trust anomalies that describe a crash, fatal error, or infinite loop.
+            anomaly = (verdict.get("anomaly") or "").lower()
+            if anomaly:
+                trusted_patterns = [
+                    "crash", "fatal", "infinite loop", "infinite",
+                    "stuck", "loop", "repeated error", "repeated failure",
+                    "retrying the same", "endless loop", "frozen",
+                ]
+                if not any(tp in anomaly for tp in trusted_patterns):
+                    logger.info(
+                        "keeper.heartbeat_false_positive_filtered",
+                        agent_id=req.agent_id,
+                        original_anomaly=verdict.get("anomaly"),
+                    )
+                    return {"is_valid": True, "anomaly": None}
+            return verdict
         return {"is_valid": True}
     except Exception as exc:
+        latency = (time.monotonic() - start) * 1000
         if isinstance(exc, httpx.TimeoutException):
             logger.warning(
                 "heartbeat_validate timed out, failing open (is_valid=True)",
@@ -531,6 +882,16 @@ async def heartbeat_validate(req: HeartbeatValidateRequest, _auth: dict = Depend
                 error=str(exc),
                 agent_id=req.agent_id
             )
+        metrics = get_metrics()
+        metrics.record_inference(
+            agent_id=req.agent_id,
+            endpoint="heartbeat/validate",
+            model=get_gen_model(),
+            latency_ms=latency,
+            prompt=locals().get("prompt", req.heartbeat_at),
+            status="error",
+            error=f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
         return {"is_valid": True, "note": "Validation failed, failing open"}
 
 
@@ -566,7 +927,13 @@ async def pii_scrub(
     prompt = get_prompts()["keeper"]["pii_scrub"].format(text=text)
 
     try:
-        result = await _generate_with_ollama(prompt, model=DEFAULT_GEN_MODEL, agent_id=agent_id, endpoint="pii/scrub")
+        result = await _generate_with_ollama(
+            prompt,
+            model=get_gen_model(),
+            agent_id=agent_id,
+            endpoint="pii/scrub",
+            priority=P1,
+        )
         resp_text = result.get("response", "")
         block = _extract_json_block(resp_text)
         if block:
@@ -636,10 +1003,10 @@ async def skill_clean(
     )
     try:
         result = await _generate_with_ollama(
-            prompt, model=DEFAULT_GEN_MODEL, agent_id=agent_id, endpoint="skill/clean"
+            prompt, model=get_gen_model(), agent_id=agent_id, endpoint="skill/clean"
         )
         cleaned = result.get("response", "")
-        return {"cleaned_data": f"{warning}{cleaned}", "model": DEFAULT_GEN_MODEL}
+        return {"cleaned_data": f"{warning}{cleaned}", "model": get_gen_model()}
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
         logger.error("keeper.skill_clean_failed", error=str(exc))
         raise HTTPException(status_code=503, detail="Keeper LLM unavailable: Ollama unreachable")
@@ -660,7 +1027,7 @@ async def verify_logic(
     )
     try:
         result = await _generate_with_ollama(
-            prompt, model=DEFAULT_GEN_MODEL, agent_id=agent_id, endpoint="verify/logic"
+            prompt, model=get_gen_model(), agent_id=agent_id, endpoint="verify/logic"
         )
         resp_text = result.get("response", "")
         block = _extract_json_block(resp_text)
@@ -675,7 +1042,8 @@ async def verify_logic(
 @app.get("/dashboard")
 async def dashboard(_auth: dict = Depends(require_internal_auth)):
     metrics = get_metrics()
-    snapshot = metrics.get_snapshot()
+    queue_depths = priority_manager.get_depths()
+    snapshot = metrics.get_snapshot(queue_depths=queue_depths)
     settings = get_settings()
 
     # Probe Ollama for running models + VRAM
@@ -693,7 +1061,7 @@ async def dashboard(_auth: dict = Depends(require_internal_auth)):
     model_info = {}
     try:
         async with OllamaClient().session() as client:
-            model_info = await client.show_model(DEFAULT_GEN_MODEL)
+            model_info = await client.show_model(get_gen_model())
     except Exception as exc:
         logger.warning("keeper.dashboard_model_info_failed", error=str(exc))
 
@@ -703,8 +1071,8 @@ async def dashboard(_auth: dict = Depends(require_internal_auth)):
         "identity": {
             "backend": "ollama",
             "ollama_host": settings.ollama_host or "http://localhost:11434",
-            "default_gen_model": DEFAULT_GEN_MODEL,
-            "default_embed_model": DEFAULT_EMBED_MODEL,
+            "default_gen_model": model_manager.get_model("gen"),
+            "default_embed_model": model_manager.get_model("embed"),
             "model_info": {
                 "parameter_size": model_info.get("details", {}).get("parameter_size"),
                 "quantization": model_info.get("details", {}).get("quantization_level"),
@@ -728,7 +1096,7 @@ async def dashboard(_auth: dict = Depends(require_internal_auth)):
         "config": {
             "num_ctx": 4096,
             "num_batch": 512,
-            "ollama_gen_model": DEFAULT_GEN_MODEL,
-            "ollama_embed_model": DEFAULT_EMBED_MODEL,
+            "ollama_gen_model": model_manager.get_model("gen"),
+            "ollama_embed_model": model_manager.get_model("embed"),
         },
     }

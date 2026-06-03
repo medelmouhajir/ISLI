@@ -13,7 +13,30 @@ from .db import init_db, close_db
 from .redis_client import get_redis
 from .startup_validation import validate_startup_secrets
 from .telemetry import instrument_fastapi, get_trace_id
-from .routers import agents, tasks, skills, channels, system, transparency, security, ws, memory, sessions, commands, workspaces
+from .routers import (
+    agents,
+    audio,
+    backups,
+    channels,
+    commands,
+    internal,
+    memory,
+    model_management,
+    notifications,
+    prompts,
+    secrets,
+    security,
+    sessions,
+    settings,
+    shared_workspaces,
+    skills,
+    stt,
+    system,
+    tasks,
+    transparency,
+    workspaces,
+    ws,
+)
 
 SERVICE_NAME = "isli-core"
 
@@ -81,8 +104,65 @@ async def lifespan(app: FastAPI):
     from isli_core.jobs.session_context_injector import SessionContextInjectorWorker
     from isli_core.jobs.memory_worker import MemoryWorker
     from isli_core.jobs.outbox_worker import OutboxWorker
+    from isli_core.jobs.memory_gc_worker import MemoryGCWorker
+    from isli_core.jobs.chromadb_backup_worker import ChromaBackupWorker
     from isli_core.routers.ws import redis_listener
     from isli_core.jobs.heartbeat_validator import heartbeat_validator_worker
+    from isli_core.jobs.budget_alerter import BudgetAlertWorker
+    from isli_core.jobs.attachment_cleanup import AttachmentCleanupWorker
+    from isli_core.jobs.audio_cleanup import AudioCleanupWorker
+    from isli_core.notification.digest import DigestWorker
+    from isli_core.services.process_manager import AgentProcessManager
+
+    # Register notification outbox handlers
+    from isli_core.jobs.outbox_worker import register_outbox_handler
+    from isli_core.notification.delivery import deliver_in_app
+    from isli_core.notification.delivery_external import deliver_external
+    from isli_core.notification.delivery_webpush import deliver_web_push
+    register_outbox_handler("notification:in_app", deliver_in_app)
+    register_outbox_handler("notification:external", deliver_external)
+    register_outbox_handler("notification:web_push", deliver_web_push)
+    logger.info("startup.notification_handlers_registered")
+
+    # Initialize AgentProcessManager
+    sdk_path = os.getenv("AGENT_SDK_PATH", "../isli-agent-sdk")
+    app.state.process_manager = AgentProcessManager(
+        sdk_path=sdk_path,
+        core_url=settings.core_api_url
+    )
+
+    # Reset stuck "starting" agents to "stopped"
+    from isli_core.models import Agent
+    from sqlalchemy import update, select
+    from isli_core.db import get_db_session_manual
+    async with get_db_session_manual() as session:
+        result = await session.execute(
+            update(Agent)
+            .where(Agent.status == "starting", Agent.deleted_at.is_(None))
+            .values(status="stopped")
+            .returning(Agent.id)
+        )
+        reset_ids = [row[0] for row in result.all()]
+        await session.commit()
+        if reset_ids:
+            logger.info("startup.reset_stuck_starting_agents", agent_ids=reset_ids)
+
+    # Reconcile with any Docker containers that survived a Core restart
+    await app.state.process_manager.reconcile()
+
+    # Restart any agents that were online before Core went down
+    async with get_db_session_manual() as session:
+        result = await session.execute(
+            select(Agent).where(Agent.status == "online", Agent.deleted_at.is_(None))
+        )
+        online_agents = result.scalars().all()
+        for agent in online_agents:
+            if not app.state.process_manager.is_running(agent.id):
+                logger.info("core.startup.restart_agent", agent_id=agent.id)
+                try:
+                    await app.state.process_manager.spawn(agent.id)
+                except Exception as exc:
+                    logger.error("core.startup.restart_failed", agent_id=agent.id, error=str(exc))
 
     cron_task = asyncio.create_task(SessionCronJob.loop())
     scheduler_task = asyncio.create_task(SchedulerWorker.loop())
@@ -91,9 +171,15 @@ async def lifespan(app: FastAPI):
     session_ctx_task = asyncio.create_task(SessionContextInjectorWorker.loop())
     journal_task = asyncio.create_task(JournalWorker.loop())
     memory_task = asyncio.create_task(MemoryWorker.loop())
+    memory_gc_task = asyncio.create_task(MemoryGCWorker.loop())
     outbox_task = asyncio.create_task(OutboxWorker.loop())
+    digest_task = asyncio.create_task(DigestWorker.loop())
     ws_task = asyncio.create_task(redis_listener())
     heartbeat_task = asyncio.create_task(heartbeat_validator_worker())
+    budget_alert_task = asyncio.create_task(BudgetAlertWorker.loop())
+    attachment_cleanup_task = asyncio.create_task(AttachmentCleanupWorker.loop())
+    audio_cleanup_task = asyncio.create_task(AudioCleanupWorker.loop())
+    chroma_backup_task = asyncio.create_task(ChromaBackupWorker.loop())
 
     yield
 
@@ -105,9 +191,15 @@ async def lifespan(app: FastAPI):
     session_ctx_task.cancel()
     journal_task.cancel()
     memory_task.cancel()
+    memory_gc_task.cancel()
     outbox_task.cancel()
+    digest_task.cancel()
     ws_task.cancel()
     heartbeat_task.cancel()
+    budget_alert_task.cancel()
+    attachment_cleanup_task.cancel()
+    audio_cleanup_task.cancel()
+    chroma_backup_task.cancel()
     try:
         await cron_task
     except asyncio.CancelledError:
@@ -118,6 +210,18 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await session_ctx_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await memory_gc_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await audio_cleanup_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await chroma_backup_task
     except asyncio.CancelledError:
         pass
 
@@ -151,9 +255,11 @@ app.add_middleware(
 v1 = APIRouter(prefix="/v1")
 
 v1.include_router(agents.router)
+v1.include_router(audio.router)
 v1.include_router(tasks.router)
 v1.include_router(skills.router)
 v1.include_router(workspaces.router)
+v1.include_router(shared_workspaces.router)
 v1.include_router(memory.router)
 v1.include_router(channels.router)
 v1.include_router(sessions.router)
@@ -162,6 +268,14 @@ v1.include_router(system.router)
 v1.include_router(transparency.router)
 v1.include_router(security.router)
 v1.include_router(ws.router)
+v1.include_router(settings.router)
+v1.include_router(model_management.router)
+v1.include_router(internal.router)
+v1.include_router(stt.router)
+v1.include_router(backups.router)
+v1.include_router(secrets.router)
+v1.include_router(prompts.router)
+v1.include_router(notifications.router)
 
 
 @v1.get("/metrics")

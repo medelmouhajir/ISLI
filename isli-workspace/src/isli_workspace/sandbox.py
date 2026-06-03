@@ -1,5 +1,6 @@
 import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -7,13 +8,21 @@ from typing import Any
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 MAX_WORKSPACE_SIZE_BYTES = 100 * 1024 * 1024
 
+SCOPE_PREFIXES = {
+    "agent": "agents/{scope_id}",
+    "attachment": "_attachments/{scope_id}",
+    "shared": "_shared/{scope_id}",
+}
 
-def _workspace_root(agent_id: str, base_path: str) -> Path:
-    return Path(base_path) / agent_id
+
+def _workspace_root(scope: str, scope_id: str, base_path: str) -> Path:
+    prefix_template = SCOPE_PREFIXES.get(scope, "agents/{scope_id}")
+    prefix = prefix_template.format(scope_id=scope_id)
+    return Path(base_path) / prefix
 
 
-def _ensure_within_workspace(agent_id: str, base_path: str, target: Path) -> None:
-    root = _workspace_root(agent_id, base_path).resolve()
+def _ensure_within_workspace(scope: str, scope_id: str, base_path: str, target: Path) -> None:
+    root = _workspace_root(scope, scope_id, base_path).resolve()
     resolved = target.resolve()
     try:
         if not resolved.is_relative_to(root):
@@ -24,35 +33,38 @@ def _ensure_within_workspace(agent_id: str, base_path: str, target: Path) -> Non
             raise PermissionError(f"Path traversal blocked: {resolved}")
 
 
-def _get_workspace_size(agent_id: str, base_path: str) -> int:
-    root = _workspace_root(agent_id, base_path)
+def _get_workspace_size(scope: str, scope_id: str, base_path: str) -> int:
+    root = _workspace_root(scope, scope_id, base_path)
     if not root.exists():
         return 0
     total = 0
     for dirpath, _dirnames, filenames in os.walk(root):
         for f in filenames:
             fp = Path(dirpath) / f
-            total += fp.stat().st_size
+            try:
+                total += fp.stat().st_size
+            except FileNotFoundError:
+                continue
     return total
 
 
-def resolve_path(agent_id: str, base_path: str, relative_path: str) -> Path:
-    root = _workspace_root(agent_id, base_path)
-    # Ensure the root exists before resolving against it, otherwise resolve() 
-    # might behave differently for non-existent paths on some systems
+def resolve_path(scope: str, scope_id: str, base_path: str, relative_path: str) -> Path:
+    root = _workspace_root(scope, scope_id, base_path)
+    # Ensure the root exists before resolving against it
     root.mkdir(parents=True, exist_ok=True, mode=0o777)
     target = (root / (relative_path or ".")).resolve()
-    _ensure_within_workspace(agent_id, base_path, target)
+    _ensure_within_workspace(scope, scope_id, base_path, target)
     return target
 
 
-def check_quota(agent_id: str, base_path: str, additional_bytes: int) -> bool:
-    current = _get_workspace_size(agent_id, base_path)
-    return (current + additional_bytes) <= MAX_WORKSPACE_SIZE_BYTES
+def check_quota(scope: str, scope_id: str, base_path: str, additional_bytes: int, max_bytes: int | None = None) -> bool:
+    current = _get_workspace_size(scope, scope_id, base_path)
+    limit = max_bytes if max_bytes is not None else MAX_WORKSPACE_SIZE_BYTES
+    return (current + additional_bytes) <= limit
 
 
-def read_file(agent_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
-    path = resolve_path(agent_id, base_path, relative_path)
+def read_file(scope: str, scope_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
+    path = resolve_path(scope, scope_id, base_path, relative_path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {relative_path}")
     if path.is_dir():
@@ -75,15 +87,28 @@ def read_file(agent_id: str, base_path: str, relative_path: str) -> dict[str, An
     }
 
 
-def write_file(agent_id: str, base_path: str, relative_path: str, content: str) -> dict[str, Any]:
-    path = resolve_path(agent_id, base_path, relative_path)
-    size = len(content.encode("utf-8"))
+def write_file(scope: str, scope_id: str, base_path: str, relative_path: str, content: str, max_bytes: int | None = None) -> dict[str, Any]:
+    path = resolve_path(scope, scope_id, base_path, relative_path)
+    encoded_content = content.encode("utf-8")
+    size = len(encoded_content)
     if size > MAX_FILE_SIZE_BYTES:
         raise ValueError(f"Content exceeds max file size: {size} bytes")
-    if not check_quota(agent_id, base_path, size):
+    if not check_quota(scope, scope_id, base_path, size, max_bytes):
         raise ValueError("Workspace quota exceeded")
+    
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o777)
-    path.write_text(content, encoding="utf-8")
+    
+    # Atomic write using a temporary file and rename
+    fd, temp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp_")
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(encoded_content)
+        os.replace(temp_path, path)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
     stat = path.stat()
     return {
         "status": "written",
@@ -92,15 +117,27 @@ def write_file(agent_id: str, base_path: str, relative_path: str, content: str) 
     }
 
 
-def write_file_bytes(agent_id: str, base_path: str, relative_path: str, content: bytes) -> dict[str, Any]:
-    path = resolve_path(agent_id, base_path, relative_path)
+def write_file_bytes(scope: str, scope_id: str, base_path: str, relative_path: str, content: bytes, max_bytes: int | None = None) -> dict[str, Any]:
+    path = resolve_path(scope, scope_id, base_path, relative_path)
     size = len(content)
     if size > MAX_FILE_SIZE_BYTES:
         raise ValueError(f"Content exceeds max file size: {size} bytes")
-    if not check_quota(agent_id, base_path, size):
+    if not check_quota(scope, scope_id, base_path, size, max_bytes):
         raise ValueError("Workspace quota exceeded")
+    
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o777)
-    path.write_bytes(content)
+    
+    # Atomic write using a temporary file and rename
+    fd, temp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp_")
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(content)
+        os.replace(temp_path, path)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
     stat = path.stat()
     return {
         "status": "written",
@@ -109,8 +146,8 @@ def write_file_bytes(agent_id: str, base_path: str, relative_path: str, content:
     }
 
 
-def create_dir(agent_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
-    path = resolve_path(agent_id, base_path, relative_path)
+def create_dir(scope: str, scope_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
+    path = resolve_path(scope, scope_id, base_path, relative_path)
     path.mkdir(parents=True, exist_ok=True, mode=0o777)
     return {
         "status": "created",
@@ -118,26 +155,31 @@ def create_dir(agent_id: str, base_path: str, relative_path: str) -> dict[str, A
     }
 
 
-def list_dir(agent_id: str, base_path: str, relative_path: str = "") -> dict[str, Any]:
-    path = resolve_path(agent_id, base_path, relative_path)
+def list_dir(scope: str, scope_id: str, base_path: str, relative_path: str = "") -> dict[str, Any]:
+    path = resolve_path(scope, scope_id, base_path, relative_path)
     if not path.exists():
         raise FileNotFoundError(f"Directory not found: {relative_path}")
     if not path.is_dir():
         raise NotADirectoryError(f"Path is not a directory: {relative_path}")
     entries = []
     for entry in path.iterdir():
-        stat = entry.stat()
-        entries.append({
-            "name": entry.name,
-            "type": "directory" if entry.is_dir() else "file",
-            "size_bytes": stat.st_size if entry.is_file() else 0,
-            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-        })
+        if entry.name.startswith(".tmp_"):
+            continue
+        try:
+            stat = entry.stat()
+            entries.append({
+                "name": entry.name,
+                "type": "directory" if entry.is_dir() else "file",
+                "size_bytes": stat.st_size if entry.is_file() else 0,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            })
+        except FileNotFoundError:
+            continue
     return {"entries": sorted(entries, key=lambda e: (e["type"] != "directory", e["name"]))}
 
 
-def delete_file(agent_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
-    path = resolve_path(agent_id, base_path, relative_path)
+def delete_file(scope: str, scope_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
+    path = resolve_path(scope, scope_id, base_path, relative_path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {relative_path}")
     

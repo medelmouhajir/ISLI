@@ -1,12 +1,13 @@
 import asyncio
 import structlog
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import select, update, join
+from sqlalchemy import select
 from isli_core.db import async_session
 from isli_core.models import Task, Agent
 from isli_core.memory.keeper_client import KeeperClient
 from isli_core.event_manager import EventManager
 from isli_core.routers.tasks import TaskOut
+from isli_core.cost.complexity import TaskComplexityScorer, filter_models_by_tier
 
 logger = structlog.get_logger()
 
@@ -28,9 +29,11 @@ class ContextInjectorWorker:
             cutoff = datetime.now(timezone.utc) - timedelta(seconds=BACKOFF_SECONDS)
 
             # Find tasks that need context injection with atomic locking.
-            # Join with Agent to get identity metadata.
+            # Join with Agent to get identity metadata + routing config.
             stmt = (
-                select(Task, Agent.name, Agent.description, Agent.persona, Agent.config)
+                select(Task, Agent.name, Agent.description, Agent.config,
+                       Agent.model_routing_enabled, Agent.secondary_models,
+                       Agent.model_provider, Agent.model_id)
                 .join(Agent, Task.agent_id == Agent.id)
                 .where(
                     Task.status == "pending_context",
@@ -53,8 +56,11 @@ class ContextInjectorWorker:
                 task = row[0]
                 agent_name = row[1]
                 agent_description = row[2]
-                agent_persona = row[3]
-                agent_config = row[4] or {}
+                agent_config = row[3] or {}
+                model_routing_enabled = row[4] or False
+                secondary_models_raw = row[5] or []
+                default_provider = row[6]
+                default_model = row[7]
 
                 task.context_inject_attempts += 1
                 attempt = task.context_inject_attempts
@@ -64,18 +70,77 @@ class ContextInjectorWorker:
                     agent_id=task.agent_id,
                     attempt=attempt,
                 )
-                
+
+                # Heuristic complexity scoring (fast, zero-cost)
+                score, tier = TaskComplexityScorer.score_task_input(
+                    task.description or task.title or task.input
+                )
+                task.complexity_score = score
+                task.complexity_tier = tier
+
                 threshold = agent_config.get("memory_similarity_threshold", 0.4)
-                
-                summary = await KeeperClient.get_context_injection(
+
+                # Build context injection call (always needed)
+                context_future = KeeperClient.get_context_injection(
                     task.agent_id,
                     task.description or task.title,
                     session_id=task.session_id,
                     agent_name=agent_name,
                     agent_description=agent_description,
-                    agent_persona=agent_persona,
                     memory_similarity_threshold=threshold,
                 )
+
+                # Conditionally build model routing call
+                routing_future = None
+                if model_routing_enabled and secondary_models_raw:
+                    filtered_models = filter_models_by_tier(secondary_models_raw, tier)
+                    routing_future = KeeperClient.get_model_routing(
+                        agent_id=task.agent_id,
+                        task_description=task.description or task.title or task.input,
+                        complexity_score=score,
+                        complexity_tier=tier,
+                        secondary_models=filtered_models,
+                        default_provider=default_provider,
+                        default_model=default_model,
+                    )
+                elif model_routing_enabled and not secondary_models_raw:
+                    logger.warning(
+                        "context_injector.routing_no_models",
+                        agent_id=task.agent_id,
+                        task_id=task.id,
+                    )
+
+                # Run calls in parallel when routing is enabled
+                if routing_future is not None:
+                    summary_result, routing_result = await asyncio.gather(
+                        context_future,
+                        routing_future,
+                        return_exceptions=True,
+                    )
+                else:
+                    summary_result = await context_future
+                    routing_result = None
+
+                # Unpack exceptions
+                if isinstance(summary_result, Exception):
+                    logger.error(
+                        "context_injector.context_exception",
+                        task_id=task.id,
+                        error=str(summary_result),
+                    )
+                    summary = None
+                else:
+                    summary = summary_result
+
+                if isinstance(routing_result, Exception):
+                    logger.error(
+                        "context_injector.routing_exception",
+                        task_id=task.id,
+                        error=str(routing_result),
+                    )
+                    routing = None
+                else:
+                    routing = routing_result
 
                 if summary:
                     task.context_summary = summary
@@ -83,9 +148,17 @@ class ContextInjectorWorker:
                     task.context_inject_attempts = 0
                     task.context_inject_failed_at = None
                     task.updated_at = datetime.now(timezone.utc)
+
+                    # Store routed model if routing succeeded
+                    if routing and isinstance(routing, dict):
+                        task.routed_model_provider = routing.get("provider")
+                        task.routed_model_id = routing.get("model_id")
+                        task.routed_model_reason = routing.get("reason")
+
                     await session.commit()
 
                     # Notify UI via WebSocket
+                    task_out = TaskOut.model_validate(task).model_dump(mode="json")
                     await EventManager.emit(
                         "task:updated",
                         {
@@ -94,7 +167,7 @@ class ContextInjectorWorker:
                                 "context_summary": summary,
                                 "status": "inbox",
                             },
-                            "task": TaskOut.model_validate(task).model_dump(mode="json"),
+                            "task": task_out,
                         },
                     )
                     logger.info("context_injector.success", task_id=task.id)
@@ -110,6 +183,16 @@ class ContextInjectorWorker:
                                 "task_id": task.id,
                                 "attempts": attempt,
                                 "task": TaskOut.model_validate(task).model_dump(mode="json"),
+                            },
+                        )
+                        await EventManager.emit(
+                            "system:alert",
+                            {
+                                "severity": "critical",
+                                "message": f"Task {task.id} context injection failed permanently after {attempt} attempts.",
+                                "task_id": task.id,
+                                "agent_id": task.agent_id,
+                                "category": "task_context_failed",
                             },
                         )
                         logger.error(

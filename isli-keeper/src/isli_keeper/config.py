@@ -9,7 +9,7 @@ class Settings(BaseSettings):
 
     ollama_host: str = ""
     ollama_embed_model: str = "nomic-embed-text"
-    ollama_gen_model: str = "qwen2.5-coder:1.5b"
+    ollama_gen_model: str = "qwen3:1.7b"
     keeper_fallback_model: str = ""
     keeper_identity: str = "isli-keeper"
     ollama_api_key: str = ""

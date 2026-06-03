@@ -11,6 +11,10 @@ const statusConfig: Record<string, { label: string; variant: string; dotColor: s
   paused: { label: 'PAUSED', variant: 'warning', dotColor: 'bg-accent-amber', pulse: false },
   registered: { label: 'REGISTERED', variant: 'info', dotColor: 'bg-accent-cyan', pulse: false },
   deleted: { label: 'DELETED', variant: 'danger', dotColor: 'bg-accent-red', pulse: false },
+  rebuilding: { label: 'REBUILDING', variant: 'info', dotColor: 'bg-accent-cyan', pulse: true },
+  starting: { label: 'STARTING', variant: 'info', dotColor: 'bg-accent-cyan', pulse: true },
+  stopped: { label: 'STOPPED', variant: 'default', dotColor: 'bg-text-muted', pulse: false },
+  crashed: { label: 'CRASHED', variant: 'danger', dotColor: 'bg-accent-red', pulse: false },
 }
 
 export function StatusBadge({ status, pulse: forcePulse }: StatusBadgeProps) {

@@ -4,14 +4,9 @@ import { Bot, Cpu, Plus, ArrowRight, Zap, Database, Globe } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
-import { useState } from 'react'
-import { CreateAgentModal } from './CreateAgentModal'
-import { useQueryClient } from '@tanstack/react-query'
 
 export function AgentsPage() {
   const { data: agents = [], isLoading } = useAgents()
-  const [showCreateModal, setShowCreateModal] = useState(false)
-  const queryClient = useQueryClient()
 
   if (isLoading) {
     return (
@@ -39,13 +34,12 @@ export function AgentsPage() {
             Manage your autonomous workers, their models, and specialized skills.
           </p>
         </div>
-        <Button 
-          onClick={() => setShowCreateModal(true)}
-          className="shadow-glow-cyan"
-        >
-          <Plus className="w-4 h-4 mr-2" />
-          Create Agent
-        </Button>
+        <Link to="/agents/new">
+          <Button className="shadow-glow-cyan w-full md:w-auto">
+            <Plus className="w-4 h-4 mr-2" />
+            Create Agent
+          </Button>
+        </Link>
       </div>
 
       {/* Grid */}
@@ -146,20 +140,15 @@ export function AgentsPage() {
             <p className="text-text-muted mb-8 text-center max-w-xs">
               Start by creating your first specialized agent to handle tasks.
             </p>
-            <Button onClick={() => setShowCreateModal(true)}>
-              <Plus className="w-4 h-4 mr-2" />
-              Create Agent
-            </Button>
+            <Link to="/agents/new">
+              <Button>
+                <Plus className="w-4 h-4 mr-2" />
+                Create Agent
+              </Button>
+            </Link>
           </div>
         )}
       </div>
-
-      <CreateAgentModal
-        open={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        onCreated={() => queryClient.invalidateQueries({ queryKey: ['agents'] })}
-        onAuthRequired={() => {}} // Handle this in App.tsx or locally
-      />
     </div>
   )
 }

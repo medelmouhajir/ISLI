@@ -2,14 +2,15 @@
 set -e
 
 OLLAMA_HOST=${OLLAMA_HOST:-"http://localhost:11434"}
-MODELS=("qwen3:1.7b" "nomic-embed-text")
+DEFAULT_MODELS="qwen3:1.7b nomic-embed-text"
+MODELS=${MODELS:-$DEFAULT_MODELS}
 
 echo "Waiting for Ollama to be ready at $OLLAMA_HOST..."
 until curl -s -f "$OLLAMA_HOST/api/tags" > /dev/null; do
   sleep 2
 done
 
-for model in "${MODELS[@]}"; do
+for model in $MODELS; do
   echo "Pulling model: $model"
   curl -s -X POST "$OLLAMA_HOST/api/pull" -d "{\"name\": \"$model\"}"
 done

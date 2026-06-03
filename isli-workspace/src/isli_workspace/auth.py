@@ -1,7 +1,21 @@
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from fastapi import HTTPException, Request, status
 from jose import JWTError, jwt
 from .config import settings
+
+
+def create_internal_token(agent_id: str, scopes: list[str], expires_minutes: int = 60) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": agent_id,
+        "scopes": scopes,
+        "iat": now,
+        "exp": now + timedelta(minutes=expires_minutes),
+        "type": "internal",
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
 
 def verify_internal_token(token: str) -> dict[str, Any]:
     if not settings.jwt_secret:

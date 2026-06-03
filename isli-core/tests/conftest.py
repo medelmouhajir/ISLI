@@ -40,8 +40,23 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+class _MockProcessManager:
+    """Minimal mock for AgentProcessManager in API tests."""
+    async def spawn(self, agent_id: str) -> None:
+        pass
+    async def terminate(self, agent_id: str) -> None:
+        pass
+    def get_status(self, agent_id: str) -> dict:
+        return {"running": False}
+    def is_running(self, agent_id: str) -> bool:
+        return False
+    async def reconcile(self) -> None:
+        pass
+
+
 @pytest.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     headers = {"Authorization": "Bearer isli-admin-dev-key"}
+    app.state.process_manager = _MockProcessManager()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=headers) as ac:
         yield ac

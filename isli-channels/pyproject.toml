@@ -21,6 +21,8 @@ dependencies = [
     "opentelemetry-exporter-otlp==1.32.1",
     "python-telegram-bot==22.0",
     "twilio==9.5.2",
+    "pyaileys[qrcode]==0.1.4",
+    "python-jose[cryptography]==3.4.0",
 ]
 
 [project.optional-dependencies]

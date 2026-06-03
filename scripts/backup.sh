@@ -28,12 +28,14 @@ echo "[backup] Dumping PostgreSQL..."
 export PGPASSWORD
 pg_dump -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
   -F custom -f "${RUN_DIR}/postgres.dump"
+sha256sum "${RUN_DIR}/postgres.dump" > "${RUN_DIR}/postgres.dump.sha256"
 
 # ChromaDB
 CHROMA_DIR="${CHROMA_DIR:-/data/vectors}"
 if [ -d "${CHROMA_DIR}" ]; then
   echo "[backup] Snapshotting ChromaDB..."
   tar czf "${RUN_DIR}/chromadb.tar.gz" -C "${CHROMA_DIR}" .
+  sha256sum "${RUN_DIR}/chromadb.tar.gz" > "${RUN_DIR}/chromadb.tar.gz.sha256"
 fi
 
 # Redis
@@ -47,7 +49,13 @@ sleep 5
 REDIS_RDB="${REDIS_RDB:-/data/dump.rdb}"
 if [ -f "${REDIS_RDB}" ]; then
   cp "${REDIS_RDB}" "${RUN_DIR}/redis.rdb"
+  sha256sum "${RUN_DIR}/redis.rdb" > "${RUN_DIR}/redis.rdb.sha256"
 fi
+
+# Compute overall archive checksum before compression
+cd "${RUN_DIR}"
+sha256sum * > "${RUN_DIR}/SHA256SUMS"
+cd - > /dev/null
 
 # Compress
 tar czf "${RUN_DIR}.tar.gz" -C "${BACKUP_DIR}" "${TIMESTAMP}"

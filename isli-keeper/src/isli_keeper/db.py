@@ -1,6 +1,7 @@
 import asyncpg
 import pgvector.asyncpg
 import structlog
+from datetime import datetime
 from typing import Any
 from .config import get_settings
 
@@ -34,13 +35,27 @@ async def get_recent_memories(agent_id: str, limit: int = 5) -> list[str]:
     global _pool
     if not _pool:
         return []
-    
+
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT summary FROM episodic_memories WHERE agent_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $2",
             agent_id, limit
         )
         return [r["summary"] for r in rows]
+
+
+async def get_recent_memories_with_dates(agent_id: str, limit: int = 20) -> list[tuple[datetime, str]]:
+    """Return recent memory summaries paired with their created_at timestamps."""
+    global _pool
+    if not _pool:
+        return []
+
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT created_at, summary FROM episodic_memories WHERE agent_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $2",
+            agent_id, limit
+        )
+        return [(r["created_at"], r["summary"]) for r in rows]
 
 async def get_relevant_memories(agent_id: str, query_embedding: list[float], limit: int = 5, threshold: float = 0.4) -> list[str]:
     global _pool

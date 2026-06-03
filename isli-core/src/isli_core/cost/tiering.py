@@ -5,6 +5,8 @@ from typing import Any
 
 from isli_core.cost.rate_card import RATE_CARD, ModelRate
 
+from isli_core.config import get_settings
+
 logger = structlog.get_logger()
 
 TIER_ORDER = ["premium", "standard", "local"]
@@ -21,7 +23,7 @@ class ModelTiering:
 
     @staticmethod
     def resolve_model(agent_config: dict[str, Any], tier: str | None = None) -> str:
-        configured_model = agent_config.get("model_id", "qwen3:1.7b")
+        configured_model = agent_config.get("model_id", get_settings().default_local_model)
         if tier:
             candidates = TIER_MODELS.get(tier, TIER_MODELS["standard"])
         else:

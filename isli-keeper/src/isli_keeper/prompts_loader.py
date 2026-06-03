@@ -31,3 +31,8 @@ def get_prompts() -> dict:
         f"prompts.yaml not found. Searched: {[str(p) for p in paths]}. "
         "Set PROMPTS_FILE or place prompts.yaml in the service root."
     )
+
+
+def clear_prompts_cache() -> None:
+    """Clear the LRU cache so the next call re-reads from disk."""
+    get_prompts.cache_clear()

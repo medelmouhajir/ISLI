@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 import sys
 import structlog
 from pathlib import Path
@@ -10,6 +11,11 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 from isli_agent import AgentRunner, AgentConfig, CoreClient
 
 logger = structlog.get_logger()
+
+# Docker stop_timeout is 30s (configured by Core). We must always exit
+# before Docker escalates to SIGKILL, so guard runner.stop() with a hard
+# ceiling slightly under that.
+_SHUTDOWN_TIMEOUT_S = 25
 
 
 async def main():
@@ -27,10 +33,14 @@ async def main():
 
     logger.info("agent_startup.fetching_config", agent_id=agent_id, core_url=core_url)
 
-    # Fetch agent config from Core
+    # Fetch agent config from Core (internal /config endpoint returns resolved API key)
     client = CoreClient(core_url, admin_key=admin_key)
     try:
-        agent_data = await client.client.get(f"/v1/agents/{agent_id}")
+        headers = {}
+        if admin_key:
+            headers["Authorization"] = f"Bearer {admin_key}"
+
+        agent_data = await client.client.get(f"/v1/agents/{agent_id}/config", headers=headers)
         agent_data.raise_for_status()
         data = agent_data.json()
     except Exception as e:
@@ -51,6 +61,7 @@ async def main():
         skills=data.get("skills") or [],
         config=data.get("config") or {},
         token_budget=data.get("token_budget"),
+        api_key=data.get("api_key"),
         heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "180")),
     )
 
@@ -63,15 +74,34 @@ async def main():
         core_url=core_url,
     )
 
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.create_task(runner.start())
+
+    def _on_signal(signum: int):
+        sig_name = signal.Signals(signum).name
+        logger.info("agent_shutdown.signal_received", signal=sig_name)
+        main_task.cancel()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda s=sig: _on_signal(s))
+
     try:
-        await runner.start()
-    except KeyboardInterrupt:
-        logger.info("agent_shutdown.sigint")
-        await runner.stop()
+        await main_task
+    except asyncio.CancelledError:
+        logger.info("agent_shutdown.cancelled")
     except Exception as e:
         logger.error("agent_fatal_error", error=str(e))
-        await runner.stop()
-        sys.exit(1)
+    finally:
+        # Guard runner.stop() with a hard timeout so Docker never escalates to SIGKILL.
+        try:
+            await asyncio.wait_for(runner.stop(), timeout=_SHUTDOWN_TIMEOUT_S)
+            logger.info("agent_shutdown.clean")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "agent_shutdown.forced",
+                reason="runner.stop() exceeded timeout",
+                timeout_s=_SHUTDOWN_TIMEOUT_S,
+            )
 
 
 if __name__ == "__main__":

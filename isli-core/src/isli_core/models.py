@@ -3,7 +3,7 @@ from typing import Any
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, Float, Integer, String, Text, ForeignKey, DateTime, Index, func
+from sqlalchemy import JSON, Float, Integer, String, Text, ForeignKey, DateTime, Index, func, CheckConstraint, Boolean
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -18,6 +18,14 @@ class Base(DeclarativeBase):
 class Agent(Base):
     __tablename__ = "agents"
 
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('registered', 'starting', 'online', 'stopped', "
+            "'crashed', 'paused', 'flagged')",
+            name="ck_agent_status",
+        ),
+    )
+
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
@@ -29,12 +37,15 @@ class Agent(Base):
     channels: Mapped[list[str]] = mapped_column(JSON, default=list)
     skills: Mapped[list[str]] = mapped_column(JSON, default=list)
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    model_routing_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    secondary_models: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     token_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     reasoning_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     user_id: Mapped[str | None] = mapped_column(String(64))
     org_id: Mapped[str | None] = mapped_column(String(64))
     fallback_agent_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agents.id"), nullable=True)
+    known_agent_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     token_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -44,6 +55,7 @@ class Agent(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
     )
+    api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
@@ -93,11 +105,20 @@ class Task(Base):
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     trace_id: Mapped[str | None] = mapped_column(String(64))
+    complexity_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    complexity_tier: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    routed_model_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    routed_model_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    routed_model_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     context_inject_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     context_inject_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cron_expression: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attachments: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    retain_attachments: Mapped[bool] = mapped_column(default=False, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
@@ -106,6 +127,118 @@ class Task(Base):
         Index("ix_tasks_session_id", "session_id"),
         Index("ix_tasks_created_at", "created_at"),
         Index("ix_tasks_parent_task_id", "parent_task_id"),
+    )
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    agent_id: Mapped[str | None] = mapped_column(String(64))
+    task_id: Mapped[str | None] = mapped_column(String(36))
+    session_id: Mapped[str | None] = mapped_column(String(64))
+    channels: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    dedup_key: Mapped[str | None] = mapped_column(String(128))
+
+    __table_args__ = (
+        Index("ix_notifications_user_created", "user_id", "created_at"),
+        Index("ix_notifications_user_read", "user_id", "read_at"),
+        Index("ix_notifications_dedup", "dedup_key"),
+    )
+
+
+class NotificationPreference(Base):
+    __tablename__ = "notification_preferences"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    global_enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+    quiet_hours_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+    quiet_hours_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    quiet_hours_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC", nullable=False)
+    quiet_hours_exceptions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    categories: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
+    )
+
+
+class WebPushSubscription(Base):
+    __tablename__ = "web_push_subscriptions"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    p256dh: Mapped[str] = mapped_column(String(255), nullable=False)
+    auth: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_web_push_subscriptions_user_id", "user_id"),
+    )
+
+
+class ChannelIdentity(Base):
+    """Maps external channel user IDs (Telegram, WhatsApp) to board user IDs."""
+    __tablename__ = "channel_identities"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    channel_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    board_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_channel_identities_channel_user", "channel", "channel_user_id"),
+        Index("ix_channel_identities_board_user", "board_user_id"),
+        Index("ix_channel_identities_unique", "channel", "channel_user_id", "agent_id", unique=True),
+    )
+
+
+class SharedWorkspace(Base):
+    __tablename__ = "shared_workspaces"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    owner_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    members: Mapped[list[str]] = mapped_column(JSON, default=list)  # TODO: Migrate to relational table at scale
+    quota_bytes: Mapped[int] = mapped_column(Integer, default=524288000, nullable=False) # 500MB
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_shared_workspaces_owner_id", "owner_id"),
+        Index("ix_shared_workspaces_deleted_at", "deleted_at"),
     )
 
 
@@ -206,6 +339,12 @@ class Session(Base):
     last_memory_extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     context_inject_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     context_inject_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    complexity_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    complexity_tier: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    routed_model_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    routed_model_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    routed_model_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
@@ -345,6 +484,7 @@ class ChannelMessage(Base):
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    attachments: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False
@@ -397,4 +537,96 @@ class CheckPoint(Base):
     __table_args__ = (
         Index("ix_checkpoints_task_id", "task_id"),
         Index("ix_checkpoints_turn_number", "turn_number"),
+    )
+
+
+class LlmProvider(Base):
+    __tablename__ = "llm_providers"
+
+    provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
+    )
+
+
+class SystemSetting(Base):
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(32), default="global", nullable=False)
+    value: Mapped[Any] = mapped_column(JSON, default=dict)
+    description: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (Index("ix_system_settings_scope", "scope"),)
+
+
+class PermittedModel(Base):
+    __tablename__ = "permitted_models"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(
+        String(64), ForeignKey("llm_providers.provider"), nullable=False
+    )
+    model_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_permitted_models_provider", "provider"),
+        Index("ix_permitted_models_provider_model", "provider", "model_id", unique=True),
+    )
+
+
+class ChromaDbBackup(Base):
+    __tablename__ = "chromadb_backups"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    archive_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+
+class Secret(Base):
+    __tablename__ = "secrets"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    agent_id: Mapped[str] = mapped_column(String(64), ForeignKey("agents.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    value_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_secrets_agent_id", "agent_id"),
+        Index("ix_secrets_agent_id_name", "agent_id", "name", unique=True),
     )

@@ -1,5 +1,5 @@
 import { forwardRef, useState } from 'react'
-import { ArrowRight, XCircle, RotateCcw, GripVertical, Trash2, Eye, Calendar } from 'lucide-react'
+import { ArrowRight, XCircle, RotateCcw, GripVertical, Trash2, Eye, Calendar, Repeat } from 'lucide-react'
 import { Badge } from '@/components/ui/Badge'
 import { cn } from '@/lib/utils'
 import type { Agent, Task } from '@/types'
@@ -140,6 +140,12 @@ export const TaskCard = forwardRef<HTMLDivElement, TaskCardProps>(
           <div className="mt-2.5 flex items-center justify-between text-[11px] font-mono-data text-text-muted">
             <span className="text-text-secondary truncate max-w-[100px]">{agent ? agent.name : task.created_by}</span>
             <div className="flex items-center gap-1.5">
+              {task.cron_expression && (
+                <div className="flex items-center gap-1 text-accent-cyan" title={`Recurring: ${task.cron_expression}`}>
+                  <Repeat className="w-3 h-3" />
+                  <span>Cron</span>
+                </div>
+              )}
               {task.scheduled_at && (
                 <div className="flex items-center gap-1 text-accent-amber" title="Scheduled">
                   <Calendar className="w-3 h-3" />

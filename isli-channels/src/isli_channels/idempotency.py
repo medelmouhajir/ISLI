@@ -22,7 +22,7 @@ class WebhookIdempotency:
         if platform == "telegram":
             return payload.get("update_id")
         if platform == "whatsapp":
-            return payload.get("messages", [{}])[0].get("id")
+            return payload.get("payload", {}).get("key", {}).get("id")
         if platform == "web":
             return payload.get("request_id")
         if platform == "email":

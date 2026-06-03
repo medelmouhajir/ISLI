@@ -8,3 +8,5 @@ opentelemetry-sdk>=1.29
 opentelemetry-instrumentation-fastapi>=0.50b0
 python-jose[cryptography]==3.4.0
 python-multipart==0.0.12
+httpx>=0.28
+GitPython>=3.1

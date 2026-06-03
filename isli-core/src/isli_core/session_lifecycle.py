@@ -64,8 +64,10 @@ class SessionLifecycleManager:
     @staticmethod
     async def detect_idle(
         session: AsyncSession,
-        idle_timeout_minutes: int = DEFAULT_IDLE_TIMEOUT_MINUTES,
+        idle_timeout_minutes: int | None = None,
     ) -> int:
+        if idle_timeout_minutes is None:
+            idle_timeout_minutes = DEFAULT_IDLE_TIMEOUT_MINUTES
         """Soft-delete sessions idle longer than the threshold, unless they have active tasks."""
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=idle_timeout_minutes)
         from sqlalchemy import exists

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -26,7 +26,10 @@ class CostDashboardOut(BaseModel):
 
 
 @router.get("/cost/dashboard", response_model=CostDashboardOut)
-async def cost_dashboard(db: AsyncSession = Depends(get_db)):
+async def cost_dashboard(
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_admin_auth)
+):
     agents_result = await db.execute(select(func.count()).select_from(Agent).where(Agent.deleted_at.is_(None)))
     total_agents = agents_result.scalar() or 0
 
@@ -277,16 +280,108 @@ async def get_budget(scope: str, scope_id: str, db: AsyncSession = Depends(get_d
     )
 
 
+class CostHistoryDay(BaseModel):
+    date: str
+    cost_usd: float
+    input_tokens: int
+    output_tokens: int
+
+
+class CostByTier(BaseModel):
+    tier: str
+    cost_usd: float
+    turns: int
+
+
+@router.get("/cost/history", response_model=list[CostHistoryDay])
+async def cost_history(days: int = 7, db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import func, Date
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+
+    # Cross-database date extraction: PostgreSQL vs SQLite
+    dialect = db.bind.dialect.name if db.bind else "postgresql"
+    if dialect == "sqlite":
+        date_expr = func.strftime("%Y-%m-%d", CostLedger.created_at).label("date")
+    elif dialect == "postgresql":
+        date_expr = func.to_char(CostLedger.created_at, "YYYY-MM-DD").label("date")
+    else:
+        date_expr = func.cast(CostLedger.created_at, Date).label("date")
+
+    result = await db.execute(
+        select(
+            date_expr,
+            func.sum(CostLedger.cost_usd).label("cost_usd"),
+            func.sum(CostLedger.input_tokens).label("input_tokens"),
+            func.sum(CostLedger.output_tokens).label("output_tokens"),
+        )
+        .where(CostLedger.created_at >= cutoff)
+        .group_by(date_expr)
+        .order_by(date_expr)
+    )
+    rows = result.all()
+    return [
+        CostHistoryDay(
+            date=row.date,
+            cost_usd=round(float(row.cost_usd or 0), 4),
+            input_tokens=int(row.input_tokens or 0),
+            output_tokens=int(row.output_tokens or 0),
+        )
+        for row in rows
+    ]
+
+
+@router.get("/cost/by-tier", response_model=list[CostByTier])
+async def cost_by_tier(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(
+            CostLedger.tier,
+            func.sum(CostLedger.cost_usd).label("cost_usd"),
+            func.count(CostLedger.id).label("turns"),
+        )
+        .group_by(CostLedger.tier)
+        .order_by(func.sum(CostLedger.cost_usd).desc())
+    )
+    rows = result.all()
+    return [
+        CostByTier(
+            tier=row.tier,
+            cost_usd=round(float(row.cost_usd or 0), 4),
+            turns=int(row.turns or 0),
+        )
+        for row in rows
+    ]
+
+
 @router.get("/keeper/dashboard")
 async def keeper_dashboard():
     settings = get_settings()
-    url = f"{settings.keeper_url}/dashboard"
+    result: dict[str, Any] = {}
+
+    # Query Keeper
     try:
         token = create_internal_token("core-api", scopes=["keeper:dashboard"], expires_minutes=1)
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, headers={"X-Internal-Auth": token})
+            resp = await client.get(
+                f"{settings.keeper_url}/dashboard",
+                headers={"X-Internal-Auth": token},
+            )
             resp.raise_for_status()
-        return resp.json()
+            result = resp.json()
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Keeper unavailable: {exc}")
+
+    # Query Audio service and merge
+    try:
+        token = create_internal_token("core-api", scopes=["audio:dashboard"], expires_minutes=1)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{settings.audio_url}/dashboard",
+                headers={"X-Internal-Auth": token},
+            )
+            if resp.status_code == 200:
+                result["audio"] = resp.json()
+    except Exception:
+        result["audio"] = {"status": "offline"}
+
+    return result
 

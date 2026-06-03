@@ -174,3 +174,109 @@ class TestCheckpointRecovery:
         )
         task = result.scalar_one()
         assert task.status == "doing"
+
+
+class TestSessionAPIFilters:
+    @pytest.mark.asyncio
+    async def test_list_sessions_filter_by_channel(self, client: AsyncClient, db_session: AsyncSession):
+        agent = Agent(id="agent-filter-1", name="Filter Agent")
+        session_web = Session(
+            id="sess-web-1",
+            agent_id="agent-filter-1",
+            user_id="user-1",
+            channel="web",
+            messages=[{"role": "user", "content": "hi web", "timestamp": datetime.now(timezone.utc).isoformat()}],
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        session_telegram = Session(
+            id="sess-tg-1",
+            agent_id="agent-filter-1",
+            user_id="user-2",
+            channel="telegram",
+            messages=[{"role": "user", "content": "hi tg", "timestamp": datetime.now(timezone.utc).isoformat()}],
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent, session_web, session_telegram])
+        await db_session.commit()
+
+        resp = await client.get("/v1/sessions?channel=telegram")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["id"] == "sess-tg-1"
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_include_closed(self, client: AsyncClient, db_session: AsyncSession):
+        agent = Agent(id="agent-filter-2", name="Filter Agent 2")
+        session_open = Session(
+            id="sess-open-1",
+            agent_id="agent-filter-2",
+            channel="telegram",
+            messages=[],
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        session_closed = Session(
+            id="sess-closed-1",
+            agent_id="agent-filter-2",
+            channel="telegram",
+            messages=[],
+            status="closed",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent, session_open, session_closed])
+        await db_session.commit()
+
+        resp = await client.get("/v1/sessions?agent_id=agent-filter-2&channel=telegram")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["id"] == "sess-open-1"
+
+        resp = await client.get("/v1/sessions?agent_id=agent-filter-2&channel=telegram&include_closed=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 2
+
+    @pytest.mark.asyncio
+    async def test_get_session_history_combines_archived_and_live(self, client: AsyncClient, db_session: AsyncSession):
+        agent = Agent(id="agent-history-1", name="History Agent")
+        session = Session(
+            id="sess-history-1",
+            agent_id="agent-history-1",
+            channel="telegram",
+            user_id="user-1",
+            archived_messages=[
+                {"role": "user", "content": "old msg", "timestamp": "2024-01-01T10:00:00+00:00"}
+            ],
+            messages=[
+                {"role": "assistant", "content": "new msg", "timestamp": "2024-01-01T11:00:00+00:00"}
+            ],
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent, session])
+        await db_session.commit()
+
+        resp = await client.get("/v1/sessions/sess-history-1/history")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id"] == "sess-history-1"
+        assert len(data["all_messages"]) == 2
+        assert data["all_messages"][0]["content"] == "old msg"
+        assert data["all_messages"][1]["content"] == "new msg"
+
+    @pytest.mark.asyncio
+    async def test_get_session_history_404_deleted(self, client: AsyncClient, db_session: AsyncSession):
+        agent = Agent(id="agent-history-2", name="History Agent 2")
+        session = Session(
+            id="sess-history-2",
+            agent_id="agent-history-2",
+            channel="telegram",
+            messages=[],
+            deleted_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent, session])
+        await db_session.commit()
+
+        resp = await client.get("/v1/sessions/sess-history-2/history")
+        assert resp.status_code == 404

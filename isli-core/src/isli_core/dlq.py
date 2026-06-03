@@ -14,7 +14,11 @@ class DeadLetterQueue:
     """Failed tasks land in a 'failed' status with retry count. Human can retry."""
 
     @staticmethod
-    async def fail_task(session: AsyncSession, task_id: str, reason: str) -> Task | None:
+    async def fail_task(
+        session: AsyncSession, task_id: str, reason: str, max_retry_count: int | None = None
+    ) -> Task | None:
+        if max_retry_count is None:
+            max_retry_count = MAX_RETRY_COUNT
         result = await session.execute(
             select(Task).where(Task.id == task_id, Task.deleted_at.is_(None))
         )
@@ -23,10 +27,10 @@ class DeadLetterQueue:
             return None
 
         task.retry_count += 1
-        if task.retry_count >= MAX_RETRY_COUNT:
+        if task.retry_count >= max_retry_count:
             task.status = FAILED_STATUS
             task.blocked_reason = reason
-            logger.warning("dlq.max_retries_reached", task_id=task_id, reason=reason)
+            logger.warning("dlq.max_retries_reached", task_id=task_id, reason=reason, max_retry_count=max_retry_count)
         else:
             task.status = "inbox"
             task.blocked_reason = f"Attempt {task.retry_count} failed: {reason}"

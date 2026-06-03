@@ -6,3 +6,4 @@ litellm
 python-dotenv
 redis
 pyyaml
+google-genai>=0.8.0

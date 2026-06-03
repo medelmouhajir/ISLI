@@ -5,31 +5,52 @@ import { BoardSocketProvider } from '@/contexts/BoardSocketContext'
 import { Header } from '@/components/Header'
 import { Sidebar } from '@/components/Sidebar'
 import { KanbanBoard } from '@/components/KanbanBoard'
+import { DashboardPage } from '@/components/DashboardPage'
 import { SessionsPage } from '@/components/SessionsPage'
+import { ConversationsPage } from '@/components/ConversationsPage'
 import { KeeperDashboard } from '@/components/KeeperDashboard'
 import { AgentsPage } from '@/components/AgentsPage'
 import { AgentDetailPage } from '@/components/AgentDetailPage'
+import { AgentChannelsPage } from '@/components/AgentChannelsPage'
+import { CreateAgentPage } from '@/components/CreateAgentPage'
 import { AgentLogsPage } from '@/components/AgentLogsPage'
+import { AgentMemoryPage } from '@/components/AgentMemoryPage'
+import { AgentSecretsPage } from '@/components/AgentSecretsPage'
+import { AgentSkillsPage } from '@/components/AgentSkillsPage'
+import { SkillsStorePage } from '@/components/SkillsStorePage'
 import { WorkspacesPage } from '@/components/WorkspacesPage'
 import { WorkspaceDetailPage } from '@/components/WorkspaceDetailPage'
-import { LoginModal } from '@/components/LoginModal'
+import { SharedWorkspacesPage } from '@/components/SharedWorkspacesPage'
+import { SharedWorkspaceDetailPage } from '@/components/SharedWorkspaceDetailPage'
+import { LogsPage } from '@/components/LogsPage'
+import { LoginPage } from '@/components/LoginPage'
 import { TaskDetailModal } from '@/components/TaskDetailModal'
+import { CostAnalyticsPage } from '@/components/CostAnalyticsPage'
+import { SettingsPage } from '@/components/SettingsPage'
+import { ProviderSettingsPage } from '@/components/ProviderSettingsPage'
+import { LocalModelSettings } from '@/components/LocalModelSettings'
+import { GeneralSettingsPage } from '@/components/GeneralSettingsPage'
+import { AppearanceSettingsPage } from '@/components/AppearanceSettingsPage'
+import { PromptsPage } from '@/components/PromptsPage'
+import { NotificationPreferencesPage } from '@/components/NotificationPreferences'
+import { DigestPage } from '@/components/DigestPage'
 import PWAReloadPrompt from '@/components/PWAReloadPrompt'
 import { useAgents } from '@/hooks/useAgents'
 import { useTasks } from '@/hooks/useTasks'
 import { useCostDashboard } from '@/hooks/useCostDashboard'
 import { useBoardSocket } from '@/hooks/useBoardSocket'
+import { useAuth } from '@/hooks/useAuth'
 import { postJSON, deleteJSON, putJSON } from '@/lib/api'
 import type { Agent, Task, Session } from '@/types'
 
 function AppContent() {
   const queryClient = useQueryClient()
+  const { isAuthenticated, logout } = useAuth()
   const { data: agents = [] } = useAgents()
   const { data: tasks = [] } = useTasks()
   const { data: cost = null } = useCostDashboard()
   const { lastMessage } = useBoardSocket()
 
-  const [showLoginModal, setShowLoginModal] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
@@ -76,6 +97,35 @@ function AppContent() {
         )
         // Only refetch the detail query; staleTime prevents duplicate fetches
         queryClient.invalidateQueries({ queryKey: ['sessions', session_id] })
+        // Also invalidate chat-sessions and session-history for the new /chats page
+        queryClient.invalidateQueries({ queryKey: ['chat-sessions'] })
+        queryClient.invalidateQueries({ queryKey: ['session-history', session_id] })
+        break
+      }
+      case 'session:stream_event': {
+        const { session_id } = lastMessage.payload
+        queryClient.setQueryData(['chat-sessions'], (old: Session[] | undefined) =>
+          old?.map((s) =>
+            s.id === session_id
+              ? { ...s, last_activity_at: new Date().toISOString() }
+              : s
+          ) ?? old
+        )
+        break
+      }
+      case 'notification:new': {
+        queryClient.invalidateQueries({ queryKey: ['notifications'] })
+        queryClient.invalidateQueries({ queryKey: ['notifications', 'unread-count'] })
+        break
+      }
+      case 'notification:read': {
+        queryClient.invalidateQueries({ queryKey: ['notifications'] })
+        queryClient.invalidateQueries({ queryKey: ['notifications', 'unread-count'] })
+        break
+      }
+      case 'notification:read_all': {
+        queryClient.invalidateQueries({ queryKey: ['notifications'] })
+        queryClient.invalidateQueries({ queryKey: ['notifications', 'unread-count'] })
         break
       }
     }
@@ -84,7 +134,7 @@ function AppContent() {
   const handleAuthError = (err: unknown) => {
     const msg = err instanceof Error ? err.message : ''
     if (msg.includes('401') || msg.includes('403')) {
-      setShowLoginModal(true)
+      logout()
     }
   }
 
@@ -102,21 +152,25 @@ function AppContent() {
     }
   }
 
-  const scheduleTask = async (id: string, date: string) => {
+  const updateTaskSchedule = async (id: string, data: { scheduled_at?: string | null, cron_expression?: string | null }) => {
     const previousTasks = queryClient.getQueryData<Task[]>(['tasks'])
     queryClient.setQueryData(['tasks'], (old: Task[] | undefined) =>
-      old?.map((t) => (t.id === id ? { ...t, status: 'pending', scheduled_at: date } : t)) || []
+      old?.map((t) => (t.id === id ? { ...t, ...data, status: (data.scheduled_at || data.cron_expression) ? 'pending' : t.status } : t)) || []
     )
+
     try {
-      await putJSON(`/v1/tasks/${id}`, { status: 'pending', scheduled_at: date })
+      await putJSON(`/v1/tasks/${id}`, { 
+        ...data, 
+        status: (data.scheduled_at || data.cron_expression) ? 'pending' : undefined 
+      })
     } catch (err) {
       queryClient.setQueryData(['tasks'], previousTasks)
-      handleAuthError(err)
-      console.error('Failed to schedule task:', err)
+      console.error('Failed to update task schedule:', err)
     }
   }
 
   const deleteTask = async (id: string) => {
+
     if (!confirm('Delete task?')) return
     const previousTasks = queryClient.getQueryData<Task[]>(['tasks'])
     queryClient.setQueryData(['tasks'], (old: Task[] | undefined) =>
@@ -131,10 +185,15 @@ function AppContent() {
     }
   }
 
+  // Global Auth Barrier
+  if (!isAuthenticated) {
+    return <LoginPage />
+  }
+
   return (
     <div className="h-screen bg-bg-base text-text-primary flex flex-col relative overflow-hidden">
       <Header
-        onLogin={() => setShowLoginModal(true)}
+        mobileNavOpen={mobileSidebarOpen}
         onToggleMobileSidebar={() => setMobileSidebarOpen((v) => !v)}
       />
       <div className="flex-1 flex overflow-hidden relative z-10">
@@ -148,39 +207,57 @@ function AppContent() {
         />
         
         <Routes>
+          <Route path="/" element={<DashboardPage />} />
           <Route
-            path="/"
+            path="/kanban"
             element={
               <KanbanBoard
                 tasks={tasks}
                 onMove={moveTask}
-                onSchedule={scheduleTask}
+                onSchedule={(id, date) => updateTaskSchedule(id, { scheduled_at: date })}
                 onDelete={deleteTask}
                 onShowDetail={setSelectedTask}
                 agents={agents}
-                onAuthRequired={() => setShowLoginModal(true)}
+                onAuthRequired={logout}
               />
             }
           />
 
           <Route path="/sessions" element={<SessionsPage />} />
+          <Route path="/chats" element={<ConversationsPage />} />
           <Route path="/keeper" element={<KeeperDashboard />} />
+          <Route path="/logs" element={<LogsPage />} />
           <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/agents/new" element={<CreateAgentPage />} />
+          <Route path="/store" element={<SkillsStorePage />} />
           <Route path="/agents/:id" element={<AgentDetailPage />} />
+          <Route path="/agents/:id/channels" element={<AgentChannelsPage />} />
           <Route path="/agents/:id/logs" element={<AgentLogsPage />} />
+          <Route path="/agents/:id/memory" element={<AgentMemoryPage />} />
+          <Route path="/agents/:id/secrets" element={<AgentSecretsPage />} />
+          <Route path="/agents/:id/skills" element={<AgentSkillsPage />} />
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/workspaces/:id" element={<WorkspaceDetailPage />} />
+          <Route path="/shared-workspaces" element={<SharedWorkspacesPage />} />
+          <Route path="/shared-workspaces/:id" element={<SharedWorkspaceDetailPage />} />
+          <Route path="/costs" element={<CostAnalyticsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings/general" element={<GeneralSettingsPage />} />
+          <Route path="/settings/appearance" element={<AppearanceSettingsPage />} />
+          <Route path="/settings/providers" element={<ProviderSettingsPage />} />
+          <Route path="/settings/keeper" element={<LocalModelSettings />} />
+          <Route path="/settings/prompts" element={<PromptsPage />} />
+          <Route path="/settings/notifications" element={<NotificationPreferencesPage />} />
+          <Route path="/digests" element={<DigestPage />} />
         </Routes>
       </div>
 
-      <LoginModal
-        open={showLoginModal}
-        onClose={() => setShowLoginModal(false)}
-      />
       <TaskDetailModal
         open={!!selectedTask}
         task={selectedTask}
         agents={agents}
+        tasks={tasks}
+        onUpdateSchedule={(data) => selectedTask && updateTaskSchedule(selectedTask.id, data)}
         onClose={() => setSelectedTask(null)}
       />
       <PWAReloadPrompt />

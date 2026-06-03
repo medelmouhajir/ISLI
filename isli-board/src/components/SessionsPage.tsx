@@ -1,16 +1,33 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { useSessions, useSession, useSendMessage, useCreateSession, useCloseSession, useDeleteSession } from '@/hooks/useSessions'
 import { useAgents } from '@/hooks/useAgents'
+import { useSessionAction } from '@/hooks/useSessionAction'
 import { cn } from '@/lib/utils'
-import { MessageSquare, Send, Plus, Bot, User, Clock, Loader2, Archive, Trash2, ChevronLeft } from 'lucide-react'
+import { MessageSquare, Plus, Bot, User, Clock, Loader2, Archive, Trash2, ChevronLeft, ArrowDown, Download, Copy, Check } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { Modal } from '@/components/ui/Modal'
+import { ConfirmationModal } from '@/components/ui/ConfirmationModal'
+import { ChatInput } from '@/components/ChatInput'
+import { UiComponentRenderer } from '@/components/ui/registry/UiComponentRegistry'
+import type { ComponentPayload } from '@/types'
 
 export function SessionsPage() {
   const { data: sessions = [], isLoading: loadingSessions } = useSessions()
   const { data: agents = [] } = useAgents()
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [confirmModal, setConfirmModal] = useState<{
+    open: boolean;
+    title: string;
+    description: string;
+    onConfirm: () => void | Promise<void>;
+  }>({
+    open: false,
+    title: '',
+    description: '',
+    onConfirm: () => {},
+  })
   
   const sortedSessions = useMemo(() => {
     return [...sessions].sort((a, b) => {
@@ -26,10 +43,12 @@ export function SessionsPage() {
 
   const { data: selectedSession } = useSession(selectedSessionId)
   const [messageText, setMessageText] = useState('')
+  const [voiceModeEnabled, setVoiceModeEnabled] = useState(false)
   const sendMessage = useSendMessage()
   const createSession = useCreateSession()
   const closeSession = useCloseSession()
   const deleteSession = useDeleteSession()
+  const postSessionAction = useSessionAction()
 
   const handleCloseSession = async (sessionId: string) => {
     await closeSession.mutateAsync(sessionId)
@@ -37,18 +56,97 @@ export function SessionsPage() {
   }
 
   const handleDeleteSession = async (sessionId: string) => {
-    if (!confirm('Permanently delete this conversation?')) return
-    await deleteSession.mutateAsync(sessionId)
-    if (selectedSessionId === sessionId) setSelectedSessionId(null)
+    setConfirmModal({
+      open: true,
+      title: 'Delete Conversation',
+      description: 'Are you sure you want to permanently delete this conversation history? This action cannot be undone.',
+      onConfirm: async () => {
+        await deleteSession.mutateAsync(sessionId)
+        if (selectedSessionId === sessionId) setSelectedSessionId(null)
+      },
+    })
   }
 
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!messageText.trim() || !selectedSessionId) return
-    const text = messageText
-    setMessageText('')
-    await sendMessage.mutateAsync({ sessionId: selectedSessionId, text })
+  const handleExportSession = () => {
+    if (!selectedSession) return
+    const data = JSON.stringify(selectedSession, null, 2)
+    const blob = new Blob([data], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `session-${selectedSession.id}.json`
+    a.click()
+    URL.revokeObjectURL(url)
   }
+
+  const handleSendMessage = async (text: string, voiceMode?: boolean) => {
+    if (!text.trim() || !selectedSessionId) return
+    setMessageText('')
+    await sendMessage.mutateAsync({ sessionId: selectedSessionId, text, voiceMode })
+  }
+
+  const handleComponentAction = useCallback(
+    (actionId: string, actionType: string, payload: Record<string, unknown>) => {
+      if (!selectedSession || selectedSession.status !== 'ready') return
+      postSessionAction.mutate({
+        sessionId: selectedSession.id,
+        action: { action_id: actionId, action_type: actionType, payload },
+      })
+    },
+    [selectedSession, postSessionAction]
+  )
+
+  // Scroll management
+  const containerRef = useRef<HTMLDivElement>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const isAtBottomRef = useRef(true)
+  const prevSessionIdRef = useRef<string | null>(null)
+  const [showScrollIndicator, setShowScrollIndicator] = useState(false)
+  const [unreadCount, setUnreadCount] = useState(0)
+
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current
+    if (!el) return
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100
+    isAtBottomRef.current = atBottom
+    setShowScrollIndicator(!atBottom)
+    if (atBottom) {
+      setUnreadCount(0)
+    }
+  }, [])
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    if (!bottomRef.current) return
+    bottomRef.current.scrollIntoView({ behavior })
+    if (behavior === 'smooth' || isAtBottomRef.current) {
+      setUnreadCount(0)
+      setShowScrollIndicator(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!selectedSessionId) return
+
+    const isNewSession = prevSessionIdRef.current !== selectedSessionId
+    prevSessionIdRef.current = selectedSessionId
+
+    if (isNewSession) {
+      isAtBottomRef.current = true
+      setUnreadCount(0)
+      setShowScrollIndicator(false)
+      requestAnimationFrame(() => {
+        scrollToBottom('instant')
+      })
+      return
+    }
+
+    if (isAtBottomRef.current) {
+      scrollToBottom('smooth')
+    } else {
+      setUnreadCount((prev) => prev + 1)
+      setShowScrollIndicator(true)
+    }
+  }, [selectedSessionId, selectedSession?.messages?.length, scrollToBottom])
 
   const handleCreateSession = async (agentId: string) => {
     const session = await createSession.mutateAsync({ agent_id: agentId })
@@ -204,6 +302,13 @@ export function SessionsPage() {
                 </div>
                 <div className="ml-auto flex items-center gap-1">
                   <button
+                    onClick={handleExportSession}
+                    className="p-2 rounded-none text-text-muted hover:text-accent-cyan hover:bg-accent-cyan/5 border border-transparent hover:border-accent-cyan/20 transition-colors"
+                    title="Export session as JSON"
+                  >
+                    <Download className="w-4 h-4" />
+                  </button>
+                  <button
                     onClick={() => handleCloseSession(selectedSession.id)}
                     className="p-2 rounded-none text-text-muted hover:text-accent-amber hover:bg-accent-amber/5 border border-transparent hover:border-accent-amber/20 transition-colors"
                     title="Close conversation"
@@ -221,39 +326,107 @@ export function SessionsPage() {
               </div>
 
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 min-h-0 scrollbar-thin">
+              <div
+                ref={containerRef}
+                onScroll={handleScroll}
+                className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 min-h-0 scrollbar-thin"
+              >
                 {selectedSession.messages?.map((msg, i) => (
                   <div
                     key={i}
                     className={cn(
                       'flex gap-3 md:gap-4 max-w-[90%] md:max-w-[80%]',
-                      msg.role === 'user' ? 'ml-auto flex-row-reverse' : ''
+                      msg.role === 'user' || msg.role === 'action' ? 'ml-auto flex-row-reverse' : ''
                     )}
                   >
                     <div className={cn(
                       'w-8 h-8 rounded-none shrink-0 flex items-center justify-center border',
-                      msg.role === 'user' 
+                      msg.role === 'user'
                         ? 'bg-accent-purple/5 border-accent-purple/20 text-accent-purple'
-                        : 'bg-accent-cyan/5 border-accent-cyan/20 text-accent-cyan'
+                        : msg.role === 'action'
+                          ? 'bg-accent-amber/5 border-accent-amber/20 text-accent-amber'
+                          : 'bg-accent-cyan/5 border-accent-cyan/20 text-accent-cyan'
                     )}>
-                      {msg.role === 'user' ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+                      {msg.role === 'user' ? (
+                        <User className="w-4 h-4" />
+                      ) : msg.role === 'action' ? (
+                        <Clock className="w-4 h-4" />
+                      ) : (
+                        <Bot className="w-4 h-4" />
+                      )}
                     </div>
-                    <div className={cn(
-                      'space-y-1',
-                      msg.role === 'user' ? 'text-right' : ''
-                    )}>
-                      <div className={cn(
-                        'p-3 md:p-4 rounded-none text-sm leading-relaxed border font-mono',
-                        msg.role === 'user'
-                          ? 'bg-accent-purple/5 border-accent-purple/20 text-text-primary'
-                          : 'bg-bg-elevated border-border-dim text-text-primary'
-                      )}>
+                    <div className={cn('space-y-1', msg.role === 'user' || msg.role === 'action' ? 'text-right' : '')}>
+                      <div
+                        className={cn(
+                          'p-3 md:p-4 rounded-none text-sm leading-relaxed border font-mono relative group',
+                          msg.role === 'user'
+                            ? 'bg-accent-purple/5 border-accent-purple/20 text-text-primary'
+                            : msg.role === 'action'
+                              ? 'bg-accent-amber/5 border-accent-amber/20 text-text-muted'
+                              : 'bg-bg-elevated border-border-dim text-text-primary'
+                        )}
+                      >
                         {msg.content}
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(msg.content);
+                            setCopiedMessageId(`${selectedSession.id}-${i}`);
+                            setTimeout(() => setCopiedMessageId(null), 2000);
+                          }}
+                          className={cn(
+                            "absolute top-2 right-2 p-1.5 md:p-1 rounded-none bg-bg-surface border transition-all flex items-center gap-1.5",
+                            copiedMessageId === `${selectedSession.id}-${i}`
+                              ? "border-accent-green text-accent-green opacity-100"
+                              : "border-border-dim text-text-muted md:opacity-0 group-hover:opacity-100 hover:text-accent-cyan hover:border-accent-cyan"
+                          )}
+                          title="Copy message"
+                        >
+                          {copiedMessageId === `${selectedSession.id}-${i}` ? (
+                            <>
+                              <span className="text-[9px] font-mono font-bold uppercase tracking-tighter">Copied!</span>
+                              <Check className="w-3 h-3 md:w-3.5 md:h-3.5" />
+                            </>
+                          ) : (
+                            <Copy className="w-3 h-3 md:w-3.5 md:h-3.5" />
+                          )}
+                        </button>
                       </div>
-                      <div className={cn(
-                        "flex items-center gap-2 text-[9px] text-text-muted px-1 font-mono uppercase",
-                        msg.role === 'user' ? "justify-end" : ""
-                      )}>
+                      {/* Audio playback for assistant voice messages */}
+                      {msg.role === 'assistant' && msg.audio_url && (
+                        <div className="mt-1">
+                          <audio
+                            controls
+                            preload="metadata"
+                            src={`/api${msg.audio_url}`}
+                            className="w-full h-8 opacity-80 hover:opacity-100 transition-opacity"
+                          />
+                        </div>
+                      )}
+                      {/* Action indicator */}
+                      {msg.role === 'action' && (
+                        <div className="text-[10px] font-mono text-text-muted italic px-3 py-1">
+                          ↳ {msg.action_type?.replace(/_/g, ' ')} on {msg.action_id}
+                        </div>
+                      )}
+                      {/* Components inline below assistant message */}
+                      {msg.role === 'assistant' && msg.components && msg.components.length > 0 && (
+                        <div className="mt-2 space-y-2">
+                          {msg.components.map((comp: ComponentPayload, ci: number) => (
+                            <UiComponentRenderer
+                              key={ci}
+                              payload={comp}
+                              sessionId={selectedSession.id}
+                              onAction={handleComponentAction}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      <div
+                        className={cn(
+                          'flex items-center gap-2 text-[9px] text-text-muted px-1 font-mono uppercase',
+                          msg.role === 'user' || msg.role === 'action' ? 'justify-end' : ''
+                        )}
+                      >
                         <Clock className="w-3 h-3" />
                         {msg.timestamp && new Date(msg.timestamp).toLocaleTimeString([], { hour12: false })}
                       </div>
@@ -277,26 +450,35 @@ export function SessionsPage() {
                     </div>
                   </div>
                 )}
+                <div ref={bottomRef} className="h-px w-full shrink-0" />
               </div>
+
+              {/* Scroll indicator */}
+              {showScrollIndicator && (
+                <button
+                  onClick={() => scrollToBottom('smooth')}
+                  className="absolute bottom-28 right-6 md:right-10 z-10 w-10 h-10 rounded-none bg-bg-surface border border-border-dim shadow-xl flex items-center justify-center text-text-muted hover:text-accent-cyan hover:border-accent-cyan transition-all group"
+                >
+                  <ArrowDown className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
+                  {unreadCount > 0 && (
+                    <span className="absolute -top-2 -right-2 bg-accent-cyan text-bg-base text-[10px] font-mono font-bold px-1.5 py-0.5 min-w-[20px] text-center border border-bg-base">
+                      {unreadCount > 99 ? '99+' : unreadCount}
+                    </span>
+                  )}
+                </button>
+              )}
 
               {/* Input */}
               <div className="p-4 md:p-6 border-t border-border-dim bg-bg-surface shrink-0">
-                <form onSubmit={handleSendMessage} className="relative flex gap-2">
-                  <input
-                    type="text"
-                    value={messageText}
-                    onChange={(e) => setMessageText(e.target.value)}
-                    placeholder="ENTER COMMAND OR MESSAGE..."
-                    className="flex-1 bg-bg-elevated border border-border-dim rounded-none px-4 py-3 text-sm font-mono focus:outline-none focus:border-accent-cyan transition-all placeholder:opacity-30"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!messageText.trim() || sendMessage.isPending}
-                    className="px-4 rounded-none bg-accent-cyan text-bg-base font-mono font-bold hover:bg-accent-cyan/90 transition-all disabled:opacity-30 flex items-center justify-center min-w-[60px]"
-                  >
-                    {sendMessage.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                  </button>
-                </form>
+                <ChatInput
+                  value={messageText}
+                  onChange={setMessageText}
+                  onSend={handleSendMessage}
+                  isPending={sendMessage.isPending}
+                  placeholder="ENTER COMMAND OR MESSAGE..."
+                  voiceModeEnabled={voiceModeEnabled}
+                  onVoiceModeChange={setVoiceModeEnabled}
+                />
               </div>
             </>
           ) : (
@@ -322,6 +504,16 @@ export function SessionsPage() {
         )
         }
       </div>
+      <ConfirmationModal
+        open={confirmModal.open}
+        title={confirmModal.title}
+        description={confirmModal.description}
+        variant="danger"
+        confirmText="Delete Chat"
+        onConfirm={confirmModal.onConfirm}
+        onClose={() => setConfirmModal(prev => ({ ...prev, open: false }))}
+        isLoading={deleteSession.isPending}
+      />
     </div>
   )
 }

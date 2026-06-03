@@ -74,6 +74,35 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "type": {"const": "system:alert"},
                 "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
                 "message": {"type": "string"},
+                "category": {"type": "string"},
+                "agent_id": {"type": ["string", "null"]},
+                "task_id": {"type": ["string", "null"]},
+                "user_id": {"type": ["string", "null"]},
+            },
+        },
+        "notification:new": {
+            "type": "object",
+            "required": ["type", "notification"],
+            "properties": {
+                "type": {"const": "notification:new"},
+                "notification": {"type": "object"},
+            },
+        },
+        "notification:read": {
+            "type": "object",
+            "required": ["type", "notification_id"],
+            "properties": {
+                "type": {"const": "notification:read"},
+                "notification_id": {"type": "string"},
+                "user_id": {"type": "string"},
+            },
+        },
+        "notification:read_all": {
+            "type": "object",
+            "required": ["type", "user_id"],
+            "properties": {
+                "type": {"const": "notification:read_all"},
+                "user_id": {"type": "string"},
             },
         },
         "session:message": {
@@ -88,6 +117,7 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "message": {"type": "object"},
                 "messages": {"type": "array"},
                 "context_summary": {"type": ["string", "null"]},
+                "audio_url": {"type": ["string", "null"]},
             },
         },
     }
