@@ -47,6 +47,13 @@ ISLI is built as a **layered, event-driven multi-agent system**. The architectur
   - **Notification Engine** (added 2026-06-01): Unified event-to-notification pipeline with preference-aware routing, quiet hours, digest batching, and Telegram escalation
   - **Scheduler Worker** (added 2026-06-02): Background job for one-time and recurring task activation. Handles atomic cloning for cron-based tasks.
   - **Audit Logging**: Cryptographically signed audit trail for system-level changes.
+- **Startup Architecture** (refactored 2026-06-04): `main.py` is a thin app factory (~80 lines). All startup logic lives in the `startup/` package:
+  - `startup/infra.py` — signal handling, shutdown coordination
+  - `startup/notifications.py` — outbox handler registration
+  - `startup/agents.py` — `AgentProcessManager` initialization, stuck-agent reset, container reconciliation, online-agent restart
+  - `startup/workers.py` — `WorkerManager` that data-drives all 16 background loops via a single `_WORKER_SPECS` list
+  - `startup/__init__.py` — FastAPI `lifespan` context manager orchestrating the above
+- **Health Router** (refactored 2026-06-04): All `/health`, `/ready`, `/live`, and `/metrics` endpoints (v1 + legacy) live in `routers/health.py`.
 
 ### The Keeper (`isli-keeper`)
 - **Runtime**: Python process → Ollama (local)
@@ -293,15 +300,15 @@ This design ensures:
 
 ```
 isli/
-├── isli-core/          ← FastAPI core service (port 8000)
-├── isli-keeper/        ← Keeper sidecar (port 8001, local only)
-├── isli-audio/         ← Audio processing (STT/TTS) (port 8400, local only)
-├── isli-workspace/     ← Workspace manager (port 8300, local only)
-├── isli-board/         ← React frontend (port 5173)
-├── isli-skills/        ← Skill microservices (ports 8100-8199)
-├── isli-channels/      ← Channel adapters (port 8200+)
-├── isli-whatsapp-sidecar/ ← WhatsApp engine (port 3001)
-└── docker-compose.yml  ← Full stack orchestration
+├── isli-core/          ← FastAPI core service (port 8000 internally)
+├── isli-keeper/        ← Keeper sidecar (port 8001, isli-mesh only)
+├── isli-audio/         ← Audio processing (STT/TTS) (port 8400, isli-mesh only)
+├── isli-workspace/     ← Workspace manager (port 8300, isli-mesh only)
+├── isli-board/         ← React frontend (served via Traefik, isli-public only)
+├── isli-skills/        ← Skill microservices (port 8100, isli-mesh only)
+├── isli-channels/      ← Channel adapters (port 8200, isli-mesh only)
+├── isli-whatsapp-sidecar/ ← WhatsApp engine (port 3001, isli-mesh only)
+└── docker-compose.yml  ← Full stack orchestration (3 networks, secrets, no host ports except Traefik)
 ```
 
 ---
@@ -312,10 +319,45 @@ isli/
 |----------|--------|
 | Keeper → outside world | **Never exposed**. Localhost only. |
 | Audio → outside world | **Never exposed**. Localhost only. JWT-verified. |
-| Agent ↔ Core API | JWT per agent. Scoped permissions. |
-| Skills | No auth internally. RBAC enforced by Core API proxy. |
-| Channels | Webhook secret validation. Rate limited. |
+| Agent ↔ Core API | JWT per agent. Scoped permissions. `token_issued_at` revocation on token recovery. |
+| Skills → Core API | **JWT-verified** (`X-Internal-Auth` header). No empty-JWT god-mode in production. Core signs every proxy request. |
+| Channels → Core API | **JWT-verified** (`X-Internal-Auth` header). `require_internal_auth` on `/send`. Webhook secret validation on inbound. |
+| Workspace → Core API | **JWT-verified** (`X-Internal-Auth` header). No empty-JWT god-mode in production. |
+| Keeper → Core API | **JWT-verified** (`X-Internal-Auth` header). No empty-JWT god-mode in production. |
 | User ↔ Board | Session token. HTTPS only in production. |
+
+---
+
+## Network Segmentation (2026-06-03)
+
+Production deployments use **three isolated Docker networks**:
+
+```
+isli-public   → Traefik only  (edge ingress, ports 80/443)
+isli-mesh     → App services   (east-west traffic: core, keeper, skills, channels, workspace, audio)
+isli-data     → Data stores    (postgres, redis, ollama; internal: true)
+```
+
+Rules:
+- **Data services** attach **only** to `isli-data` — no direct external reachability
+- **App services** attach to `isli-mesh` + `isli-data` (pragmatic; full isolation would require a service mesh)
+- **Traefik** attaches to `isli-public` + `isli-mesh`
+- **Board** attaches to `isli-public` only (static SPA)
+- **Only Traefik binds host ports** in production. All internal services are container-network-only.
+
+---
+
+## Secret Management (2026-06-03)
+
+ISLI uses **Docker Compose secrets** for bootstrap credentials. Secret files live in `secrets/` on the host and are mounted into containers as in-memory files under `/run/secrets/`.
+
+| Secret | Used By | Purpose |
+|--------|---------|---------|
+| `jwt_secret` | core, keeper, channels, skills, workspace, audio | HS256 JWT signing/verification for all inter-service auth |
+| `admin_api_key` | core | Board UI admin authentication |
+| `pii_encryption_key` | core | AES-256-GCM for PII archive columns |
+
+Each service's `config.py` uses a `@field_validator(mode="before")` that reads file paths starting with `/run/secrets/` and returns the file contents. `startup_validation.py` resolves the same paths before Pydantic loads to avoid short-circuit failures.
 
 ---
 
@@ -408,19 +450,19 @@ EOF
 The following gaps were identified during a parallel 12-agent research review. They represent the delta between documented architecture and production readiness:
 
 ### Critical
-- **Hardcoded service discovery** — all services point to `localhost` and static ports with no registry or DNS-based discovery.
+- ✅ ~~**Hardcoded service discovery**~~ — Resolved 2026-06-03. `SKILL_REGISTRY` consolidated from ~25 env vars to 4 upstreams (`SKILLS_URL`, `WORKSPACE_URL`, `AUDIO_URL`, `CHANNELS_URL`) + `ServiceDiscovery` utility in `isli-core/src/isli_core/discovery.py`.
 - **No event schema registry** — WebSocket and Redis payloads are unversioned and unenforced.
 - **Task state race conditions** — concurrent PATCH updates from agents and humans lack optimistic locking.
-- **Broken Docker networking** — `.env` template uses `localhost` which fails in Docker Compose.
+- ✅ ~~**Broken Docker networking**~~ — Resolved 2026-06-03. `docker-compose.yml` uses Compose service names (`postgres`, `redis`, `keeper`, `core`, etc.) with `docker-compose.override.yml` for dev overrides. `.env.example` documents both native dev (`localhost`) and Docker (`service-name`) modes.
 
 ### High
 - **Missing backpressure/circuit breakers** on the Kanban event bus and WebSocket fan-out.
 - **No API versioning contract** between Core API and agents.
 - **Distributed tracing treated as optional** — OpenTelemetry is listed as "or Langfuse" rather than mandatory.
-- **Unauthenticated internal skill network** — skills have no auth internally, creating lateral movement risk.
+- ✅ ~~**Unauthenticated internal skill network**~~ — Resolved 2026-06-03. All inter-service calls now carry `X-Internal-Auth` JWTs. Empty-JWT god-mode fallback removed in production. Dev-mode bypass only activates when `ISLI_ENV=development` AND no header is present.
 
 ### Medium
-- **No load balancer or service mesh** — explicit single-machine assumption limits scaling.
+- ✅ ~~**No load balancer or service mesh**~~ — Partially resolved 2026-06-03. Traefik is the edge LB. Application-layer auth + network segmentation (`isli-public` / `isli-mesh` / `isli-data`) replaces the need for a mesh on single-host Docker Compose. See `Docs/15-service-mesh-backlog.md` for when to revisit mTLS.
 - **No graceful shutdown / connection draining** — in-flight tasks can lose state on restart.
 
 > See `Memory/ISLI-Research-Report.md` for full details and recommendations.

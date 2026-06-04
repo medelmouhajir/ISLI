@@ -31,6 +31,7 @@ from isli_core.config import get_settings
 from isli_core.event_manager import EventManager
 from isli_core.redis_client import get_redis
 from isli_core.services.process_manager import get_pm, AgentProcessManager
+from isli_core.memory.context_cache import ContextCache
 
 
 def _safe_json(value: Any, default: Any = None) -> Any:
@@ -196,7 +197,7 @@ class AgentRegistrationOut(AgentOut):
 async def list_agents(
     status: str | None = None, 
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     stmt = select(Agent).where(Agent.deleted_at.is_(None))
     if status:
@@ -210,7 +211,7 @@ async def create_agent(
     payload: AgentCreate, 
     db: AsyncSession = Depends(get_db),
     pm: AgentProcessManager = Depends(get_pm),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     agent_id = payload.id or f"agent-{payload.name.lower().replace(' ', '-')}"
     existing = await db.execute(select(Agent).where(Agent.id == agent_id))
@@ -280,7 +281,7 @@ async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
 async def get_agent_peers(
     agent_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     """Resolve an agent's known_agent_ids into full agent metadata."""
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
@@ -368,7 +369,7 @@ async def update_agent(
     agent_id: str,
     payload: AgentUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
     agent = result.scalar_one_or_none()
@@ -386,6 +387,21 @@ async def update_agent(
     if any(k in changes for k in ("skills", "channels", "known_agent_ids", "model_provider", "model_id", "persona", "config", "api_key")):
         await EventManager.emit("agent:config_updated", {"agent_id": agent.id, "fields": list(changes.keys())})
 
+    # Invalidate cached agent identity so context injection reflects changes immediately
+    if any(k in changes for k in ("name", "description", "config", "persona")):
+        await ContextCache.invalidate_for_agent(agent.id)
+
+    # If secondary_models changed, invalidate model routing for active sessions
+    if "config" in changes and isinstance(changes["config"], dict) and "secondary_models" in changes["config"]:
+        from sqlalchemy import update as sa_update
+        await db.execute(
+            sa_update(Session)
+            .where(Session.agent_id == agent_id, Session.deleted_at.is_(None), Session.status != "closed")
+            .values(routed_model_id=None, routed_model_provider=None, routed_model_reason=None)
+        )
+        await db.commit()
+        logger.info("model.routing_invalidated", agent_id=agent_id)
+
     await AuditWriter.write(
         db, actor_type="system", actor_id="core-api", action="update_agent",
         target_type="agent", target_id=agent.id,
@@ -399,7 +415,7 @@ async def update_agent(
 async def delete_agent(
     agent_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
     agent = result.scalar_one_or_none()
@@ -436,7 +452,7 @@ async def delete_agent(
 async def issue_agent_token(
     agent_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     """Issue a fresh agent-scoped JWT, invalidating any previous token."""
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
@@ -668,7 +684,7 @@ async def start_agent(
     agent_id: str,
     db: AsyncSession = Depends(get_db),
     pm: AgentProcessManager = Depends(get_pm),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
     agent = result.scalar_one_or_none()
@@ -693,7 +709,7 @@ async def stop_agent(
     agent_id: str,
     db: AsyncSession = Depends(get_db),
     pm: AgentProcessManager = Depends(get_pm),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
     agent = result.scalar_one_or_none()
@@ -741,7 +757,7 @@ async def restart_agent(
     rebuild: bool = False,
     db: AsyncSession = Depends(get_db),
     pm: AgentProcessManager = Depends(get_pm),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
     agent = result.scalar_one_or_none()
@@ -777,7 +793,7 @@ async def restart_agent(
 async def get_agent_process_status(
     agent_id: str,
     pm: AgentProcessManager = Depends(get_pm),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     return pm.get_status(agent_id)
 

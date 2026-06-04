@@ -16,7 +16,7 @@ router = APIRouter(prefix="/stt", tags=["stt"])
 async def stt_transcribe(
     audio: UploadFile = File(...),
     language: str = Form("auto"),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ) -> dict[str, Any]:
     """Transcribe uploaded audio to text using the local audio service (Whisper STT).
 

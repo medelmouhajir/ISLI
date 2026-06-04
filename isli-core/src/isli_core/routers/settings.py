@@ -75,7 +75,7 @@ def _build_provider_out(provider: LlmProvider, models: list[PermittedModel]) -> 
 
 
 @router.get("/providers", response_model=list[ProviderOut])
-async def list_providers(db: AsyncSession = Depends(get_db), _admin: str = Depends(require_admin_auth)):
+async def list_providers(db: AsyncSession = Depends(get_db), admin: str = Depends(require_admin_auth)):
     result = await db.execute(select(LlmProvider))
     providers = result.scalars().all()
 
@@ -90,7 +90,7 @@ async def list_providers(db: AsyncSession = Depends(get_db), _admin: str = Depen
 
 
 @router.get("/providers/{provider}", response_model=ProviderOut)
-async def get_provider(provider: str, db: AsyncSession = Depends(get_db), _admin: str = Depends(require_admin_auth)):
+async def get_provider(provider: str, db: AsyncSession = Depends(get_db), admin: str = Depends(require_admin_auth)):
     result = await db.execute(select(LlmProvider).where(LlmProvider.provider == provider))
     row = result.scalar_one_or_none()
     if not row:
@@ -108,7 +108,7 @@ async def update_provider(
     provider: str,
     payload: ProviderUpsert,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     result = await db.execute(select(LlmProvider).where(LlmProvider.provider == provider))
     row = result.scalar_one_or_none()
@@ -147,7 +147,7 @@ async def update_provider(
 async def delete_provider(
     provider: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     result = await db.execute(select(LlmProvider).where(LlmProvider.provider == provider))
     row = result.scalar_one_or_none()
@@ -174,7 +174,7 @@ async def delete_provider(
 async def list_provider_models(
     provider: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     result = await db.execute(
         select(PermittedModel).where(PermittedModel.provider == provider)
@@ -191,7 +191,7 @@ async def add_provider_model(
     provider: str,
     payload: PermittedModelIn,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     provider_result = await db.execute(select(LlmProvider).where(LlmProvider.provider == provider))
     if not provider_result.scalar_one_or_none():
@@ -235,7 +235,7 @@ async def delete_provider_model(
     provider: str,
     model_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     result = await db.execute(
         select(PermittedModel).where(
@@ -269,7 +269,7 @@ async def delete_provider_model(
 async def list_settings(
     scope: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     stmt = select(SystemSetting)
     if scope:
@@ -293,7 +293,7 @@ async def list_settings(
 async def get_setting(
     key: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     row = result.scalar_one_or_none()
@@ -313,7 +313,7 @@ async def update_setting(
     key: str,
     payload: SettingUpsert,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     row = result.scalar_one_or_none()
@@ -364,7 +364,7 @@ async def update_setting(
 async def delete_setting(
     key: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     row = result.scalar_one_or_none()

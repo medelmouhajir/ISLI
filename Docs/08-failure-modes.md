@@ -225,7 +225,7 @@ The **MAST (Multi-Agent System Failure Taxonomy)** from UC Berkeley (NeurIPS 202
 
 **ISLI mitigation** (Fixed 2026-05-29):
 - **Graceful 403 handling**: `WhatsAppAdapter._handle_inbound_message()` wraps `_forward_to_core()` in `try/except httpx.HTTPStatusError`. On 403, it sends an auto-reply: *"Welcome! Please send /start to begin chatting with this agent."*
-- **Webhook error surfacing**: `whatsapp_sidecar_webhook` in `main.py` catches adapter exceptions and returns appropriate status codes (200 for handled 403, 500 only for true transient errors).
+- **Webhook error surfacing**: `whatsapp_sidecar_webhook` in `isli_core/routers/channels.py` catches adapter exceptions and returns appropriate status codes (200 for handled 403, 500 only for true transient errors).
 - **Context failure notification**: `SessionContextInjectorWorker` sends a proactive message to the user when a session reaches `context_failed` after max retries: *"Sorry, I'm having trouble processing your message right now. Please try again later."*
 
 ### F20: WhatsApp Adapter State Loss on Restart
@@ -422,5 +422,11 @@ The 2026 research review identified structural resilience patterns that ISLI cur
 | WhatsApp replies lost due to LID JID mismatch | F23 | **Fixed 2026-05-29** | `WhatsAppAdapter` preserves original `remote_jid` and uses it for outbound `send_message()` |
 | `/new` command crashes on `datetime.UTC` | F24 | **Fixed 2026-05-29** | Replaced `datetime.UTC` with `timezone.utc` in `commands.py` |
 | Agent ignores tool calls from XML/JSON models | F17 | **Fixed 2026-05-29** | `runner.py` added `_extract_xml_tool_calls()` and `_extract_json_tool_calls()` with `_ParsedToolCall` normalization; strips markup from final response; injects synthetic `tool_calls` into history |
+| Board UI 502 because `core` unresolvable from `board` container | F22 | **Fixed 2026-06-03** | `board` service added to `isli-mesh` network in `docker-compose.yml` so nginx `proxy_pass` to `core:8000` resolves via Docker DNS |
+| Agents orphaned on wrong Docker network | F7, F22 | **Fixed 2026-06-03** | `AGENT_NETWORK` changed from `isli_isli` to `isli_isli-mesh` in `docker-compose.yml`; ensures spawned agents share a network with Core |
+| `websockets` 14+ `extra_headers` API break | F17 | **Fixed 2026-06-03** | `runner.py` changed `extra_headers=` to `additional_headers=` in `websockets.connect()` call; agent-runner image rebuilt |
+| Ollama-init cannot reach internet | F15 | **Fixed 2026-06-03** | `ollama-init` added to `isli-mesh` network (in addition to `isli-data`) so `registry.ollama.ai` is resolvable |
+| Missing `WEBHOOK_SECRET` causes 401 everywhere | F14, F22 | **Fixed 2026-06-03** | Added `WEBHOOK_SECRET` and `SKILL_REGISTRY_TOKEN` to `.env` and `docker-compose.yml`; verified both are passed to Core and Skills services |
+| `.env.example` missing required secrets | F22 | **Fixed 2026-06-03** | `.env.example` updated to document `WEBHOOK_SECRET`, `SKILL_REGISTRY_TOKEN`, and `AGENT_ID` |
 
 > **Note:** Many mitigations have been implemented since the 2026-05-11 research review. Items marked **Fixed** or **Implemented** are in production code. A smaller number remain design-only; see inline status markers for details.

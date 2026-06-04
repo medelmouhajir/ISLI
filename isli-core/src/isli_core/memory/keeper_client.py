@@ -13,6 +13,11 @@ from ..config import get_settings
 logger = structlog.get_logger()
 
 
+class KeeperAuthError(Exception):
+    """Non-retryable auth failure against Keeper."""
+    pass
+
+
 class KeeperClient:
     """Client for calling ISLI Keeper services."""
 
@@ -83,6 +88,69 @@ class KeeperClient:
                 })
 
             return context_summary
+        except httpx.HTTPStatusError as exc:
+            latency = (time.monotonic() - start) * 1000
+            if exc.response.status_code in (401, 403):
+                await EventManager.emit("keeper:inference", {
+                    "agent_id": agent_id,
+                    "endpoint": "context/inject",
+                    "latency_ms": round(latency, 2),
+                    "status": "error",
+                    "error": f"Auth failure: {exc.response.status_code}",
+                    "prompt": task_description or "Injection request",
+                    "prompt_preview": (task_description or "Injection request")[:80],
+                })
+                logger.error(
+                    "keeper.context_inject_auth_failed",
+                    agent_id=agent_id,
+                    status=exc.response.status_code,
+                )
+                raise KeeperAuthError(
+                    f"Keeper auth failed: {exc.response.status_code}"
+                ) from exc
+            if exc.response.status_code == 503:
+                await EventManager.emit("keeper:inference", {
+                    "agent_id": agent_id,
+                    "endpoint": "context/inject",
+                    "latency_ms": round(latency, 2),
+                    "status": "error",
+                    "error": "Keeper returned 503",
+                    "prompt": task_description or "Injection request",
+                    "prompt_preview": (task_description or "Injection request")[:80],
+                })
+                logger.warning(
+                    "keeper.context_inject_503",
+                    agent_id=agent_id,
+                )
+                return None
+            await EventManager.emit("keeper:inference", {
+                "agent_id": agent_id,
+                "endpoint": "context/inject",
+                "latency_ms": round(latency, 2),
+                "status": "error",
+                "error": f"HTTP {exc.response.status_code}",
+                "prompt": task_description or "Injection request",
+                "prompt_preview": (task_description or "Injection request")[:80],
+            })
+            logger.error(
+                "keeper.context_inject_http_error",
+                agent_id=agent_id,
+                status=exc.response.status_code,
+            )
+            return None
+        except httpx.TimeoutException as exc:
+            latency = (time.monotonic() - start) * 1000
+            await EventManager.emit("keeper:inference", {
+                "agent_id": agent_id,
+                "endpoint": "context/inject",
+                "latency_ms": round(latency, 2),
+                "status": "error",
+                "error": "Timeout",
+                "prompt": task_description or "Injection request",
+                "prompt_preview": (task_description or "Injection request")[:80],
+            })
+            logger.warning("keeper.context_inject_timeout", agent_id=agent_id)
+            return None
         except Exception as exc:
             latency = (time.monotonic() - start) * 1000
             await EventManager.emit("keeper:inference", {

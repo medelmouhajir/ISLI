@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from isli_core.config import get_settings
 from isli_core.db import get_db
-from isli_core.models import Task
+from isli_core.models import Task, Agent
 from isli_core.locking import increment_task_version
 from isli_core.audit_writer import AuditWriter
 from isli_core.security.content_scanner import ContentScanner
@@ -20,6 +20,8 @@ from isli_core.checkpoint import CheckpointManager
 from isli_core.auth import require_admin_auth, require_internal_auth, create_internal_token
 from isli_core.delegation import validate_delegation, needs_human_approval
 from isli_core.dynamic_config import get_setting
+from isli_core.cost.complexity import TaskComplexityScorer
+from isli_core.redis_streams import add_to_stream
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -153,7 +155,7 @@ async def list_tasks(
     status: str | None = None,
     agent_id: str | None = None,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     stmt = select(Task).where(Task.deleted_at.is_(None))
     if status:
@@ -169,7 +171,7 @@ async def list_tasks(
 async def create_task(
     payload: TaskCreate,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     # Security scan and policy check
     scan = ContentScanner.scan(payload.input)
@@ -206,11 +208,13 @@ async def create_task(
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=409, detail="Duplicate idempotency key")
 
+    agent_config: dict[str, Any] = {}
     if payload.agent_id:
-        from isli_core.models import Agent
         agent_check = await db.execute(select(Agent).where(Agent.id == payload.agent_id, Agent.deleted_at.is_(None)))
-        if not agent_check.scalar_one_or_none():
+        agent_row = agent_check.scalar_one_or_none()
+        if not agent_row:
             raise HTTPException(status_code=400, detail=f"Agent '{payload.agent_id}' not found or deleted")
+        agent_config = agent_row.config or {}
 
     depth = 0
     if payload.parent_task_id:
@@ -242,6 +246,11 @@ async def create_task(
     else:
         initial_status = "pending_context" if payload.agent_id else "inbox"
 
+    # Complexity scoring at ingress
+    score, tier = TaskComplexityScorer.score_task_input(
+        payload.description or payload.title or payload.input
+    )
+
     task = Task(
         title=payload.title,
         description=payload.description,
@@ -260,8 +269,10 @@ async def create_task(
         idempotency_key=payload.idempotency_key,
         scheduled_at=scheduled_at,
         cron_expression=payload.cron_expression,
+        complexity_score=score,
+        complexity_tier=tier,
     )
-    
+
     db.add(task)
     await db.commit()
     await db.refresh(task)
@@ -278,9 +289,25 @@ async def create_task(
         payload={"title": task.title, "agent_id": task.agent_id},
     )
     await db.commit()
-    
+
     await EventManager.emit("task:created", {"task": TaskOut.model_validate(task).model_dump(mode="json")})
-    
+
+    # Push to Redis Stream for unified ContextWorker when assigned to an agent
+    if initial_status == "pending_context":
+        await add_to_stream(
+            "context:requests",
+            {
+                "type": "task",
+                "id": str(task.id),
+                "agent_id": str(task.agent_id),
+                "task_description": task.description or task.title or task.input,
+                "session_id": str(task.session_id) if task.session_id else None,
+                "complexity_score": score,
+                "complexity_tier": tier,
+                "memory_similarity_threshold": agent_config.get("memory_similarity_threshold", 0.4),
+            },
+        )
+
     return task
 
 
@@ -298,7 +325,7 @@ async def update_task(
     task_id: str,
     payload: TaskUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
     task = result.scalar_one_or_none()
@@ -316,6 +343,8 @@ async def update_task(
             raise HTTPException(status_code=400, detail=f"Agent '{changes['agent_id']}' not found or deleted")
 
     # If agent_id is being assigned for the first time, trigger context injection
+    agent_config_for_stream: dict[str, Any] = {}
+    stream_payload: dict[str, Any] | None = None
     if (
         "agent_id" in changes
         and changes["agent_id"] is not None
@@ -324,6 +353,32 @@ async def update_task(
     ):
         task.status = "pending_context"
         changes["status"] = "pending_context"
+
+        # Complexity scoring at ingress
+        score, tier = TaskComplexityScorer.score_task_input(
+            task.description or task.title or task.input
+        )
+        task.complexity_score = score
+        task.complexity_tier = tier
+        changes["complexity_score"] = score
+        changes["complexity_tier"] = tier
+
+        # Load agent config for stream write
+        agent_check = await db.execute(select(Agent).where(Agent.id == changes["agent_id"], Agent.deleted_at.is_(None)))
+        agent_row = agent_check.scalar_one_or_none()
+        if agent_row:
+            agent_config_for_stream = agent_row.config or {}
+
+        stream_payload = {
+            "type": "task",
+            "id": str(task.id),
+            "agent_id": str(changes["agent_id"]),
+            "task_description": task.description or task.title or task.input,
+            "session_id": str(task.session_id) if task.session_id else None,
+            "complexity_score": score,
+            "complexity_tier": tier,
+            "memory_similarity_threshold": agent_config_for_stream.get("memory_similarity_threshold", 0.4),
+        }
 
     for field, value in changes.items():
         setattr(task, field, value)
@@ -337,13 +392,17 @@ async def update_task(
         payload=changes,
     )
     await db.commit()
-    
+
     await EventManager.emit("task:updated", {
         "task_id": task_id,
         "changes": changes,
         "task": TaskOut.model_validate(task).model_dump(mode="json")
     })
-    
+
+    # Push to Redis Stream when agent assigned for first time
+    if stream_payload:
+        await add_to_stream("context:requests", stream_payload)
+
     return task
 
 
@@ -352,7 +411,7 @@ async def move_task(
     task_id: str,
     new_status: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     if new_status not in VALID_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
@@ -392,7 +451,7 @@ async def append_saga_entry(
     task_id: str,
     entry: dict[str, Any],
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
     task = result.scalar_one_or_none()
@@ -417,7 +476,7 @@ async def save_checkpoint(
     task_id: str,
     payload: CheckpointCreate,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     cp = await CheckpointManager.save(
         db, task_id, payload.turn_number, payload.messages, payload.tool_calls
@@ -458,7 +517,7 @@ async def attach_to_task(
     task_id: str,
     payload: TaskAttachRequest,
     db: AsyncSession = Depends(get_db),
-    _auth: dict = Depends(require_internal_auth)
+    auth: dict = Depends(require_internal_auth)
 ):
     # Verify task exists and agent has access (handled by require_internal_auth and internal check later)
     result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
@@ -515,7 +574,7 @@ async def pull_from_task(
     task_id: str,
     payload: TaskPullRequest,
     db: AsyncSession = Depends(get_db),
-    _auth: dict = Depends(require_internal_auth)
+    auth: dict = Depends(require_internal_auth)
 ):
     result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
     task = result.scalar_one_or_none()
@@ -554,7 +613,7 @@ async def pull_from_task(
 async def delete_task(
     task_id: str,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
     task = result.scalar_one_or_none()

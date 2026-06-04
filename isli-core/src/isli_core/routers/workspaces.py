@@ -96,7 +96,7 @@ async def list_workspace_files(
     path: str = "",
     scope: str = "agent",
     scope_id: str | None = None,
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     valid_path = _validate_path(path)
     return await _proxy_request("POST", "list", {
@@ -113,7 +113,7 @@ async def read_workspace_file(
     path: str,
     scope: str = "agent",
     scope_id: str | None = None,
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     valid_path = _validate_path(path)
     if not valid_path:
@@ -130,7 +130,7 @@ async def read_workspace_file(
 async def write_workspace_file(
     agent_id: str,
     payload: WriteFileRequest,
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     valid_path = _validate_path(payload.path)
     if not valid_path:
@@ -150,7 +150,7 @@ async def delete_workspace_file(
     path: str,
     scope: str = "agent",
     scope_id: str | None = None,
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     valid_path = _validate_path(path)
     if not valid_path:
@@ -170,7 +170,7 @@ async def upload_workspace_file(
     scope: str = "agent",
     scope_id: str | None = None,
     file: UploadFile = File(...),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     valid_path = _validate_path(path)
     if not valid_path:
@@ -205,7 +205,7 @@ async def download_workspace_file(
     path: str,
     scope: str = "agent",
     scope_id: str | None = None,
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     valid_path = _validate_path(path)
     if not valid_path:
@@ -240,7 +240,7 @@ async def download_workspace_file(
 async def create_workspace_dir(
     agent_id: str,
     payload: MkdirRequest,
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     valid_path = _validate_path(payload.path)
     if not valid_path:

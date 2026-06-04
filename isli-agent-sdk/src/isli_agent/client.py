@@ -101,11 +101,23 @@ class CoreClient:
         return Task.model_validate(resp.json())
 
     async def get_context(self, agent_id: str, task_description: str, session_id: Optional[str] = None) -> str:
-        """Fetch context injection from Keeper (via Core proxy)."""
+        """Fetch context injection from Keeper (via Core proxy).
+
+        .. deprecated::
+            Context is now delivered inline via WebSocket ``task:updated`` events.
+            This method is kept for backward compatibility but should not be called
+            from new code.
+        """
+        import warnings
+        warnings.warn(
+            "get_context() is deprecated; context_summary is delivered inline via WebSocket",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         resp = await self.client.post(
             f"/v1/agents/{agent_id}/context",
             params={
-                "task_description": task_description, 
+                "task_description": task_description,
                 "session_id": session_id
             },
             headers=self._get_headers()

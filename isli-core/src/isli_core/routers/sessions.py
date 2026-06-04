@@ -17,11 +17,15 @@ from isli_core.auth import create_internal_token
 
 from isli_core.db import get_db
 from isli_core.redis_client import get_redis
-from isli_core.models import Session, ChannelMessage
+from isli_core.models import Session, ChannelMessage, ChannelIdentity
 from isli_core.config import get_settings
 from isli_core.auth import require_internal_auth, require_admin_auth
 from isli_core.retry import exponential_backoff
 from isli_core.event_manager import EventManager
+from isli_core.redis_streams import add_to_stream
+from isli_core.cost.complexity import TaskComplexityScorer
+from isli_core.memory.context_cache import ContextCache
+from isli_core.utils.tokens import count_message_tokens
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -209,9 +213,47 @@ async def send_human_message(
         current_metadata = sess.session_metadata or {}
         current_metadata["voice_mode_enabled"] = payload.voice_mode_enabled
         sess.session_metadata = current_metadata
-    # Mark as pending context so the InjectorWorker picks it up and emits session:message to agent
+
+    # --- Channel identity upsert (moved from worker to ingress) ---
+    if sess.user_id and sess.channel and sess.channel != "web":
+        from isli_core.models import Agent
+        agent_result = await db.execute(
+            select(Agent).where(Agent.id == sess.agent_id, Agent.deleted_at.is_(None))
+        )
+        agent_row = agent_result.scalar_one_or_none()
+        if agent_row and agent_row.user_id:
+            existing = await db.execute(
+                select(ChannelIdentity).where(
+                    ChannelIdentity.channel == sess.channel,
+                    ChannelIdentity.channel_user_id == sess.user_id,
+                    ChannelIdentity.agent_id == sess.agent_id,
+                )
+            )
+            if not existing.scalar_one_or_none():
+                identity = ChannelIdentity(
+                    channel=sess.channel,
+                    channel_user_id=sess.user_id,
+                    board_user_id=agent_row.user_id,
+                    agent_id=sess.agent_id,
+                )
+                db.add(identity)
+                logger.info(
+                    "channel_identity.created",
+                    channel=sess.channel,
+                    channel_user_id=sess.user_id,
+                    board_user_id=agent_row.user_id,
+                    agent_id=sess.agent_id,
+                )
+
+    # Complexity scoring at ingress
+    score, tier = TaskComplexityScorer.score_task_input(payload.text)
+    sess.complexity_score = score
+    sess.complexity_tier = tier
+
+    # Mark as pending context so the ContextWorker picks it up
+    # NOTE: kept during transition window for rollback compatibility
     sess.status = "pending_context"
-    
+
     await db.commit()
 
     # Store inbound channel message for audit
@@ -228,6 +270,25 @@ async def send_human_message(
 
     # Emit update event for UI
     await EventManager.emit("session:updated", {"session_id": session_id})
+
+    # Push to Redis Stream for unified ContextWorker
+    try:
+        agent_config = agent_row.config if agent_row and agent_row.config else {}
+    except NameError:
+        agent_config = {}
+    await add_to_stream(
+        "context:requests",
+        {
+            "type": "session",
+            "id": str(sess.id),
+            "agent_id": str(sess.agent_id),
+            "task_description": f"Session with {sess.user_id or 'user'}: {payload.text}",
+            "session_id": str(sess.id),
+            "complexity_score": score,
+            "complexity_tier": tier,
+            "memory_similarity_threshold": agent_config.get("memory_similarity_threshold", 0.4),
+        },
+    )
 
     return {"status": "queued", "session_id": session_id}
 
@@ -327,7 +388,7 @@ async def reply_to_session(
     sess.messages = (sess.messages or []) + [msg]
     sess.last_activity_at = now
     sess.last_message_at = now
-    sess.token_count = len(str(sess.messages)) // 4
+    sess.token_count = count_message_tokens(sess.messages)
     sess.status = "ready"
     await db.commit()
 
@@ -379,6 +440,7 @@ async def reply_to_session(
                 resp = await client.post(
                     f"{settings.channels_url}/send",
                     json=payload_channels,
+                    headers={"X-Internal-Auth": create_internal_token("core", scopes=["channels:send"], expires_minutes=5)},
                     timeout=10.0,
                 )
                 resp.raise_for_status()
@@ -414,7 +476,7 @@ async def get_session_draft(session_id: str):
 @router.get("/{session_id}/debug-trace")
 async def get_session_debug_trace(
     session_id: str,
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     redis = await get_redis()
     trace_key = f"session:{session_id}:debug_trace"
@@ -480,14 +542,30 @@ async def session_action(
         }
     ]
     sess.last_activity_at = now
+
+    # Complexity scoring at ingress
+    score, tier = TaskComplexityScorer.score_task_input(action_content)
+    sess.complexity_score = score
+    sess.complexity_tier = tier
+
     sess.status = "pending_context"
     await db.commit()
 
-    # NOTE: We do NOT emit session:message here.
-    # The SessionContextInjectorWorker polls pending_context sessions,
-    # injects Keeper context, and emits session:message exactly once.
-    # Emitting here would duplicate the event and cause the agent to
-    # process the same action twice (once raw, once with context).
+    # Push to Redis Stream for unified ContextWorker
+    await add_to_stream(
+        "context:requests",
+        {
+            "type": "session",
+            "id": str(sess.id),
+            "agent_id": str(sess.agent_id),
+            "task_description": f"Session with {sess.user_id or 'user'}: {action_content}",
+            "session_id": str(sess.id),
+            "complexity_score": score,
+            "complexity_tier": tier,
+            "memory_similarity_threshold": 0.4,
+        },
+    )
+
     await EventManager.emit("session:updated", {"session_id": sess.id})
     return {"status": "queued", "session_id": session_id}
 

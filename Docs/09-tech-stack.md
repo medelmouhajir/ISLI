@@ -333,6 +333,18 @@ TELEGRAM_BOT_TOKEN=
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 
+# Internal Service Auth (required in production Docker)
+WEBHOOK_SECRET=<generate with: openssl rand -hex 32>
+SKILL_REGISTRY_TOKEN=<generate with: openssl rand -hex 32>
+
+# Default agent ID for static agent-runner service (optional)
+AGENT_ID=kimi-02
+
+# WhatsApp Channel
+WHATSAPP_ENABLED=false
+SIDECAR_WEBHOOK_SECRET=<generate with: openssl rand -hex 32>
+SIDECAR_API_TOKEN=<generate with: openssl rand -hex 32>
+
 # Audio Processing (isli-audio)
 AUDIO_STT_MODEL=whisper-tiny
 AUDIO_TTS_MODEL=piper-en-us-lessac-medium
@@ -361,63 +373,98 @@ The full stack runs comfortably on a developer laptop. The Keeper local models (
 ## docker-compose.yml (Skeleton)
 
 ```yaml
-version: '3.9'
 services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: isli
-      POSTGRES_USER: isli
-      POSTGRES_PASSWORD: password
-    volumes: [./data/postgres:/var/lib/postgresql/data]
-    ports: ["5432:5432"]
+      POSTGRES_DB: ${POSTGRES_DB:-isli}
+      POSTGRES_USER: ${POSTGRES_USER:-isli}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?error}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-isli}"]
+    networks: [isli-data]
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    command: redis-server --appendonly yes
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+    networks: [isli-data]
 
-  ollama:
-    image: ollama/ollama:latest
-    volumes: [./data/ollama:/root/.ollama]
-    ports: ["11434:11434"]
-    # Add: deploy.resources.reservations.devices for GPU
-
-  isli-core:
+  core:
     build: ./isli-core
-    depends_on: [postgres, redis]
-    ports: ["8000:8000"]
-    env_file: .env
+    environment:
+      ISLI_ENV: production
+      DATABASE_URL: postgresql+asyncpg://.../isli
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: /run/secrets/jwt_secret
+      PII_ENCRYPTION_KEY: /run/secrets/pii_encryption_key
+      ADMIN_API_KEY: /run/secrets/admin_api_key
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      SKILL_REGISTRY_TOKEN: ${SKILL_REGISTRY_TOKEN}
+      AGENT_NETWORK: ${COMPOSE_PROJECT_NAME:-isli}_isli-mesh
+      SKILLS_URL: http://skills:8100
+      WORKSPACE_URL: http://workspace:8300
+      AUDIO_URL: http://audio:8400
+    secrets: [jwt_secret, admin_api_key, pii_encryption_key]
+    networks: [isli-mesh, isli-data]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
 
-  isli-keeper:
-    build: ./isli-keeper
-    depends_on: [ollama, postgres]
-    ports: ["8001:8001"]
-    env_file: .env
+  skills:
+    build: ./isli-skills
+    environment:
+      ISLI_ENV: production
+      JWT_SECRET: /run/secrets/jwt_secret
+      SKILL_REGISTRY_TOKEN: ${SKILL_REGISTRY_TOKEN}
+    secrets: [jwt_secret]
+    networks: [isli-mesh, isli-data]
 
-  isli-board:
+  board:
     build: ./isli-board
-    depends_on: [isli-core]
-    ports: ["5173:5173"]
+    networks:
+      - isli-public   # Traefik ingress
+      - isli-mesh     # Required: nginx proxy_pass to core:8000
+    depends_on:
+      core: { condition: service_healthy }
 
-  isli-audio:
-    build: ./isli-audio
-    depends_on: [redis]
-    ports: ["8400:8400"]
-    volumes: [./data/audio:/app/data]
-    env_file: .env
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama: { condition: service_healthy }
+    command: "ollama pull qwen3:1.7b && ollama pull nomic-embed-text"
+    environment:
+      OLLAMA_HOST: ollama:11434
+    networks:
+      - isli-data
+      - isli-mesh   # Required: internet access for model downloads
+    restart: 'no'
 
-  # Build target for dynamically spawned agent containers
-  agent-runner:
-    image: isli-agent-runner:latest
-    build:
-      context: ./isli-agent-sdk
-      dockerfile: Dockerfile
-    command: ["true"]
-    deploy:
-      replicas: 0  # Core spawns containers from this image at runtime
-    volumes:
-      # Development: live SDK source mount (Core passes this to spawned containers)
-      - ./isli-agent-sdk/src:/app/src:ro
+  # ... (channels, workspace, keeper, audio, traefik)
+
+secrets:
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  admin_api_key:
+    file: ./secrets/admin_api_key.txt
+  pii_encryption_key:
+    file: ./secrets/pii_encryption_key.txt
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  isli-public:
+    driver: bridge
+  isli-mesh:
+    driver: bridge
+  isli-data:
+    driver: bridge
+    internal: true
 ```
 
 ---
@@ -437,18 +484,19 @@ The following production-grade infrastructure items were identified during the r
 | OpenTelemetry instrumentation | ✅ **Implemented** | High | `instrument_fastapi()` helper in every service; Jaeger at `localhost:16686` |
 | CI/CD pipeline | ✅ **Implemented** | Medium | `.github/workflows/ci.yml` (lint + test) and `deploy.yml` (multi-service matrix build/push) |
 | Terraform / Pulumi IaC | ✅ **Implemented** | Medium | `infra/` contains Terraform modules and Traefik/nginx configs |
-| Secret management (Vault / Docker Secrets) | ✅ **Implemented** | High | Per-agent encrypted vault (`get-secret` skill) using AES-256-GCM in PostgreSQL; admin-only Board UI for CRUD; every read is audit-logged. Docker Secrets / HashiCorp Vault still recommended for `.env` bootstrap secrets in production. |
+| Secret management (Vault / Docker Secrets) | ✅ **Implemented** | High | Bootstrap secrets via Docker Compose secrets (`secrets/` directory, mounted to `/run/secrets/`). Runtime per-agent vault via `get-secret` skill (AES-256-GCM in PostgreSQL). Admin-only Board UI. Every read is audit-logged. |
 | Redis AOF persistence | **Missing** | High | `redis:7-alpine` runs without `appendonly`; data loss on unclean shutdown |
 | Backup/restore strategy | ✅ **Implemented** | High | Runbooks in `Docs/runbooks/backup-restore.md` with pg_dump, ChromaDB snapshot, and Redis RDB procedures |
 | Ollama model pre-pull | ✅ **Implemented** | Critical | `isli-ollama-init-1` init container pulls `qwen3:1.7b` and `nomic-embed-text` before Keeper starts |
 | Exact semver lockfiles | ✅ **Implemented** | Critical | `package-lock.json` for board; `requirements.txt` with exact pins for Python services |
 
-### Remaining Gaps (2026-05-22)
+### Remaining Gaps (2026-06-03)
 
 | Item | Status | Priority | Note |
 |------|--------|----------|------|
-| Secret management (bootstrap `.env`) | **Partial** | High | Per-agent runtime vault is implemented; bootstrap secrets (JWT_SECRET, ADMIN_API_KEY) still in `.env`. Migrate to Docker Secrets or Vault for production. |
-| Redis AOF persistence | **Missing** | High | Add `appendonly yes` to `redis.conf` or `command: redis-server --appendonly yes` |
-| `.env.dev` / `.env.prod` split | **Partial** | Medium | Only `.env.example` exists; no per-environment templates |
+| Redis AOF persistence | ✅ **Implemented** | High | `redis:7-alpine` command is `redis-server --appendonly yes`; AOF enabled in `docker-compose.yml` |
+| `.env.dev` / `.env.prod` split | ✅ **Implemented** | Medium | `docker-compose.yml` for production; `docker-compose.override.yml` for dev overrides (live mounts, dev ports). `.env.example` documents both modes. |
+| Network segmentation | ✅ **Implemented** | High | Three networks (`isli-public`, `isli-mesh`, `isli-data` with `internal: true`) active in both `docker-compose.yml` and `docker-compose.scale-out.yml` |
+| Inter-service mTLS | **Deferred** | Medium | Application-layer JWT auth + network segmentation is sufficient for single-host Docker Compose. See `Docs/15-service-mesh-backlog.md` for Kubernetes/Swarm migration path. |
 
 > **Research finding (resolved):** The original skeleton used `localhost` for inter-service URLs. The current `docker-compose.yml` correctly uses Compose service names (`postgres`, `redis`, `keeper`, `core`) with an `.env.example` template that documents both native dev (`localhost`) and Docker (`service-name`) modes.

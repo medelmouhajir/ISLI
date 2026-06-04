@@ -75,3 +75,17 @@ REDIS_SENTINEL_MASTER=mymaster
 # PostgreSQL HA
 DATABASE_URL=postgresql+asyncpg://isli:password@pgbouncer:6432/isli
 ```
+
+---
+
+## Service Mesh Migration Path
+
+When scaling beyond a single Docker host, application-layer JWT auth should be augmented with automatic mTLS. The full migration path, technology recommendations, and readiness checklist are documented in:
+
+> **Docs/15-service-mesh-backlog.md** — Deferred zero-trust mTLS backlog (Linkerd for K8s, Consul Connect for Swarm)
+
+Current single-host security posture (2026-06-03):
+- ✅ Network segmentation (`isli-public` / `isli-mesh` / `isli-data`)
+- ✅ Application-layer JWT on all inter-service calls
+- ✅ Docker Compose secrets for bootstrap credentials
+- ✅ Consolidated `ServiceDiscovery` utility ready for mesh DNS swap

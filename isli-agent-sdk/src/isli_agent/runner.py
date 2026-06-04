@@ -23,6 +23,7 @@ from litellm import (
 from .client import CoreClient
 from .logging import configure_logging
 from .models import AgentConfig, Task
+from .utils.tokens import count_message_tokens
 from .tools import (
     SKILL_TOOL_REGISTRY,
     normalize_skill_name,
@@ -794,9 +795,12 @@ class AgentRunner:
                 await asyncio.sleep(1)
                 continue
 
-            ws_url = self.core_url.replace("http", "ws") + f"/v1/ws/agents/{self.config.id}?token={token}"
+            ws_url = self.core_url.replace("http", "ws") + f"/v1/ws/agents/{self.config.id}"
             try:
-                async with websockets.connect(ws_url) as websocket:
+                async with websockets.connect(
+                    ws_url,
+                    additional_headers={"Authorization": f"Bearer {token}"},
+                ) as websocket:
                     self._websocket = websocket
                     logger.info(
                         "runner.ws_connected",
@@ -811,7 +815,7 @@ class AgentRunner:
                                 task_data = event["payload"]["task"]
                                 if task_data["status"] == "inbox":
                                     logger.info("runner.task_detected", task_id=task_data["id"])
-                                    asyncio.create_task(self._execute_task(task_data["id"]))
+                                    asyncio.create_task(self._execute_task(task_data))
                             elif event["type"] == "agent:config_updated":
                                 logger.info("runner.config_update_event_detected", agent_id=self.config.id)
                                 asyncio.create_task(self._sync_config())
@@ -844,8 +848,14 @@ class AgentRunner:
                     await asyncio.sleep(retry_delay)
                     retry_delay = min(retry_delay * 2, max_delay)
 
-    async def _execute_task(self, task_id: str):
-        """Execute a single task using the ReAct pattern."""
+    async def _execute_task(self, task_data: dict):
+        """Execute a single task using the ReAct pattern.
+
+        ``task_data`` is the full task payload from the WebSocket ``task:updated``
+        event, which already includes ``context_summary`` inline.  No extra HTTP
+        calls to Core are required.
+        """
+        task_id = task_data["id"]
         logger.info("runner.executing_task", task_id=task_id)
         # Safety: clear any leaked component state
         self._pending_components.clear()
@@ -853,23 +863,17 @@ class AgentRunner:
             # 1. Transition task to 'doing'
             await self.client.move_task(task_id, "doing")
 
-            # 2. Fetch full task details
-            task = await self.client.get_task(task_id)
-            stream_id = task.session_id or task_id
+            stream_id = task_data.get("session_id") or task_id
 
             await self._emit_stream_event(stream_id, "phase_start", {"phase": "context_inject"})
 
-            # 3. Get latest context injection (routes through Core to Keeper)
-            context_summary = await self.client.get_context(
-                self.config.id,
-                task.description or task.title,
-                session_id=task.session_id,
-            )
+            # 2. Read context_summary inline from the WebSocket payload
+            context_summary = task_data.get("context_summary") or ""
 
             await self._emit_stream_event(stream_id, "phase_end", {"phase": "context_inject", "duration_ms": 0})
 
             system_prompt = self._assemble_system_prompt(context_summary)
-            messages = [{"role": "user", "content": task.input}]
+            messages = [{"role": "user", "content": task_data.get("input", "")}]
 
             # Circuit breaker check
             if self._model_circuit_open:
@@ -902,7 +906,7 @@ class AgentRunner:
                 await self._emit_stream_event(
                     stream_id,
                     "turn_start",
-                    {"turn_number": turn_number, "model": self.config.model_id, "estimated_tokens": len(str(messages)) // 4},
+                    {"turn_number": turn_number, "model": self.config.model_id, "estimated_tokens": count_message_tokens(messages)},
                 )
 
                 # 4. LLM Completion via LiteLLM
@@ -1178,7 +1182,7 @@ class AgentRunner:
                     {
                         "turn_number": turn_number,
                         "model": self.config.model_id,
-                        "estimated_tokens": len(str(messages)) // 4,
+                        "estimated_tokens": count_message_tokens(messages),
                     },
                 )
 

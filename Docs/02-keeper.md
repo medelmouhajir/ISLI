@@ -55,7 +55,14 @@ POST http://localhost:11434/api/embed
 
 Before any agent executes a task, the Keeper is called to produce a **context injection block**. Unlike standard RAG, ISLI uses a **pre-computed fast-path** to eliminate LLM latency during the injection phase.
 
-**Input to Keeper:**
+**Architecture (2026-06-04 Refactor):**
+- **Ingress-driven**: When a message or task is created, Core writes to a Redis Stream (`context:requests`) immediately.
+- **Unified Worker**: A single `ContextWorker` consumes from the stream via `XREADGROUP`, replacing the old dual polling workers (`ContextInjectorWorker` + `SessionContextInjectorWorker`).
+- **Caching**: The fully assembled `context_summary` string is cached in Redis (`ctx:full:{agent_id}:{turn_hash}`) with a short TTL (~30s). Cache hits skip the Keeper entirely.
+- **Event-driven invalidation**: Agent config updates invalidate identity cache; `JournalWorker` flushes invalidate journal cache; new messages naturally miss via turn-hash.
+- **Complexity delta re-route**: If `|new_score - locked_score| > 6`, the session forces a model re-route.
+
+**Input to Keeper (on cache miss):**
 - Agent metadata (Name, ID, Description)
 - Current **Structured Session Journal** (from Session Tier 1)
 - Last 3 raw messages (for immediate verbatim context)

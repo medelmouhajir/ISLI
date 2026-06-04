@@ -28,7 +28,7 @@ class CostDashboardOut(BaseModel):
 @router.get("/cost/dashboard", response_model=CostDashboardOut)
 async def cost_dashboard(
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     agents_result = await db.execute(select(func.count()).select_from(Agent).where(Agent.deleted_at.is_(None)))
     total_agents = agents_result.scalar() or 0
@@ -97,7 +97,7 @@ class ConsentCreate(BaseModel):
 async def create_consent(
     payload: ConsentCreate,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     consent = UserConsent(
         user_id=payload.user_id,
@@ -180,7 +180,7 @@ class BudgetStatusOut(BaseModel):
 async def create_user_budget(
     payload: BudgetCreate,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     if not payload.user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
@@ -204,7 +204,7 @@ async def create_user_budget(
 async def create_org_budget(
     payload: BudgetCreate,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth)
+    admin: str = Depends(require_admin_auth)
 ):
     if not payload.org_id:
         raise HTTPException(status_code=400, detail="org_id is required")

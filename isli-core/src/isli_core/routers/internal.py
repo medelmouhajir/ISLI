@@ -40,7 +40,7 @@ async def verify_access(
     scope: ScopeType,
     scope_id: str,
     db: AsyncSession = Depends(get_db),
-    _auth: dict = Depends(require_internal_auth)
+    auth: dict = Depends(require_internal_auth)
 ):
     """
     Internal endpoint for other services to verify agent access to a scope.

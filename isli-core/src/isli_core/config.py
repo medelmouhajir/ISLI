@@ -1,12 +1,22 @@
 import os
 import secrets
 from functools import lru_cache
+from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV = os.getenv("ISLI_ENV", "development").lower()
 IS_DEV = ENV in ("development", "dev", "local", "test")
+
+
+def _read_secret_file(v):
+    if isinstance(v, str) and v.startswith("/run/secrets/"):
+        try:
+            return Path(v).read_text().strip()
+        except FileNotFoundError as exc:
+            raise ValueError(f"Secret file not found: {v}") from exc
+    return v
 
 
 class Settings(BaseSettings):
@@ -14,6 +24,8 @@ class Settings(BaseSettings):
         extra="ignore",
         env_file=os.getenv("ISLI_ENV_FILE", ".env"),
     )
+
+    isli_env: str = os.getenv("ISLI_ENV", "development")
 
     # In development, safe defaults are acceptable. In production, these must be set.
     database_url: str = "sqlite+aiosqlite:///./isli_dev.db" if IS_DEV else ""
@@ -52,6 +64,16 @@ class Settings(BaseSettings):
     vapid_private_key: str = ""
     vapid_public_key: str = ""
     vapid_claims_email: str = "admin@isli-ai.local"
+
+    @field_validator("jwt_secret", "admin_api_key", "pii_encryption_key", mode="before")
+    @classmethod
+    def _read_secret_file(cls, v):
+        if isinstance(v, str) and v.startswith("/run/secrets/"):
+            try:
+                return Path(v).read_text().strip()
+            except FileNotFoundError as exc:
+                raise ValueError(f"Secret file not found: {v}") from exc
+        return v
 
     @model_validator(mode="after")
     def _validate(self):

@@ -31,3 +31,4 @@ websockets==15.0
 google-genai>=0.8.0
 docker>=7.0
 croniter==6.0.0
+tiktoken>=0.7

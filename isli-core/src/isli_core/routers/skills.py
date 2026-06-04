@@ -28,46 +28,57 @@ class SkillInstallRequest(BaseModel):
     skill_id: str
     git_url: str
 
+# Consolidated upstream URLs — replaces ~25 SKILL_*_URL env vars.
+# In Docker Compose: SKILLS_URL, WORKSPACE_URL, AUDIO_URL, KEEPER_URL, CHANNELS_URL.
+_SKILLS_URL = os.getenv("SKILLS_URL", "http://localhost:8100")
+_WORKSPACE_URL = os.getenv("WORKSPACE_URL", "http://localhost:8300")
+_AUDIO_URL = os.getenv("AUDIO_URL", "http://localhost:8400")
+
 SKILL_REGISTRY = {
-    "web-fetch": os.getenv("SKILL_WEB_FETCH_URL", "http://localhost:8100"),
-    "web-search": os.getenv("SKILL_WEB_SEARCH_URL", "http://localhost:8100"),
-    "summarize": os.getenv("SKILL_SUMMARIZE_URL", "http://localhost:8100"),
-    "translate": os.getenv("SKILL_TRANSLATE_URL", "http://localhost:8100"),
-    "shell-exec": os.getenv("SKILL_SHELL_EXEC_URL", "http://localhost:8100"),
-    "file-read": os.getenv("SKILL_FILE_READ_URL", "http://localhost:8300"),
-    "file-write": os.getenv("SKILL_FILE_WRITE_URL", "http://localhost:8300"),
-    "file-list": os.getenv("SKILL_FILE_LIST_URL", "http://localhost:8300"),
-    "file-delete": os.getenv("SKILL_FILE_DELETE_URL", "http://localhost:8300"),
-    "summarize-text": os.getenv("SKILL_SUMMARIZE_TEXT_URL", "http://localhost:8100"),
-    "embed-text": os.getenv("SKILL_EMBED_TEXT_URL", "http://localhost:8100"),
-    "test-skill": os.getenv("SKILL_TEST_URL", "http://localhost:8100"),
-    "register-skill": os.getenv("SKILL_REGISTER_URL", "http://localhost:8100"),
-    "update-skill": os.getenv("SKILL_UPDATE_URL", "http://localhost:8100"),
-    "interactive-debugger": os.getenv("SKILL_INTERACTIVE_DEBUGGER_URL", "http://localhost:8100"),
-    "speech-to-text": os.getenv("SKILL_SPEECH_TO_TEXT_URL", "http://localhost:8400/stt"),
-    "text-to-speech": os.getenv("SKILL_TEXT_TO_SPEECH_URL", "http://localhost:8400/tts"),
-    "db-query": os.getenv("SKILL_DB_QUERY_URL", "http://localhost:8100"),
-    "git-clone": os.getenv("SKILL_GIT_CLONE_URL", "http://localhost:8300"),
-    "git-status": os.getenv("SKILL_GIT_STATUS_URL", "http://localhost:8300"),
-    "git-commit": os.getenv("SKILL_GIT_COMMIT_URL", "http://localhost:8300"),
-    "git-push": os.getenv("SKILL_GIT_PUSH_URL", "http://localhost:8300"),
-    "git-pull": os.getenv("SKILL_GIT_PULL_URL", "http://localhost:8300"),
-    "git-branch-list": os.getenv("SKILL_GIT_BRANCH_LIST_URL", "http://localhost:8300"),
-    "git-branch-create": os.getenv("SKILL_GIT_BRANCH_CREATE_URL", "http://localhost:8300"),
-    "git-checkout": os.getenv("SKILL_GIT_CHECKOUT_URL", "http://localhost:8300"),
-    "git-log": os.getenv("SKILL_GIT_LOG_URL", "http://localhost:8300"),
-    "pip-install": os.getenv("SKILL_PIP_INSTALL_URL", "http://localhost:8300"),
-    "pip-list": os.getenv("SKILL_PIP_LIST_URL", "http://localhost:8300"),
-    "web-browse-navigate": os.getenv("SKILL_WEB_BROWSE_NAVIGATE_URL", "http://localhost:8100/browse"),
-    "web-browse-snapshot": os.getenv("SKILL_WEB_BROWSE_SNAPSHOT_URL", "http://localhost:8100/browse"),
-    "web-browse-click": os.getenv("SKILL_WEB_BROWSE_CLICK_URL", "http://localhost:8100/browse"),
-    "web-browse-type": os.getenv("SKILL_WEB_BROWSE_TYPE_URL", "http://localhost:8100/browse"),
-    "web-browse-press": os.getenv("SKILL_WEB_BROWSE_PRESS_URL", "http://localhost:8100/browse"),
-    "web-browse-scroll": os.getenv("SKILL_WEB_BROWSE_SCROLL_URL", "http://localhost:8100/browse"),
-    "web-browse-back": os.getenv("SKILL_WEB_BROWSE_BACK_URL", "http://localhost:8100/browse"),
-    "web-browse-console": os.getenv("SKILL_WEB_BROWSE_CONSOLE_URL", "http://localhost:8100/browse"),
-    "web-browse-vision": os.getenv("SKILL_WEB_BROWSE_VISION_URL", "http://localhost:8100/browse"),
-    "web-browse-images": os.getenv("SKILL_WEB_BROWSE_IMAGES_URL", "http://localhost:8100/browse"),
+    # skills microservice
+    "web-fetch": _SKILLS_URL,
+    "web-search": _SKILLS_URL,
+    "summarize": _SKILLS_URL,
+    "translate": _SKILLS_URL,
+    "shell-exec": _SKILLS_URL,
+    "summarize-text": _SKILLS_URL,
+    "embed-text": _SKILLS_URL,
+    "test-skill": _SKILLS_URL,
+    "register-skill": _SKILLS_URL,
+    "update-skill": _SKILLS_URL,
+    "interactive-debugger": _SKILLS_URL,
+    "db-query": _SKILLS_URL,
+    # workspace service
+    "file-read": _WORKSPACE_URL,
+    "file-write": _WORKSPACE_URL,
+    "file-list": _WORKSPACE_URL,
+    "file-delete": _WORKSPACE_URL,
+    "git-clone": _WORKSPACE_URL,
+    "git-status": _WORKSPACE_URL,
+    "git-commit": _WORKSPACE_URL,
+    "git-push": _WORKSPACE_URL,
+    "git-pull": _WORKSPACE_URL,
+    "git-branch-list": _WORKSPACE_URL,
+    "git-branch-create": _WORKSPACE_URL,
+    "git-checkout": _WORKSPACE_URL,
+    "git-log": _WORKSPACE_URL,
+    "pip-install": _WORKSPACE_URL,
+    "pip-list": _WORKSPACE_URL,
+    # audio service
+    "speech-to-text": f"{_AUDIO_URL}/stt",
+    "text-to-speech": f"{_AUDIO_URL}/tts",
+    # browser automation (hosted on skills service)
+    "web-browse-navigate": f"{_SKILLS_URL}/browse",
+    "web-browse-snapshot": f"{_SKILLS_URL}/browse",
+    "web-browse-click": f"{_SKILLS_URL}/browse",
+    "web-browse-type": f"{_SKILLS_URL}/browse",
+    "web-browse-press": f"{_SKILLS_URL}/browse",
+    "web-browse-scroll": f"{_SKILLS_URL}/browse",
+    "web-browse-back": f"{_SKILLS_URL}/browse",
+    "web-browse-console": f"{_SKILLS_URL}/browse",
+    "web-browse-vision": f"{_SKILLS_URL}/browse",
+    "web-browse-images": f"{_SKILLS_URL}/browse",
+    # inline handlers (executed within Core)
     "get-secret": "inline",
     "memory-save": "inline",
     "memory-delete": "inline",
@@ -431,8 +442,8 @@ async def skill_proxy(
     try:
         SkillProxyAuth.verify(request)
     except HTTPException:
-        # In dev mode, allow unauthenticated if no header is present
-        if request.headers.get("X-Internal-Auth") is None:
+        # In dev mode ONLY, allow unauthenticated if no header is present
+        if get_settings().isli_env == "development" and request.headers.get("X-Internal-Auth") is None:
             logger.warning("skills.dev_mode_unauthenticated", skill=skill_name)
         else:
             raise
@@ -555,7 +566,6 @@ async def skill_proxy(
 
             from sqlalchemy import select
             from isli_core.models import Agent, Session, ChannelMessage
-            from isli_core.config import get_settings
             from isli_core.retry import exponential_backoff
             from datetime import datetime, timezone, timedelta
 
@@ -676,6 +686,7 @@ async def skill_proxy(
                         resp = await client.post(
                             f"{settings.channels_url}/send",
                             json=payload_channels,
+                            headers={"X-Internal-Auth": create_internal_token("core", scopes=["channels:send"], expires_minutes=5)},
                             timeout=10.0,
                         )
                         resp.raise_for_status()

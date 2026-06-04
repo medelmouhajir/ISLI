@@ -7,7 +7,6 @@ services:
       context: ./isli-core
       dockerfile: Dockerfile
     environment:
-      ISLI_ENV: development
       # Use the main postgres service instead of local sqlite
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
       REDIS_URL: redis://redis:6379/0
@@ -27,7 +26,6 @@ services:
       context: ./isli-keeper
       dockerfile: Dockerfile
     environment:
-      ISLI_ENV: development
       DATABASE_URL: postgresql://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-isli}
     volumes:
       - ./isli-keeper/src:/app/src:ro
@@ -37,8 +35,6 @@ services:
     build:
       context: ./isli-channels
       dockerfile: Dockerfile
-    environment:
-      ISLI_ENV: development
     volumes:
       - ./isli-channels/src:/app/src:ro
 
@@ -46,8 +42,6 @@ services:
     build:
       context: ./isli-skills
       dockerfile: Dockerfile
-    environment:
-      ISLI_ENV: development
     volumes:
       - ./isli-skills/src:/app/src:ro
       - ./workspaces:/workspaces:ro
@@ -57,7 +51,6 @@ services:
       context: ./isli-workspace
       dockerfile: Dockerfile
     environment:
-      ISLI_ENV: development
       WORKSPACE_BASE_PATH: /workspaces
       REDIS_URL: redis://redis:6379/4
     volumes:

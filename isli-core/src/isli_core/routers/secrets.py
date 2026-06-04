@@ -38,7 +38,7 @@ class SecretOut(BaseModel):
 async def create_secret(
     request: SecretCreateRequest,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     """Create or update a secret for an agent."""
     secret = await create_or_update_secret(
@@ -58,7 +58,7 @@ async def create_secret(
 async def get_secrets(
     agent_id: str = Query(..., description="Agent ID to list secrets for"),
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     """List secret names and metadata for an agent. Values are never exposed."""
     return await list_secrets(db, agent_id)
@@ -69,7 +69,7 @@ async def remove_secret(
     name: str,
     agent_id: str = Query(..., description="Agent ID owning the secret"),
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     """Delete a secret by name."""
     deleted = await delete_secret(db, agent_id, name)

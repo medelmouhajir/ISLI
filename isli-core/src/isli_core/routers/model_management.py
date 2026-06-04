@@ -120,7 +120,7 @@ def _check_active_sessions():
 @router.post("/activate")
 async def activate_model(
     payload: ModelActivateRequest,
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     await _check_active_sessions()()
 
@@ -147,7 +147,7 @@ async def activate_model(
 @router.post("/remove")
 async def remove_model(
     payload: ModelRemoveRequest,
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     # Validate model appears in any permitted slot
     all_permitted = set()
@@ -188,7 +188,7 @@ async def remove_model(
 @router.post("/pull", status_code=status.HTTP_202_ACCEPTED)
 async def pull_model(
     payload: ModelPullRequest,
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
     db: Any = None,
 ):
     # Active session validation

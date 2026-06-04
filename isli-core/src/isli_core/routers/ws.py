@@ -1,7 +1,7 @@
 import asyncio
 import json
 import structlog
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from isli_core.redis_client import get_redis
 from isli_core.auth import verify_internal_token, _check_token_revocation
 
@@ -111,7 +111,12 @@ async def board_ws(websocket: WebSocket):
         manager.disconnect_board(websocket)
 
 @router.websocket("/agents/{agent_id}")
-async def agent_ws(websocket: WebSocket, agent_id: str, token: str = Query(None)):
+async def agent_ws(websocket: WebSocket, agent_id: str):
+    # Prefer Authorization header (avoids token leakage to proxy logs).
+    # Fallback to query param for backward compatibility during transition.
+    token = websocket.headers.get("authorization", "").replace("Bearer ", "")
+    if not token:
+        token = websocket.query_params.get("token")
     if not token:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return

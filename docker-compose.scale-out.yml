@@ -1,56 +1,57 @@
-# ISLI — Scale-Out Docker Compose (Production-like)
-# Extends the base setup with Traefik, Redis Sentinel, and all 5 services.
-
 services:
   traefik:
     image: traefik:v3.2
     command:
-      - --api.dashboard=false
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
-      - --certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_EMAIL:-admin@example.com}
-      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
-      - --accesslog=true
-      - --accesslog.format=json
-      - --log.level=INFO
+    - --api.dashboard=false
+    - --providers.docker=true
+    - --providers.docker.exposedbydefault=false
+    - --entrypoints.web.address=:80
+    - --entrypoints.websecure.address=:443
+    - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+    - --certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_EMAIL:-admin@example.com}
+    - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+    - --accesslog=true
+    - --accesslog.format=json
+    - --log.level=INFO
     ports:
-      - "80:80"
-      - "443:443"
+    - 80:80
+    - 443:443
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - letsencrypt:/letsencrypt
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    - letsencrypt:/letsencrypt
     networks:
-      - isli
+    - isli-public
+    - isli-mesh
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    environment:
+      SKILLS_URL: http://skills:8100
   postgres:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-isli}
       POSTGRES_USER: ${POSTGRES_USER:-isli}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?error}
+      SKILLS_URL: http://skills:8100
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+    - postgres_data:/var/lib/postgresql/data
     networks:
-      - isli
+    - isli-data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-isli}"]
+      test:
+      - CMD-SHELL
+      - pg_isready -U ${POSTGRES_USER:-isli}
       interval: 10s
       timeout: 5s
       retries: 5
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
   pgbouncer:
     image: pgbouncer/pgbouncer:1.22
     environment:
@@ -61,90 +62,95 @@ services:
       DATABASES_PASSWORD: ${POSTGRES_PASSWORD:?error}
       POOL_MODE: transaction
       MAX_CLIENT_CONN: 10000
+      SKILLS_URL: http://skills:8100
     depends_on:
       postgres:
         condition: service_healthy
     networks:
-      - isli
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
   redis-master:
     image: redis:7-alpine
     command: redis-server --appendonly yes
     volumes:
-      - redis_master_data:/data
+    - redis_master_data:/data
     networks:
-      - isli
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    environment:
+      SKILLS_URL: http://skills:8100
   redis-replica:
     image: redis:7-alpine
     command: redis-server --replicaof redis-master 6379 --appendonly yes
     volumes:
-      - redis_replica_data:/data
+    - redis_replica_data:/data
     depends_on:
-      - redis-master
+    - redis-master
     networks:
-      - isli
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    environment:
+      SKILLS_URL: http://skills:8100
   redis-sentinel-1:
     image: redis:7-alpine
     command: redis-sentinel /etc/redis/sentinel.conf
     volumes:
-      - ./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
+    - ./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
     depends_on:
-      - redis-master
+    - redis-master
     networks:
-      - isli
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    environment:
+      SKILLS_URL: http://skills:8100
   redis-sentinel-2:
     image: redis:7-alpine
     command: redis-sentinel /etc/redis/sentinel.conf
     volumes:
-      - ./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
+    - ./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
     depends_on:
-      - redis-master
+    - redis-master
     networks:
-      - isli
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    environment:
+      SKILLS_URL: http://skills:8100
   redis-sentinel-3:
     image: redis:7-alpine
     command: redis-sentinel /etc/redis/sentinel.conf
     volumes:
-      - ./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
+    - ./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro
     depends_on:
-      - redis-master
+    - redis-master
     networks:
-      - isli
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    environment:
+      SKILLS_URL: http://skills:8100
   isli-core:
     build:
       context: ./isli-core
@@ -153,16 +159,17 @@ services:
       ISLI_ENV: production
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-isli}:${POSTGRES_PASSWORD}@pgbouncer:5432/${POSTGRES_DB:-isli}
       REDIS_URL: redis://redis-master:6379/0
-      JWT_SECRET: ${JWT_SECRET:?error}
-      PII_ENCRYPTION_KEY: ${PII_ENCRYPTION_KEY:?error}
-      ADMIN_API_KEY: ${ADMIN_API_KEY:?error}
+      JWT_SECRET: /run/secrets/jwt_secret
+      PII_ENCRYPTION_KEY: /run/secrets/pii_encryption_key
+      ADMIN_API_KEY: /run/secrets/admin_api_key
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      SKILLS_URL: http://skills:8100
     labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.isli-core.rule=Host(`api.isli.local`) || PathPrefix(`/api`)"
-      - "traefik.http.routers.isli-core.entrypoints=web"
-      - "traefik.http.services.isli-core.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.isli-core.loadbalancer.healthcheck.interval=10s"
+    - traefik.enable=true
+    - traefik.http.routers.isli-core.rule=Host(`api.isli.local`) || PathPrefix(`/api`)
+    - traefik.http.routers.isli-core.entrypoints=web
+    - traefik.http.services.isli-core.loadbalancer.healthcheck.path=/health
+    - traefik.http.services.isli-core.loadbalancer.healthcheck.interval=10s
     deploy:
       replicas: 3
       resources:
@@ -173,13 +180,17 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - isli
+    - isli-mesh
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    secrets:
+    - jwt_secret
+    - admin_api_key
+    - pii_encryption_key
   isli-keeper:
     build:
       context: ./isli-keeper
@@ -190,12 +201,14 @@ services:
       REDIS_URL: redis://redis-master:6379/1
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      JWT_SECRET: /run/secrets/jwt_secret
+      SKILLS_URL: http://skills:8100
     labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.isli-keeper.rule=PathPrefix(`/keeper`)"
-      - "traefik.http.routers.isli-keeper.entrypoints=web"
-      - "traefik.http.services.isli-keeper.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.isli-keeper.loadbalancer.healthcheck.interval=10s"
+    - traefik.enable=true
+    - traefik.http.routers.isli-keeper.rule=PathPrefix(`/keeper`)
+    - traefik.http.routers.isli-keeper.entrypoints=web
+    - traefik.http.services.isli-keeper.loadbalancer.healthcheck.path=/health
+    - traefik.http.services.isli-keeper.loadbalancer.healthcheck.interval=10s
     deploy:
       replicas: 2
       resources:
@@ -203,16 +216,18 @@ services:
           cpus: '1.0'
           memory: 512M
     depends_on:
-      - redis-master
-      - nginx-ollama
+    - redis-master
+    - nginx-ollama
     networks:
-      - isli
+    - isli-mesh
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    secrets:
+    - jwt_secret
   isli-channels:
     build:
       context: ./isli-channels
@@ -224,12 +239,14 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      JWT_SECRET: /run/secrets/jwt_secret
+      SKILLS_URL: http://skills:8100
     labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.isli-channels.rule=PathPrefix(`/channels`)"
-      - "traefik.http.routers.isli-channels.entrypoints=web"
-      - "traefik.http.services.isli-channels.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.isli-channels.loadbalancer.healthcheck.interval=10s"
+    - traefik.enable=true
+    - traefik.http.routers.isli-channels.rule=PathPrefix(`/channels`)
+    - traefik.http.routers.isli-channels.entrypoints=web
+    - traefik.http.services.isli-channels.loadbalancer.healthcheck.path=/health
+    - traefik.http.services.isli-channels.loadbalancer.healthcheck.interval=10s
     deploy:
       replicas: 2
       resources:
@@ -237,16 +254,18 @@ services:
           cpus: '1.0'
           memory: 512M
     depends_on:
-      - redis-master
-      - isli-core
+    - redis-master
+    - isli-core
     networks:
-      - isli
+    - isli-mesh
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    secrets:
+    - jwt_secret
   isli-skills:
     build:
       context: ./isli-skills
@@ -256,12 +275,14 @@ services:
       REDIS_URL: redis://redis-master:6379/3
       CORE_API_URL: http://isli-core:8000
       SKILL_REGISTRY_TOKEN: ${SKILL_REGISTRY_TOKEN}
+      JWT_SECRET: /run/secrets/jwt_secret
+      SKILLS_URL: http://skills:8100
     labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.isli-skills.rule=PathPrefix(`/skills`)"
-      - "traefik.http.routers.isli-skills.entrypoints=web"
-      - "traefik.http.services.isli-skills.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.isli-skills.loadbalancer.healthcheck.interval=10s"
+    - traefik.enable=true
+    - traefik.http.routers.isli-skills.rule=PathPrefix(`/skills`)
+    - traefik.http.routers.isli-skills.entrypoints=web
+    - traefik.http.services.isli-skills.loadbalancer.healthcheck.path=/health
+    - traefik.http.services.isli-skills.loadbalancer.healthcheck.interval=10s
     deploy:
       replicas: 2
       resources:
@@ -269,16 +290,18 @@ services:
           cpus: '1.0'
           memory: 512M
     depends_on:
-      - redis-master
-      - isli-core
+    - redis-master
+    - isli-core
     networks:
-      - isli
+    - isli-mesh
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    secrets:
+    - jwt_secret
   isli-workspace:
     build:
       context: ./isli-workspace
@@ -287,14 +310,16 @@ services:
       ISLI_ENV: production
       WORKSPACE_BASE_PATH: /workspaces
       REDIS_URL: redis://redis-master:6379/4
+      JWT_SECRET: /run/secrets/jwt_secret
+      SKILLS_URL: http://skills:8100
     volumes:
-      - workspace_data:/workspaces
+    - workspace_data:/workspaces
     labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.isli-workspace.rule=PathPrefix(`/workspace`)"
-      - "traefik.http.routers.isli-workspace.entrypoints=web"
-      - "traefik.http.services.isli-workspace.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.isli-workspace.loadbalancer.healthcheck.interval=10s"
+    - traefik.enable=true
+    - traefik.http.routers.isli-workspace.rule=PathPrefix(`/workspace`)
+    - traefik.http.routers.isli-workspace.entrypoints=web
+    - traefik.http.services.isli-workspace.loadbalancer.healthcheck.path=/health
+    - traefik.http.services.isli-workspace.loadbalancer.healthcheck.interval=10s
     deploy:
       replicas: 2
       resources:
@@ -302,25 +327,27 @@ services:
           cpus: '0.5'
           memory: 256M
     depends_on:
-      - redis-master
+    - redis-master
     networks:
-      - isli
+    - isli-mesh
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    secrets:
+    - jwt_secret
   isli-board:
     build:
       context: ./isli-board
       dockerfile: Dockerfile
     labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.isli-board.rule=Host(`isli.local`) || PathPrefix(`/`)"
-      - "traefik.http.routers.isli-board.entrypoints=web"
-      - "traefik.http.services.isli-board.loadbalancer.healthcheck.path=/"
-      - "traefik.http.services.isli-board.loadbalancer.healthcheck.interval=10s"
+    - traefik.enable=true
+    - traefik.http.routers.isli-board.rule=Host(`isli.local`) || PathPrefix(`/`)
+    - traefik.http.routers.isli-board.entrypoints=web
+    - traefik.http.services.isli-board.loadbalancer.healthcheck.path=/
+    - traefik.http.services.isli-board.loadbalancer.healthcheck.interval=10s
     deploy:
       replicas: 2
       resources:
@@ -328,22 +355,24 @@ services:
           cpus: '0.5'
           memory: 256M
     networks:
-      - isli
+    - isli-public
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    environment:
+      SKILLS_URL: http://skills:8100
   ollama-1:
     image: ollama/ollama:latest
     environment:
-      - OLLAMA_KEEP_ALIVE=-1
-      - OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-8}
+      OLLAMA_KEEP_ALIVE: '-1'
+      OLLAMA_NUM_THREADS: ${OLLAMA_NUM_THREADS:-8}
+      SKILLS_URL: http://skills:8100
     volumes:
-      - ollama_data:/root/.ollama
+    - ollama_data:/root/.ollama
     networks:
-      - isli
+    - isli-data
     deploy:
       resources:
         limits:
@@ -352,18 +381,18 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
   ollama-2:
     image: ollama/ollama:latest
     environment:
-      - OLLAMA_KEEP_ALIVE=-1
-      - OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-8}
+      OLLAMA_KEEP_ALIVE: '-1'
+      OLLAMA_NUM_THREADS: ${OLLAMA_NUM_THREADS:-8}
+      SKILLS_URL: http://skills:8100
     volumes:
-      - ollama_data:/root/.ollama
+    - ollama_data:/root/.ollama
     networks:
-      - isli
+    - isli-data
     deploy:
       resources:
         limits:
@@ -372,49 +401,60 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
   nginx-ollama:
     image: nginx:alpine
     volumes:
-      - ./infra/nginx/ollama.conf:/etc/nginx/conf.d/default.conf:ro
+    - ./infra/nginx/ollama.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - ollama-1
-      - ollama-2
+    - ollama-1
+    - ollama-2
     networks:
-      - isli
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
+    environment:
+      SKILLS_URL: http://skills:8100
   chromadb:
     image: chromadb/chroma:0.6.3
     volumes:
-      - chroma_data:/chroma/chroma
+    - chroma_data:/chroma/chroma
     environment:
-      - IS_PERSISTENT=TRUE
-      - PERSIST_DIRECTORY=/chroma/chroma
-      - ANONYMIZED_TELEMETRY=FALSE
+      IS_PERSISTENT: 'TRUE'
+      PERSIST_DIRECTORY: /chroma/chroma
+      ANONYMIZED_TELEMETRY: 'FALSE'
+      SKILLS_URL: http://skills:8100
     networks:
-      - isli
+    - isli-data
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
-
+        max-size: 10m
+        max-file: '3'
 networks:
-  isli:
+  isli-public:
     driver: bridge
-
+  isli-mesh:
+    driver: bridge
+  isli-data:
+    driver: bridge
+    internal: true
 volumes:
-  letsencrypt:
-  postgres_data:
-  redis_master_data:
-  redis_replica_data:
-  chroma_data:
-  ollama_data:
-  workspace_data:
+  letsencrypt: null
+  postgres_data: null
+  redis_master_data: null
+  redis_replica_data: null
+  chroma_data: null
+  ollama_data: null
+  workspace_data: null
+secrets:
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  admin_api_key:
+    file: ./secrets/admin_api_key.txt
+  pii_encryption_key:
+    file: ./secrets/pii_encryption_key.txt

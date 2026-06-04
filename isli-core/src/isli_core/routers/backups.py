@@ -39,7 +39,7 @@ class RestoreOut(BaseModel):
 
 @router.post("/chromadb/trigger", response_model=TriggerBackupOut)
 async def trigger_backup(
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Trigger an on-demand ChromaDB backup."""
@@ -64,7 +64,7 @@ async def trigger_backup(
 @router.get("/chromadb", response_model=BackupListOut)
 async def list_backups(
     limit: int = 20,
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """List ChromaDB backup history."""
@@ -91,7 +91,7 @@ async def list_backups(
 @router.post("/chromadb/restore", response_model=RestoreOut)
 async def restore_backup(
     request: RestoreRequest,
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Queue a restore operation. Returns a runbook URL — the actual volume swap is manual."""

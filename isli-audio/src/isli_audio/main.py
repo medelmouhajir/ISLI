@@ -111,7 +111,7 @@ async def stt_transcribe(
     request: Request,
     audio: UploadFile | None = File(None),
     language: str = Form("auto"),
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     """Transcribe uploaded audio file to text. Supports multipart/form-data upload."""
     metrics = get_metrics()
@@ -174,7 +174,7 @@ async def stt_transcribe(
 @app.post("/tts/synthesize")
 async def tts_synthesize(
     req: SynthesizeRequest,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     """Synthesize text to speech audio. Returns base64-encoded WAV."""
     metrics = get_metrics()
@@ -222,7 +222,7 @@ async def tts_synthesize(
 # ─── Admin ───
 
 @app.get("/admin/config")
-async def admin_config(_auth: dict = Depends(require_internal_auth)):
+async def admin_config(auth: dict = Depends(require_internal_auth)):
     return {
         "config": {
             "stt": model_manager.get_model("stt"),
@@ -236,7 +236,7 @@ async def admin_config(_auth: dict = Depends(require_internal_auth)):
 @app.post("/admin/activate")
 async def admin_activate(
     req: ActivateRequest,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     if req.slot not in ("stt", "tts", "language"):
         raise HTTPException(status_code=400, detail=f"Invalid slot: {req.slot}")
@@ -268,7 +268,7 @@ async def admin_activate(
 @app.post("/admin/pull")
 async def admin_pull(
     req: PullRequest,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     if req.slot == "stt":
         # For STT, faster-whisper downloads on first use via load(). We just verify it's valid.
@@ -298,7 +298,7 @@ async def admin_pull(
 @app.post("/admin/remove")
 async def admin_remove(
     req: RemoveRequest,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     settings = get_settings()
 
@@ -333,7 +333,7 @@ async def admin_remove(
 # ─── Models listing ───
 
 @app.get("/models")
-async def list_models(_auth: dict = Depends(require_internal_auth)):
+async def list_models(auth: dict = Depends(require_internal_auth)):
     """List available/downloaded audio models."""
     settings = get_settings()
 
@@ -363,7 +363,7 @@ async def list_models(_auth: dict = Depends(require_internal_auth)):
 # ─── Dashboard ───
 
 @app.get("/dashboard")
-async def dashboard(_auth: dict = Depends(require_internal_auth)):
+async def dashboard(auth: dict = Depends(require_internal_auth)):
     metrics = get_metrics()
     snapshot = metrics.get_snapshot()
 

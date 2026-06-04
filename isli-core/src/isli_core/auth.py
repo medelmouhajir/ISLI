@@ -112,6 +112,11 @@ class SkillProxyAuth:
     def verify(request: Request) -> dict[str, Any]:
         auth = request.headers.get("X-Internal-Auth")
         if not auth:
+            # Also accept Authorization: Bearer <token> (agent JWTs)
+            bearer = request.headers.get("Authorization", "")
+            if bearer.startswith("Bearer "):
+                auth = bearer[7:]
+        if not auth:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing X-Internal-Auth header",

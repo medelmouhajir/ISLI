@@ -18,6 +18,7 @@ dependencies = [
     "python-dotenv",
     "redis",
     "pyyaml",
+    "tiktoken>=0.7",
 ]
 requires-python = ">=3.10"
 

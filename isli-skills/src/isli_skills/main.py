@@ -326,13 +326,13 @@ async def live():
 
 
 @app.get("/skills")
-async def list_skills(_auth: dict = Depends(require_internal_auth)):
+async def list_skills(auth: dict = Depends(require_internal_auth)):
     return {"skills": list(SKILL_REGISTRY.values())}
 
 
 @app.post("/register", status_code=201)
 @app.post("/skills", status_code=201)
-async def register_skill(skill: RegisterSkill, _auth: dict = Depends(require_internal_auth)):
+async def register_skill(skill: RegisterSkill, auth: dict = Depends(require_internal_auth)):
     if skill.name in SKILL_REGISTRY:
         # Update existing skill
         logger.info("skills.updating", name=skill.name)
@@ -351,7 +351,7 @@ async def register_skill(skill: RegisterSkill, _auth: dict = Depends(require_int
 
 
 @app.post("/update")
-async def update_skill(body: UpdateSkillRequest, _auth: dict = Depends(require_internal_auth)):
+async def update_skill(body: UpdateSkillRequest, auth: dict = Depends(require_internal_auth)):
     if body.name not in SKILL_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Skill '{body.name}' not found")
 
@@ -377,7 +377,7 @@ async def update_skill(body: UpdateSkillRequest, _auth: dict = Depends(require_i
 
 
 @app.post("/test")
-async def test_skill(request: TestSkillRequest, _auth: dict = Depends(require_internal_auth)):
+async def test_skill(request: TestSkillRequest, auth: dict = Depends(require_internal_auth)):
     """Dry-run endpoint for testing dynamic skill code without registration."""
     logger.info("skills.test_request")
     try:
@@ -388,7 +388,7 @@ async def test_skill(request: TestSkillRequest, _auth: dict = Depends(require_in
 
 
 @app.post("/debug")
-async def debug_skill(request: DebugRequest, _auth: dict = Depends(require_internal_auth)):
+async def debug_skill(request: DebugRequest, auth: dict = Depends(require_internal_auth)):
     """Interactive debugger endpoint with breakpoints, trace, and variable inspection."""
     logger.info("skills.debug_request", mode=request.mode, breakpoints=len(request.breakpoints))
     try:
@@ -414,7 +414,7 @@ async def debug_skill(request: DebugRequest, _auth: dict = Depends(require_inter
 
 
 @app.post("/skills/{name}/usage")
-async def record_usage(name: str, _auth: dict = Depends(require_internal_auth)):
+async def record_usage(name: str, auth: dict = Depends(require_internal_auth)):
     """Increment usage metrics for a skill. Called by Core proxy for external skills."""
     skill = SKILL_REGISTRY.get(name)
     if not skill:
@@ -434,7 +434,7 @@ async def record_usage(name: str, _auth: dict = Depends(require_internal_auth)):
 
 
 @app.get("/skills/{name}/health")
-async def skill_health(name: str, _auth: dict = Depends(require_internal_auth)):
+async def skill_health(name: str, auth: dict = Depends(require_internal_auth)):
     skill = SKILL_REGISTRY.get(name)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
@@ -442,7 +442,7 @@ async def skill_health(name: str, _auth: dict = Depends(require_internal_auth)):
 
 
 @app.post("/browse")
-async def browse(request: BrowseRequest, _auth: dict = Depends(require_internal_auth)):
+async def browse(request: BrowseRequest, auth: dict = Depends(require_internal_auth)):
     """Browser automation endpoint."""
     logger.info("skills.browse", url=request.url)
     result = await browse_url(
@@ -456,7 +456,7 @@ async def browse(request: BrowseRequest, _auth: dict = Depends(require_internal_
 
 
 @app.post("/fetch")
-async def fetch(request: FetchRequest, _auth: dict = Depends(require_internal_auth)):
+async def fetch(request: FetchRequest, auth: dict = Depends(require_internal_auth)):
     """Standard web-fetch endpoint for agents."""
     logger.info("skills.fetch", url=request.url, agent_id=request.agent_id)
     result = await browse_url(url=request.url)
@@ -466,7 +466,7 @@ async def fetch(request: FetchRequest, _auth: dict = Depends(require_internal_au
 
 
 @app.post("/search")
-async def search(request: SearchRequest, _auth: dict = Depends(require_internal_auth)):
+async def search(request: SearchRequest, auth: dict = Depends(require_internal_auth)):
     """Web search endpoint via SearXNG."""
     logger.info("skills.search", query=request.query, max_results=request.max_results)
     
@@ -498,7 +498,7 @@ async def search(request: SearchRequest, _auth: dict = Depends(require_internal_
 
 
 @app.post("/summarize")
-async def summarize(request: SummarizeRequest, _auth: dict = Depends(require_internal_auth)):
+async def summarize(request: SummarizeRequest, auth: dict = Depends(require_internal_auth)):
     """Summarize text via Keeper. Falls back to raw text if Keeper is unreachable."""
     logger.info("skills.summarize", text_len=len(request.text), max_length=request.max_length)
     token = create_internal_token("isli-skills", scopes=["skill:invoke"], expires_minutes=5)
@@ -523,7 +523,7 @@ async def summarize(request: SummarizeRequest, _auth: dict = Depends(require_int
 
 
 @app.post("/embed")
-async def embed(request: EmbedRequest, _auth: dict = Depends(require_internal_auth)):
+async def embed(request: EmbedRequest, auth: dict = Depends(require_internal_auth)):
     """Generate text embeddings via Keeper. Falls back to empty embedding if Keeper is unreachable."""
     logger.info("skills.embed", input_len=len(request.input))
     token = create_internal_token("isli-skills", scopes=["skill:invoke"], expires_minutes=5)
@@ -551,7 +551,7 @@ async def embed(request: EmbedRequest, _auth: dict = Depends(require_internal_au
 
 
 @app.post("/db-query")
-async def db_query(request: DbQueryRequest, _auth: dict = Depends(require_internal_auth)):
+async def db_query(request: DbQueryRequest, auth: dict = Depends(require_internal_auth)):
     """Execute a read-only SQL query against the configured database."""
     logger.info("skills.db_query", agent_id=request.agent_id, query_preview=request.query[:60])
     settings = get_settings()
@@ -575,7 +575,7 @@ async def db_query(request: DbQueryRequest, _auth: dict = Depends(require_intern
 
 
 @app.post("/skills/{name}/invoke")
-async def invoke_skill(name: str, body: InvokeSkill, _auth: dict = Depends(require_internal_auth)):
+async def invoke_skill(name: str, body: InvokeSkill, auth: dict = Depends(require_internal_auth)):
     skill = SKILL_REGISTRY.get(name)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
@@ -607,7 +607,8 @@ async def invoke_skill(name: str, body: InvokeSkill, _auth: dict = Depends(requi
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     f"{WORKSPACE_URL}/read",
-                    json={"agent_id": skill["agent_id"], "path": skill["workspace_path"]}
+                    json={"agent_id": skill["agent_id"], "path": skill["workspace_path"]},
+                    headers={"X-Internal-Auth": create_internal_token("isli-skills", scopes=["skill:invoke"], expires_minutes=5)},
                 )
                 resp.raise_for_status()
                 code = resp.json().get("content")

@@ -277,7 +277,7 @@ async def live():
 async def embed(
     req: EmbedRequest,
     request: Request,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
     metadata = {
@@ -310,7 +310,7 @@ async def embed(
 async def summarize(
     req: SummarizeRequest,
     request: Request,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
     prompt = get_prompts()["keeper"]["summarize"].format(
@@ -341,7 +341,7 @@ class JournalUpdateRequest(BaseModel):
 async def journal_update(
     req: JournalUpdateRequest,
     request: Request,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
     recent_messages = "\n".join(
@@ -372,7 +372,7 @@ async def journal_update(
 
 
 @app.post("/context/inject")
-async def context_inject(req: ContextInjectRequest, _auth: dict = Depends(require_internal_auth)):
+async def context_inject(req: ContextInjectRequest, auth: dict = Depends(require_internal_auth)):
     metrics = get_metrics()
     metrics.start_request()
     start = time.monotonic()
@@ -519,7 +519,7 @@ def _format_model_list(models: list[dict]) -> str:
 
 
 @app.post("/model/route")
-async def model_route(req: ModelRouteRequest, _auth: dict = Depends(require_internal_auth)):
+async def model_route(req: ModelRouteRequest, auth: dict = Depends(require_internal_auth)):
     """Keeper-side model router: given a task and available models, pick the best one."""
     metrics = get_metrics()
     start = time.monotonic()
@@ -613,7 +613,7 @@ async def model_route(req: ModelRouteRequest, _auth: dict = Depends(require_inte
 async def generate(
     req: GenerateRequest,
     request: Request,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
     try:
@@ -643,7 +643,7 @@ class RemoveRequest(BaseModel):
 @app.post("/admin/activate")
 async def admin_activate(
     req: ActivateRequest,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     if req.slot not in model_manager.config:
         raise HTTPException(status_code=400, detail=f"Invalid slot: {req.slot}")
@@ -670,7 +670,7 @@ async def admin_activate(
 @app.post("/admin/remove")
 async def admin_remove(
     req: RemoveRequest,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     try:
         async with OllamaClient().session() as client:
@@ -730,13 +730,13 @@ async def admin_remove(
 
 
 @app.post("/admin/reload-prompts")
-async def reload_prompts(_auth: dict = Depends(require_internal_auth)):
+async def reload_prompts(auth: dict = Depends(require_internal_auth)):
     clear_prompts_cache()
     return {"status": "ok", "reloaded": True}
 
 
 @app.get("/admin/config")
-async def admin_config(_auth: dict = Depends(require_internal_auth)):
+async def admin_config(auth: dict = Depends(require_internal_auth)):
     return {
         "config": {
             "gen": model_manager.get_model("gen"),
@@ -748,7 +748,7 @@ async def admin_config(_auth: dict = Depends(require_internal_auth)):
 @app.post("/admin/pull")
 async def admin_pull(
     req: PullRequest,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     try:
         async with OllamaClient().session() as client:
@@ -766,7 +766,7 @@ async def admin_pull(
 
 
 @app.get("/models")
-async def list_models(_auth: dict = Depends(require_internal_auth)):
+async def list_models(auth: dict = Depends(require_internal_auth)):
     try:
         async with OllamaClient().session() as client:
             models = await client.list_models()
@@ -777,7 +777,7 @@ async def list_models(_auth: dict = Depends(require_internal_auth)):
 
 
 @app.post("/heartbeat")
-async def heartbeat(req: HeartbeatRequest, _auth: dict = Depends(require_internal_auth)):
+async def heartbeat(req: HeartbeatRequest, auth: dict = Depends(require_internal_auth)):
     anomaly_found = req.anomaly
 
     # Run LLM-based anomaly detection if status is unusual or requested
@@ -822,7 +822,7 @@ async def heartbeat(req: HeartbeatRequest, _auth: dict = Depends(require_interna
 
 
 @app.post("/heartbeat/validate")
-async def heartbeat_validate(req: HeartbeatValidateRequest, _auth: dict = Depends(require_internal_auth)):
+async def heartbeat_validate(req: HeartbeatValidateRequest, auth: dict = Depends(require_internal_auth)):
     # Run LLM-based anomaly detection
     start = time.monotonic()
     try:
@@ -899,7 +899,7 @@ async def heartbeat_validate(req: HeartbeatValidateRequest, _auth: dict = Depend
 async def pii_scrub(
     req: ScrubRequest,
     request: Request,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
     # 1. Regex Pass: Fast, guaranteed masking of standard patterns
@@ -956,7 +956,7 @@ async def pii_scrub(
 async def pii_unscrub(
     req: UnscrubRequest,
     request: Request,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
     metrics = get_metrics()
@@ -984,7 +984,7 @@ async def pii_unscrub(
 async def skill_clean(
     req: CleanRequest,
     request: Request,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
     MAX_CLEAN_CHARS = 20000
@@ -1019,7 +1019,7 @@ async def skill_clean(
 async def verify_logic(
     req: VerifyLogicRequest,
     request: Request,
-    _auth: dict = Depends(require_internal_auth),
+    auth: dict = Depends(require_internal_auth),
 ):
     agent_id = req.agent_id or request.headers.get("X-Agent-ID")
     prompt = get_prompts()["keeper"]["verify_logic"].format(
@@ -1040,7 +1040,7 @@ async def verify_logic(
 
 
 @app.get("/dashboard")
-async def dashboard(_auth: dict = Depends(require_internal_auth)):
+async def dashboard(auth: dict = Depends(require_internal_auth)):
     metrics = get_metrics()
     queue_depths = priority_manager.get_depths()
     snapshot = metrics.get_snapshot(queue_depths=queue_depths)

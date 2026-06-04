@@ -5,6 +5,7 @@ from sqlalchemy import select
 from isli_core.db import get_db_session_manual
 from isli_core.models import Session, Task
 from isli_core.memory.keeper_client import KeeperClient
+from isli_core.memory.context_cache import ContextCache
 
 logger = structlog.get_logger()
 
@@ -32,6 +33,7 @@ async def update_session_journal(db_session, sess: Session, trigger: str):
             sess.messages = sess.messages[-10:]
 
         await db_session.commit()
+        await ContextCache.invalidate_for_session(sess.id)
         logger.info("journal_worker.success", session_id=sess.id, trigger=trigger)
         return True
 

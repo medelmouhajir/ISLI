@@ -1,6 +1,7 @@
 """Centralized startup validation for production safety."""
 
 import os
+from pathlib import Path
 import structlog
 
 logger = structlog.get_logger()
@@ -17,13 +18,24 @@ WEAK_SECRETS = {
 }
 
 
+def _resolve_secret(value: str) -> str:
+    """If value is a secret file path, read its contents."""
+    if value.startswith("/run/secrets/"):
+        try:
+            return Path(value).read_text().strip()
+        except FileNotFoundError:
+            return value
+    return value
+
+
 def validate_startup_secrets() -> None:
     """Fail fast if any required production secret is missing or weak."""
     env = os.getenv("ISLI_ENV", "development").lower()
     is_prod = env not in ("development", "dev", "local", "test")
 
     # Read directly from os.environ so mutations are respected (e.g. in tests).
-    jwt_secret = os.getenv("JWT_SECRET", "")
+    # Resolve Docker Compose secret file references.
+    jwt_secret = _resolve_secret(os.getenv("JWT_SECRET", ""))
     if not jwt_secret or len(jwt_secret) < 32 or jwt_secret.lower() in WEAK_SECRETS:
         raise RuntimeError(
             "JWT_SECRET is missing, shorter than 32 characters, or is a known weak value. "
@@ -42,7 +54,7 @@ def validate_startup_secrets() -> None:
             "fakeredis is not allowed in production. Set REDIS_URL to a real Redis connection string."
         )
 
-    enc_key = os.getenv("PII_ENCRYPTION_KEY", "")
+    enc_key = _resolve_secret(os.getenv("PII_ENCRYPTION_KEY", ""))
     if is_prod and not enc_key:
         raise RuntimeError("PII_ENCRYPTION_KEY must be set in production.")
     if enc_key and len(enc_key.encode()) < 32:

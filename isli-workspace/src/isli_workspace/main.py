@@ -231,7 +231,7 @@ async def live():
 
 
 @app.post("/read")
-async def read(body: ReadRequest, _auth: dict = Depends(require_internal_auth)):
+async def read(body: ReadRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = read_file(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
@@ -246,7 +246,7 @@ async def read(body: ReadRequest, _auth: dict = Depends(require_internal_auth)):
 
 
 @app.post("/write")
-async def write(body: WriteRequest, quota_bytes: int | None = None, _auth: dict = Depends(require_internal_auth)):
+async def write(body: WriteRequest, quota_bytes: int | None = None, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = write_file(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path, body.content, quota_bytes)
@@ -261,7 +261,7 @@ async def write(body: WriteRequest, quota_bytes: int | None = None, _auth: dict 
 
 
 @app.post("/list")
-async def list_files(body: ListRequest, _auth: dict = Depends(require_internal_auth)):
+async def list_files(body: ListRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = list_dir(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
@@ -276,7 +276,7 @@ async def list_files(body: ListRequest, _auth: dict = Depends(require_internal_a
 
 
 @app.post("/delete")
-async def delete(body: DeleteRequest, _auth: dict = Depends(require_internal_auth)):
+async def delete(body: DeleteRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = delete_file(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
@@ -298,7 +298,7 @@ async def upload(
     path: str = Form(...),
     file: UploadFile = File(...),
     quota_bytes: int | None = Form(None),
-    _auth: dict = Depends(require_internal_auth)
+    auth: dict = Depends(require_internal_auth)
 ):
     effective_scope_id = scope_id or agent_id
     await check_access(agent_id, scope, effective_scope_id)
@@ -321,7 +321,7 @@ async def download(
     path: str,
     scope: ScopeType = "agent",
     scope_id: str | None = None,
-    _auth: dict = Depends(require_internal_auth)
+    auth: dict = Depends(require_internal_auth)
 ):
     effective_scope_id = scope_id or agent_id
     await check_access(agent_id, scope, effective_scope_id)
@@ -347,7 +347,7 @@ async def download(
 
 
 @app.post("/mkdir")
-async def mkdir(body: MkdirRequest, _auth: dict = Depends(require_internal_auth)):
+async def mkdir(body: MkdirRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = create_dir(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
@@ -360,7 +360,7 @@ async def mkdir(body: MkdirRequest, _auth: dict = Depends(require_internal_auth)
 
 
 @app.post("/attachments/attach")
-async def attach(body: AttachRequest, _auth: dict = Depends(require_internal_auth)):
+async def attach(body: AttachRequest, auth: dict = Depends(require_internal_auth)):
     """Copy a file from agent workspace to task attachment."""
     await check_access(body.agent_id, "attachment", body.task_id)
     try:
@@ -386,7 +386,7 @@ async def attach(body: AttachRequest, _auth: dict = Depends(require_internal_aut
 
 
 @app.post("/attachments/pull")
-async def pull(body: PullRequest, _auth: dict = Depends(require_internal_auth)):
+async def pull(body: PullRequest, auth: dict = Depends(require_internal_auth)):
     """Pull an attachment from task to agent workspace, with metadata."""
     await check_access(body.agent_id, "attachment", body.task_id)
     try:
@@ -418,7 +418,7 @@ async def pull(body: PullRequest, _auth: dict = Depends(require_internal_auth)):
 
 
 @app.post("/shared/promote")
-async def promote(body: PromoteRequest, _auth: dict = Depends(require_internal_auth)):
+async def promote(body: PromoteRequest, auth: dict = Depends(require_internal_auth)):
     """Promote a file from agent/task to shared workspace."""
     await check_access(body.agent_id, body.source_scope, body.source_scope_id)
     await check_access(body.agent_id, "shared", body.target_workspace_id)
@@ -453,7 +453,7 @@ async def promote(body: PromoteRequest, _auth: dict = Depends(require_internal_a
 # ─── Git endpoints ────────────────────────────────────────────────
 
 @app.post("/git/clone")
-async def git_clone_endpoint(body: GitCloneRequest, _auth: dict = Depends(require_internal_auth)):
+async def git_clone_endpoint(body: GitCloneRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await git_clone(
@@ -475,7 +475,7 @@ async def git_clone_endpoint(body: GitCloneRequest, _auth: dict = Depends(requir
 
 
 @app.post("/git/status")
-async def git_status_endpoint(body: GitStatusRequest, _auth: dict = Depends(require_internal_auth)):
+async def git_status_endpoint(body: GitStatusRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await git_status(
@@ -494,7 +494,7 @@ async def git_status_endpoint(body: GitStatusRequest, _auth: dict = Depends(requ
 
 
 @app.post("/git/commit")
-async def git_commit_endpoint(body: GitCommitRequest, _auth: dict = Depends(require_internal_auth)):
+async def git_commit_endpoint(body: GitCommitRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await git_commit(
@@ -514,7 +514,7 @@ async def git_commit_endpoint(body: GitCommitRequest, _auth: dict = Depends(requ
 
 
 @app.post("/git/push")
-async def git_push_endpoint(body: GitPushRequest, _auth: dict = Depends(require_internal_auth)):
+async def git_push_endpoint(body: GitPushRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await git_push(
@@ -536,7 +536,7 @@ async def git_push_endpoint(body: GitPushRequest, _auth: dict = Depends(require_
 
 
 @app.post("/git/pull")
-async def git_pull_endpoint(body: GitPullRequest, _auth: dict = Depends(require_internal_auth)):
+async def git_pull_endpoint(body: GitPullRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await git_pull(
@@ -560,7 +560,7 @@ async def git_pull_endpoint(body: GitPullRequest, _auth: dict = Depends(require_
 
 
 @app.post("/git/branch/list")
-async def git_branch_list_endpoint(body: GitBranchListRequest, _auth: dict = Depends(require_internal_auth)):
+async def git_branch_list_endpoint(body: GitBranchListRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await git_branch_list(
@@ -577,7 +577,7 @@ async def git_branch_list_endpoint(body: GitBranchListRequest, _auth: dict = Dep
 
 
 @app.post("/git/branch/create")
-async def git_branch_create_endpoint(body: GitBranchCreateRequest, _auth: dict = Depends(require_internal_auth)):
+async def git_branch_create_endpoint(body: GitBranchCreateRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await git_branch_create(
@@ -597,7 +597,7 @@ async def git_branch_create_endpoint(body: GitBranchCreateRequest, _auth: dict =
 
 
 @app.post("/git/checkout")
-async def git_checkout_endpoint(body: GitCheckoutRequest, _auth: dict = Depends(require_internal_auth)):
+async def git_checkout_endpoint(body: GitCheckoutRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await git_checkout(
@@ -617,7 +617,7 @@ async def git_checkout_endpoint(body: GitCheckoutRequest, _auth: dict = Depends(
 
 
 @app.post("/git/log")
-async def git_log_endpoint(body: GitLogRequest, _auth: dict = Depends(require_internal_auth)):
+async def git_log_endpoint(body: GitLogRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await git_log(
@@ -637,7 +637,7 @@ async def git_log_endpoint(body: GitLogRequest, _auth: dict = Depends(require_in
 # ─── Package Manager endpoints ────────────────────────────────────
 
 @app.post("/pip/install")
-async def pip_install_endpoint(body: PipInstallRequest, _auth: dict = Depends(require_internal_auth)):
+async def pip_install_endpoint(body: PipInstallRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await pip_install(
@@ -659,7 +659,7 @@ async def pip_install_endpoint(body: PipInstallRequest, _auth: dict = Depends(re
 
 
 @app.post("/pip/list")
-async def pip_list_endpoint(body: PipListRequest, _auth: dict = Depends(require_internal_auth)):
+async def pip_list_endpoint(body: PipListRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
         result = await pip_list(

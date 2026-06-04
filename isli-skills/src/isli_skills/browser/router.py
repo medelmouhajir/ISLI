@@ -103,7 +103,7 @@ def _normalize_ref(ref: str) -> str:
 
 @router.post("/navigate")
 async def browser_navigate(
-    request: NavigateRequest, _auth: dict = Depends(require_internal_auth)
+    request: NavigateRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Navigate the agent's browser to a URL."""
     session = await _get_session(request.agent_id)
@@ -141,7 +141,7 @@ async def browser_navigate(
 
 @router.post("/snapshot")
 async def browser_snapshot(
-    request: SnapshotRequest, _auth: dict = Depends(require_internal_auth)
+    request: SnapshotRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Return an accessibility-tree snapshot of the current page."""
     session = await _get_session(request.agent_id)
@@ -174,7 +174,7 @@ async def browser_snapshot(
 
 @router.post("/click")
 async def browser_click(
-    request: ClickRequest, _auth: dict = Depends(require_internal_auth)
+    request: ClickRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Click an element by its @ref ID from the last snapshot."""
     session = await _get_session(request.agent_id)
@@ -221,7 +221,7 @@ async def browser_click(
 
 @router.post("/type")
 async def browser_type(
-    request: TypeRequest, _auth: dict = Depends(require_internal_auth)
+    request: TypeRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Type text into an input field by its @ref ID."""
     session = await _get_session(request.agent_id)
@@ -265,7 +265,7 @@ async def browser_type(
 
 @router.post("/press")
 async def browser_press(
-    request: PressRequest, _auth: dict = Depends(require_internal_auth)
+    request: PressRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Press a keyboard key (Enter, Tab, Escape, etc.)."""
     session = await _get_session(request.agent_id)
@@ -287,7 +287,7 @@ async def browser_press(
 
 @router.post("/scroll")
 async def browser_scroll(
-    request: ScrollRequest, _auth: dict = Depends(require_internal_auth)
+    request: ScrollRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Scroll the page up or down."""
     session = await _get_session(request.agent_id)
@@ -312,7 +312,7 @@ async def browser_scroll(
 
 @router.post("/back")
 async def browser_back(
-    request: BackRequest, _auth: dict = Depends(require_internal_auth)
+    request: BackRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Navigate back in browser history."""
     session = await _get_session(request.agent_id)
@@ -332,7 +332,7 @@ async def browser_back(
 
 @router.post("/console")
 async def browser_console(
-    request: ConsoleRequest, _auth: dict = Depends(require_internal_auth)
+    request: ConsoleRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Return console logs captured since the last call (or since navigate)."""
     session = await _get_session(request.agent_id)
@@ -349,7 +349,7 @@ async def browser_console(
 
 @router.post("/vision")
 async def browser_vision(
-    request: VisionRequest, _auth: dict = Depends(require_internal_auth)
+    request: VisionRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Take a screenshot and optionally describe it via the Keeper."""
     import base64
@@ -375,7 +375,7 @@ async def browser_vision(
 
 @router.post("/images")
 async def browser_images(
-    request: ImagesRequest, _auth: dict = Depends(require_internal_auth)
+    request: ImagesRequest, auth: dict = Depends(require_internal_auth)
 ):
     """List all image elements on the current page with src and alt text."""
     session = await _get_session(request.agent_id)

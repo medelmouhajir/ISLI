@@ -101,7 +101,7 @@ class PromptsUpdate(BaseModel):
 
 
 @router.get("", response_model=PromptsOut)
-async def get_prompts(_admin: str = Depends(require_admin_auth)):
+async def get_prompts(admin: str = Depends(require_admin_auth)):
     """Read the current prompts.yaml from disk (bypasses cache)."""
     try:
         data, mtime = _read_prompts_with_mtime()
@@ -120,7 +120,7 @@ async def get_prompts(_admin: str = Depends(require_admin_auth)):
 async def update_prompts(
     payload: PromptsUpdate,
     db: AsyncSession = Depends(get_db),
-    _admin: str = Depends(require_admin_auth),
+    admin: str = Depends(require_admin_auth),
 ):
     """Merge updates into prompts.yaml, write to disk, and trigger Keeper reload."""
     # 1. Read current file and mtime
@@ -190,7 +190,7 @@ async def update_prompts(
     await AuditWriter.write(
         db,
         actor_type="admin",
-        actor_id=_admin,
+        actor_id=admin,
         action="update_prompts",
         target_type="system",
         target_id="prompts.yaml",

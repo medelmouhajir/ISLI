@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import structlog
 
+from isli_core.auth import create_internal_token
 from isli_core.config import get_settings
 from isli_core.redis_client import get_redis
 
@@ -76,6 +77,7 @@ async def deliver_external(topic: str, payload: dict[str, Any], headers: dict[st
                 resp = await client.post(
                     f"{channels_url}/send",
                     json=req_body,
+                    headers={"X-Internal-Auth": create_internal_token("core", scopes=["channels:send"], expires_minutes=5)},
                     timeout=10.0,
                 )
                 resp.raise_for_status()

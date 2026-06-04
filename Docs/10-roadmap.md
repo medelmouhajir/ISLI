@@ -397,7 +397,7 @@ This roadmap is derived from the comprehensive 12-agent research review document
 | ChromaDB backup worker | 0.5 day | `isli-core/src/isli_core/jobs/chromadb_backup_worker.py` — scheduled (6h default), subprocess call to `chromadb_backup.py`, SHA-256 verification, DB metadata storage, retention enforcement |
 | ChromaDB backup model + migration | 0.2 day | `ChromaDbBackup` SQLAlchemy model; Alembic migration `20260530_2954c67aeea3` |
 | ChromaDB admin router | 0.3 day | `isli-core/src/isli_core/routers/backups.py` — `POST /v1/admin/backups/chromadb/trigger`, `GET /v1/admin/backups/chromadb`, `POST /v1/admin/backups/chromadb/restore` (admin-only) |
-| Core lifespan wiring | 0.1 day | Register `backups.router` and start `ChromaBackupWorker` in `main.py` |
+| Core lifespan wiring | 0.1 day | Register `backups.router` and start `ChromaBackupWorker` via `startup/workers.py` |
 | Standalone script hardening | 0.2 day | `scripts/chromadb_backup.py` — `--verify` flag, SHA-256 sidecar, integrity exit codes; `scripts/backup.sh` — SHA-256 sidecars for all components |
 | Docs update | 0.2 day | `Docs/06-skills.md` — dedicated db-query section; `Docs/03-memory.md` — gap resolved; `Docs/runbooks/backup-restore.md` — ChromaDB restore procedure; `Docs/10-roadmap.md` — this section |
 
@@ -584,7 +584,7 @@ This roadmap is derived from the comprehensive 12-agent research review document
 | Digest worker | 0.5 day | `digest.py` — `DigestWorker` with `LRANGE` + `LTRIM` idempotency; `_collapse_items()` summary lines; `accumulate_digest()` pushes to `notif:batch:{user_id}:low` with TTL |
 | REST endpoints | 0.5 day | `routers/notifications.py` — `GET /v1/notifications`, `GET /v1/notifications/unread-count`, `POST /v1/notifications/{id}/read`, `POST /v1/notifications/read-all`, `DELETE /v1/notifications/{id}`, `GET /v1/notifications/preferences`, `PATCH /v1/notifications/preferences` (with `ZoneInfo` validation), `POST /v1/notifications/send` (agent-facing with rate limiting) |
 | WS integration | 0.2 day | Modify `ws.py` `redis_listener()` to dispatch to `NotificationEngine.on_event()` alongside existing board broadcast |
-| Lifespan wiring | 0.2 day | Register `deliver_in_app` and `deliver_external` outbox handlers in `main.py`; add `digest_task = asyncio.create_task(DigestWorker.loop())` |
+| Lifespan wiring | 0.2 day | Register `deliver_in_app` and `deliver_external` outbox handlers in `startup/notifications.py`; add `DigestWorker` to `startup/workers.py` `_WORKER_SPECS` |
 | System:alert emitters | 0.3 day | Emit `system:alert` from 5 critical locations: `CheckpointRecoveryWorker` E-Stop, `BudgetAlerter` threshold, `ContextInjectorWorker` max retries, `SessionContextInjectorWorker` max retries, `ProcessManager` crash paths |
 | Telegram adapter update | 0.2 day | `send_message()` accepts `parse_mode` kwarg and passes it to `bot.send_message()` |
 | Board UI types + hooks | 0.3 day | `NotificationItem`, `NotificationListResponse`, `NotificationPreferences` in `types/index.ts`; `useNotifications`, `useUnreadCount`, `useMarkRead`, `useMarkAllRead`, `useDismissNotification` in `hooks/useNotifications.ts` |
@@ -619,7 +619,7 @@ This roadmap is derived from the comprehensive 12-agent research review document
 | Core send-message skill handler | 0.3 day | `skills.py` inline `send-message` handler validates `audio_b64` length ≤ 6.7M; uploads to workspace; appends `audio_url`; forwards to channels |
 | Core workspace upload helper | 0.2 day | `upload_bytes_to_workspace()` in `workspaces.py` — reusable helper for raw byte uploads |
 | Core audio cleanup worker | 0.2 day | `isli-core/src/isli_core/jobs/audio_cleanup.py` — `AudioCleanupWorker` runs every 24h; lists `_attachments/audio/*`; deletes files older than 7 days |
-| Core lifespan wiring | 0.1 day | Import `audio` router and `AudioCleanupWorker` in `main.py`; wire into app lifespan |
+| Core lifespan wiring | 0.1 day | Import `audio` router in `main.py`; add `AudioCleanupWorker` to `startup/workers.py` `_WORKER_SPECS` |
 | Core schemas update | 0.1 day | `session:message` WS event schema adds `audio_url` property; `SessionReplyIn` adds `audio_b64`, `audio_voice`, `voice_mode_enabled` |
 | Core models update | 0.1 day | `ChannelMessage` adds `attachments: Mapped[list[dict[str, Any]]]` JSON column |
 | Channels Dockerfile | 0.1 day | `apt-get install -y curl ffmpeg` |

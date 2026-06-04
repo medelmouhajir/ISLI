@@ -522,7 +522,67 @@ In order to simplify deployment and management, `isli-core` includes an embedded
 | `AGENT_RUNNER_IMAGE` | Docker image tag used for spawned agent containers (default: `isli-agent-runner:latest`) |
 | `AGENT_SDK_HOST_PATH` | Absolute host path to `isli-agent-sdk/src` for live volume mount in dev mode |
 | `AGENT_RUNNER_BUILD_CONTEXT` | Absolute host path to `isli-agent-sdk` root for Docker image rebuilds |
-| `AGENT_NETWORK` | Docker network name for agent containers (default: `isli_isli`) |
+| `AGENT_NETWORK` | Docker network name for agent containers (default: `isli_isli-mesh`). **Must be a network that Core itself is attached to** — otherwise spawned agents cannot resolve `core:8000`. |
+
+### Docker Network Requirements (Fixed 2026-06-03)
+
+When running under Docker Compose, the spawned agent containers must share a network with `isli-core` or they will fail with `[Errno -2] Name or service not known` on every heartbeat and WebSocket reconnect.
+
+**Compose default networks:**
+- `isli-public` — Traefik + Board only (no Core)
+- `isli-mesh` — Core, Keeper, Skills, Channels, Workspace, Audio, Agents, Board
+- `isli-data` — Internal only (no external access); Postgres, Redis, Ollama
+
+**Correct configuration:**
+1. Core must be on `isli-mesh` (so agents can resolve `core:8000`).
+2. Board must also be on `isli-mesh` (so its nginx `proxy_pass` to `core:8000` works).
+3. `AGENT_NETWORK` must be set to the same network Core is on (`isli_isli-mesh` by default).
+
+**Verification:**
+```bash
+# From inside the board container
+docker compose exec board getent hosts core
+# Expected: 172.20.0.x  core
+
+# From inside a spawned agent container
+docker exec isli-agent-<id> getent hosts core
+# Expected: 172.20.0.x  core
+```
+
+**Common mistake:** If `AGENT_NETWORK` points to `isli_isli` (Compose's implicit default network) but Core is not attached to it, agents will be orphaned. They will boot, register, then enter an infinite retry loop because `core:8000` is unresolvable from their container.
+
+---
+
+## WebSocket Library Compatibility (Fixed 2026-06-03)
+
+The `isli-agent-sdk` uses `websockets` to connect to Core's WebSocket gateway. In `websockets` 14+, the parameter name for extra headers changed from `extra_headers` to `additional_headers`.
+
+**Error signature (websockets ≥14 with old code):**
+```
+BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'
+```
+
+**Fix:** In `isli-agent-sdk/src/isli_agent/runner.py`, change:
+```python
+# BEFORE (websockets <14)
+async with websockets.connect(
+    ws_url,
+    extra_headers={"Authorization": f"Bearer {token}"},
+) as websocket:
+
+# AFTER (websockets ≥14)
+async with websockets.connect(
+    ws_url,
+    additional_headers={"Authorization": f"Bearer {token}"},
+) as websocket:
+```
+
+After changing the source, rebuild the agent-runner image:
+```bash
+docker compose build agent-runner
+```
+
+Then restart every agent via the Board UI or API so they pick up the new image.
 
 ---
 
@@ -563,16 +623,45 @@ In order to simplify deployment and management, `isli-core` includes an embedded
 
 When a task is assigned to an agent:
 
+### Task Path (Zero HTTP)
+
+The `task:updated` WebSocket event carries `context_summary` inline in the payload. The agent SDK reads it directly — no HTTP round-trips to Core.
+
+```python
+async def _execute_task(self, task_data: dict):
+    task_id = task_data["id"]
+    # context_summary delivered inline via WebSocket — no get_context() HTTP call
+    context_summary = task_data.get("context_summary") or ""
+    system_prompt = self._assemble_system_prompt(context_summary)
+    messages = [{"role": "user", "content": task_data.get("input", "")}]
+    # ... ReAct loop continues
+```
+
+> **Deprecated:** `client.get_context()` is deprecated and should not be called from new code.
+
+### Session Path
+
+The `session:message` WebSocket event carries `context_summary` inline, same as tasks.
+
+```python
+async def _execute_session_message(self, payload: dict):
+    context_summary = payload.get("context_summary") or ""
+    system_prompt = self._assemble_system_prompt(context_summary, session_info=payload)
+    # ... ReAct loop continues
+```
+
+### Prompt Assembly
+
 ```python
 # Simplified agent SDK prompt assembly
-def _assemble_system_prompt(self, context_summary: str) -> str:
+def _assemble_system_prompt(self, context_summary: str, session_info: dict | None = None) -> str:
     from isli_agent.prompts_loader import get_prompts
     template = get_prompts()["agent"]["system_prompt_template"]
 
     persona_line = f"Persona: {self.config.persona}\n" if self.config.persona else ""
     tools_list = "\n".join(
         f"- {d.get('function', {}).get('name', 'unknown')}: "
-        f"{d.get('function', {}).get('description', 'No description.')}"
+        f"{d.get('function', {}).get('description', 'No description.')}""
         for d in self.tool_definitions
     )
 

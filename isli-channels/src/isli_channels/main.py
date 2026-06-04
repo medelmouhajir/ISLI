@@ -3,12 +3,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from .adapters.telegram import TelegramAdapter
 from .adapters.whatsapp import WhatsAppAdapter
 from .attachments import convert_attachment, validate_for_channel
+from .auth import require_internal_auth
 from .chunking import MessageChunker
 from .offline_queue import OfflineMessageQueue
 from .rate_limit import RateLimiter
@@ -184,7 +185,7 @@ class SendMessageRequest(BaseModel):
 
 
 @app.post("/send")
-async def send_message(req: SendMessageRequest):
+async def send_message(req: SendMessageRequest, auth: dict = Depends(require_internal_auth)):  # noqa: B008
     adapter = adapters.get(req.channel)
     if not adapter:
         raise HTTPException(status_code=400, detail=f"No adapter for channel: {req.channel}")

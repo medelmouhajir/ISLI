@@ -19,8 +19,13 @@ def create_internal_token(agent_id: str, scopes: list[str], expires_minutes: int
 
 def verify_internal_token(token: str) -> dict[str, Any]:
     if not settings.jwt_secret:
-        return {"sub": "system", "scopes": ["*"]}
-        
+        if settings.isli_env == "development":
+            return {"sub": "system", "scopes": ["*"]}
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="JWT secret not configured",
+        )
+
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
         if payload.get("type") != "internal":
