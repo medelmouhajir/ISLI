@@ -29,7 +29,29 @@ cp -r "${PROJECT_ROOT}"/* "${INSTALL_DIR}/"
 # --- .env ---
 if [[ ! -f "${INSTALL_DIR}/.env" ]]; then
     cp "${INSTALL_DIR}/.env.production" "${INSTALL_DIR}/.env"
+    
+    # Generate secure secrets
+    echo "[install-native] Generating secure credentials..."
+    DB_PASS=$(openssl rand -hex 16)
+    REDIS_PASS=$(openssl rand -hex 16)
+    JWT_SECRET=$(openssl rand -hex 32)
+    
+    sed -i "s/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${DB_PASS}/" "${INSTALL_DIR}/.env"
+    sed -i "s/REDIS_PASSWORD=.*/REDIS_PASSWORD=${REDIS_PASS}/" "${INSTALL_DIR}/.env"
+    sed -i "s/JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" "${INSTALL_DIR}/.env"
+    sed -i "s/DATABASE_URL=.*/DATABASE_URL=postgresql:\/\/isli:${DB_PASS}@localhost:5432\/isli/" "${INSTALL_DIR}/.env"
+else
+    DB_PASS=$(grep "POSTGRES_PASSWORD=" "${INSTALL_DIR}/.env" | cut -d'=' -f2)
 fi
+
+# --- Ollama Setup ---
+if ! command -v ollama &>/dev/null; then
+    echo "[install-native] Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
+fi
+
+echo "[install-native] Pulling Keeper model (qwen3:1.7b)..."
+ollama pull qwen3:1.7b
 
 # --- Python services ---
 for svc in isli-core isli-keeper isli-channels isli-skills; do
@@ -47,10 +69,18 @@ npm ci
 npm run build
 
 # --- Database ---
-echo "[install-native] Creating PostgreSQL database and user..."
-su - postgres -c "psql -c \"CREATE USER isli WITH PASSWORD 'password';\"" 2>/dev/null || true
-su - postgres -c "psql -c \"CREATE DATABASE isli OWNER isli;\"" 2>/dev/null || true
-su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE isli TO isli;\"" 2>/dev/null || true
+echo "[install-native] Configuring PostgreSQL..."
+# Check if user exists
+if ! su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='isli'\"" | grep -q 1; then
+    su - postgres -c "psql -c \"CREATE USER isli WITH PASSWORD '${DB_PASS}';\""
+fi
+
+# Check if database exists
+if ! su - postgres -c "psql -lqt" | cut -d \| -f 1 | grep -qw isli; then
+    su - postgres -c "psql -c \"CREATE DATABASE isli OWNER isli;\""
+fi
+
+su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE isli TO isli;\""
 
 # --- Redis ---
 systemctl enable redis-server

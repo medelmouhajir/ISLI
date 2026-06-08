@@ -1,95 +1,88 @@
-# ISLI
+# ISLI — Intelligent System for Local Intelligence
 
-Intelligent System for Local Intelligence — a modular multi-agent digital assistant.
+![Status](https://img.shields.io/badge/Status-Beta-blue)
+![License](https://img.shields.io/badge/License-MIT-green)
+
+**ISLI (Intelligent System for Local Intelligence)** is a modular, production-grade multi-agent system. It provides a specialized environment where domain-specific agents autonomously execute tasks while a central "Keeper" intelligence orchestrates context, routing, and memory.
+
+## Architecture
+
+ISLI inverts the traditional "central orchestrator" pattern. Instead of a single massive LLM bottlenecking all decisions, ISLI uses a lightweight local sidecar model (the **Keeper**) for background intelligence, while specialized agents handle domain-specific execution via their own models. All coordination happens explicitly on a real-time Kanban board.
+
+```mermaid
+graph TD
+    User((User)) --> Channels[isli-channels\nGateway]
+    Channels --> Core[isli-core\nTask Bus & Lifecycle]
+    Core <--> Board[isli-board\nReal-time Kanban UI]
+    Core <--> Keeper[isli-keeper\nBackground SLM & Memory]
+    Core <--> Agents[Agent Workers\nDomain Experts]
+    Agents <--> Workspace[(isli-workspace\nSandboxed Storage)]
+    Agents <--> Skills[isli-skills\nTool Registry]
+```
+
+## Why ISLI is Different
+
+Most agentic systems rely on complex internal monologues and hidden API calls that leave you guessing what the AI is actually doing. ISLI is built differently:
+
+- **The Shared Blackboard Protocol:** Agents **cannot** communicate directly in secret. All delegation, coordination, and sub-task creation happens explicitly via task cards on a real-time Kanban board. You see everything they do, as they do it.
+- **Background Intelligence (The Keeper):** A persistent local Small Language Model (qwen3:1.7b) runs as a sidecar, silently pre-computing context, summarizing memory, and identifying PII *before* any cloud LLM is invoked. This makes your agents faster, cheaper, and more secure.
+- **PII Mesh (De-identification):** Sensitive data is scrubbed locally by the Keeper and replaced with deterministic tokens. Cloud LLMs never see the raw PII, and the agent runner seamlessly rehydrates it locally before delivering the response.
+- **Production-Ready Resilience:** Built with robust patterns including Bulkheads, Circuit Breakers, Checkpoint Recovery, and an event-driven task lease system. It doesn't just run scripts; it safely orchestrates long-running agentic workloads.
 
 ## Project Structure
 
-| Directory | Service | Port | Description |
-|-----------|---------|------|-------------|
-| `isli-core/` | Core API | 8000 | FastAPI — agent lifecycle & process management, task bus, skill proxy, cost control |
-| `isli-keeper/` | Keeper | 8001 | Local Ollama sidecar (qwen3:1.7b) for memory & context |
-| `isli-board/` | Kanban UI | 5173 | React + Vite real-time task board |
-| `isli-skills/` | Skills Registry | 8100+ | Stateless HTTP skill microservices (incl. browser automation) |
-| `isli-channels/` | Channel Gateway | 8200+ | Telegram, WhatsApp, Web, Email adapters |
-| `infra/` | Infrastructure | — | Terraform, Traefik, Redis Sentinel, nginx |
-| `scripts/` | Operations | — | Backup, chaos, load test, blue/green deploy |
-| `Docs/` | Architecture docs | — | 12 markdown design documents |
-| `Memory/` | Project memory | — | Research reports, conventions |
+| Component | Port | Description |
+|-----------|------|-------------|
+| `isli-core` | 8000 | FastAPI backend — task bus, WebSocket fan-out, agent process manager |
+| `isli-board` | 5173 | React + Vite UI — Kanban board, settings, observability hub |
+| `isli-keeper`| 8001 | Local Ollama sidecar for memory, PII mesh, and context injection |
+| `isli-skills`| 8100 | Stateless HTTP microservices providing tools to agents |
+| `isli-channels`| 8200 | Adapters for external interaction (Telegram, Web, Email, WhatsApp) |
 
 ## Quick Start (Recommended)
 
-The fastest way to install ISLI on a VPS or local machine is using the one-tap installer:
+The fastest way to install ISLI on a Linux host or VPS is using the one-tap installer:
 
 ```bash
-# Download and run the bootstrap script
-curl -sSL https://raw.githubusercontent.com/medelmouhajir/ISLI/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/medelmouhajir/ISLI/main/scripts/install.sh | bash
 ```
 
-This will clone the repo, set up a management CLI, and guide you through an interactive setup wizard (secret generation, Ollama detection, and domain config).
+This clones the repo, installs the CLI, and runs a pre-flight check (RAM, ports, Ollama detection) before walking you through an interactive configuration.
 
-### Manual Installation (Docker)
-
-If you prefer to manage the stack manually:
+### Manual Docker Installation
 
 ```bash
 git clone https://github.com/medelmouhajir/ISLI.git
 cd ISLI
 cp .env.example .env
 # Edit .env with your secrets
-docker compose up -d
+docker compose up -d --build
 ```
 
 ## Management CLI
 
-ISLI includes a unified `isli` CLI for operational tasks. It is installed automatically during the Quick Start.
+The `isli` CLI provides unified operational control over the entire system:
 
 ```bash
-# Check system health
-./isli status
-
-# Safely update to the latest version (with auto-backup)
-./isli update
-
-# Backup your database and workspaces
-./isli backup
+./isli status    # Check health of all 14 services
+./isli update    # Safely update with automatic pre-update backups
+./isli backup    # Snapshot Postgres, ChromaDB, and workspace files
 ```
-
-See [Docs/14 — Management CLI](./Docs/14-management-cli.md) for the full command reference.
-
-### Prompt Configuration
-
-All LLM prompts are centralized in `prompts.yaml` at the repo root. Edit prompts there and restart containers to apply changes — no rebuild required.
-
-```bash
-# Edit prompts.yaml, then restart affected services
-docker compose restart keeper core agent-runner
-```
-
-## Run Tests
-
-```bash
-cd isli-core
-pip install -e ".[dev]"
-pytest
-```
-
-## Documentation
-
-See `Docs/README.md` for the full architecture documentation.
 
 ## Implementation Status
 
-All 7 implementation phases are complete:
-- Phase 0 — Foundation
-- Phase 1 — Safety & Governance
-- Phase 2 — Resilience & Recovery
-- Phase 3 — Channels & Delivery Guarantees
-- Phase 4 — Memory & Data Integrity
-- Phase 5 — Cost Optimization & Model Tiering
-- Phase 6 — Compliance & Audit Hardening
-- Phase 7 — Scale-Out & Production Topology
-- Phase 8 — Advanced Local Research (SearXNG Web Search)
-- Phase 9 — Browser Automation (Beta) — Hermes-style accessibility-tree snapshots with `@ref` IDs, persistent Playwright sessions, form filling, and screenshot capture
-- Phase 10 — Recurring Tasks & Full Scheduler — Standard 5-field cron support with transactional cloning, execution history, and "Upcoming" Kanban view
-- Phase 11 — Skill Metadata Updates — `update-skill` endpoint and SDK tool for modifying existing skill metadata without review gate
-- Phase 12 — Agent Identity Enhancements — Native support for agent avatars with specific upload endpoint, Redis blob storage (DB 10), and multi-view rendering (Grid, Panel, Detail)
+ISLI is feature-complete across 12 rigorous development phases, including:
+- **Phase 3:** Channels & Delivery Guarantees
+- **Phase 4:** 4-Tier Memory & Data Integrity
+- **Phase 8:** Advanced Local Research (SearXNG)
+- **Phase 9:** Browser Automation (Accessibility-tree snapshots & Playwright)
+- **Phase 10:** Full Cron Scheduling with Transactional Cloning
+- **Phase 12:** Agent Identity Enhancements & Avatar System
+
+## Documentation
+
+Dive deep into the architecture, memory tiers, and security models in the `Docs/` directory:
+- [01 — Architecture](./Docs/01-architecture.md)
+- [02 — The Keeper](./Docs/02-keeper.md)
+- [03 — Memory System](./Docs/03-memory.md)
+- [04 — Agent SDK](./Docs/04-agents.md)

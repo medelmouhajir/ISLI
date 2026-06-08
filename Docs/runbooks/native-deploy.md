@@ -36,15 +36,16 @@ sudo apt install python3.12 python3.12-venv python3-pip nodejs npm redis-server 
 git clone https://github.com/medelmouhajir/ISLI.git
 cd ISLI
 
-# Run the automated installer (creates venvs, systemd units, DB)
+# Run the automated installer
+# This creates venvs, systemd units, DB, generates secure secrets, 
+# and sets up Ollama (if missing).
 sudo ./scripts/install-native.sh
 ```
 
 After installation:
-- Edit `/opt/isli/.env` with your secrets
+- Check `/opt/isli/.env` for your auto-generated secrets
 - Start services: `sudo systemctl start isli-core`
 - Check status: `sudo systemctl status isli-core`
-- View logs: `sudo journalctl -u isli-core -f`
 
 ### Windows (PowerShell)
 
@@ -52,14 +53,16 @@ After installation:
 git clone https://github.com/medelmouhajir/ISLI.git
 cd ISLI
 
-# Run the automated installer (creates venvs, start/stop scripts)
+# Run the automated installer
+# This creates venvs, installs NSSM, creates Windows Services, 
+# and sets up Ollama (if missing).
 .\scripts\install-native.ps1 -InstallDir C:\ISLI
 ```
 
 After installation:
 - Edit `C:\ISLI\.env` with your secrets
-- Start services: `& 'C:\ISLI\start-isli.ps1'`
-- Stop services: `& 'C:\ISLI\stop-isli.ps1'`
+- Services are managed via Windows Service Manager (`services.msc`). Search for "ISLI".
+- Alternatively, use NSSM: `C:\ISLI\nssm.exe status isli-core`
 
 ## Manual Setup (Any OS)
 

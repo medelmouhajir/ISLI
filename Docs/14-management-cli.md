@@ -10,27 +10,31 @@ The fastest way to install ISLI on a fresh VPS or local machine is using the boo
 
 ```bash
 # Download and run the bootstrap script
-curl -sSL https://raw.githubusercontent.com/medelmouhajir/ISLI/main/install.sh -o install.sh
-
-# Recommended: Verify the checksum (coming soon)
-# sha256sum -c install.sh.sha256
+curl -sSL https://raw.githubusercontent.com/medelmouhajir/ISLI/main/scripts/install.sh -o install.sh
 
 # Run the installer
 bash install.sh
 ```
 
 This script will:
-1.  Check for dependencies (`git`, `docker`, `python`).
-2.  Clone the repository.
-3.  Set up a isolated virtual environment for management tools.
-4.  Launch the interactive **Setup Wizard**.
+1.  Check for dependencies (`python`).
+2.  Set up an isolated virtual environment for management tools.
+3.  Install `typer`, `rich`, `psutil`, and `python-dotenv`.
+4.  Launch the interactive **Setup Wizard** (which begins with **Pre-flight Checks**).
 
 ## CLI Commands Reference
 
 The CLI is located at `scripts/isli.py` and is typically run via the project's internal virtual environment.
 
+### `isli preflight`
+Runs system resource and network checks.
+- **RAM Check:** Warns if < 8GB (required for local LLMs).
+- **Disk Check:** Warns if < 20GB free space.
+- **Port Check:** Verifies that ports 8000-8003, 5173, 80, 5432, and 6379 are available.
+
 ### `isli setup`
 Launches the interactive wizard to configure your environment.
+- **Pre-flight:** Runs `preflight` checks automatically.
 - **Secret Generation:** Automatically creates secure `JWT_SECRET`, `PII_ENCRYPTION_KEY`, and `ADMIN_API_KEY`.
 - **Ollama Detection:** Detects local/remote Ollama and pulls the required `qwen3:1.7b` model.
 - **Domain Configuration:** Sets your `ISLI_DOMAIN` for reverse proxy routing.

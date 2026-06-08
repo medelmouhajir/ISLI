@@ -100,7 +100,9 @@ pytest
 *   **TypeScript**: Functional components with hooks, strict typing for all API payloads and WebSocket events.
 
 ## Useful Commands
-*   `./isli setup`: Interactive setup wizard for secrets and environment.
+*   `./scripts/install.sh`: Interactive unified bootstrap (Pre-flight + Setup).
+*   `./isli setup`: Interactive setup wizard for secrets and environment (includes Pre-flight).
+*   `./isli preflight`: Run system resource and network checks manually.
 *   `./isli up`: Start the full stack in the background.
 *   `./isli status`: Check health of all 14 services and the database.
 *   `./isli update`: Safely update to latest version with auto-backup.

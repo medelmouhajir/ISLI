@@ -1,11 +1,13 @@
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import psutil
 import typer
 from dotenv import load_dotenv, set_key
 from rich.console import Console
@@ -54,10 +56,64 @@ def check_ollama():
             return "remote"
         return None
 
+def check_port(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('localhost', port)) != 0
+
+@app.command()
+def preflight():
+    """Run pre-flight system resource and network checks."""
+    console.print(Panel.fit("ISLI AI Pre-flight Checks", style="bold cyan"))
+    
+    passed = True
+    
+    # 1. RAM Check
+    ram = psutil.virtual_memory()
+    total_ram_gb = ram.total / (1024**3)
+    if total_ram_gb < 7.5: # Allow some margin for 8GB systems
+        console.print(f"[yellow]⚠ Low RAM: {total_ram_gb:.1f}GB detected. 8GB+ is recommended for local LLMs.[/yellow]")
+    else:
+        console.print(f"[green]✓ RAM: {total_ram_gb:.1f}GB detected.[/green]")
+        
+    # 2. Disk Space Check
+    disk = psutil.disk_usage(str(PROJECT_ROOT))
+    free_gb = disk.free / (1024**3)
+    if free_gb < 20:
+        console.print(f"[yellow]⚠ Low Disk Space: {free_gb:.1f}GB free. 20GB+ is recommended.[/yellow]")
+    else:
+        console.print(f"[green]✓ Disk Space: {free_gb:.1f}GB free.[/green]")
+        
+    # 3. Port Conflicts
+    required_ports = {
+        8000: "isli-core",
+        8001: "isli-keeper",
+        8002: "isli-channels",
+        8003: "isli-skills",
+        5173: "isli-board (dev)",
+        80: "isli-board (prod/proxy)",
+        5432: "postgresql",
+        6379: "redis"
+    }
+    
+    console.print("\n[bold]Checking port availability...[/bold]")
+    for port, svc in required_ports.items():
+        if not check_port(port):
+            console.print(f"[red]✗ Port {port} ({svc}) is already in use.[/red]")
+            passed = False
+        else:
+            console.print(f"[green]✓ Port {port} available.[/green]")
+            
+    if not passed:
+        console.print("\n[bold red]Pre-flight checks failed. Please resolve conflicts before continuing.[/bold red]")
+        raise typer.Exit(1)
+    
+    console.print("\n[bold green]Pre-flight checks passed![/bold green]")
+
 # --- Commands ---
 @app.command()
 def setup():
     """Interactive setup wizard for ISLI AI."""
+    preflight()
     console.print(Panel.fit("Welcome to the ISLI AI Setup Wizard", style="bold cyan"))
 
     if not check_docker():
