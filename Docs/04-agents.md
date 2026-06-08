@@ -59,6 +59,7 @@ agent:
   id: agent_research
   name: "Research"
   description: "Deep research and knowledge retrieval specialist"
+  picture: null              # Optional: UUID of the uploaded avatar (blob)
   version: "1.0.0"
 
   model:
@@ -415,6 +416,83 @@ The prompt instructs the Keeper to return a JSON block with `provider`, `model_i
 
 ---
 
+## PII De-Identification Mesh (Added 2026-06-07)
+
+Agents can optionally run with **PII Mesh** enabled. When ON, the agent runner anonymizes sensitive data before sending it to the cloud LLM, then re-hydrates the LLM response locally before delivery.
+
+### How It Works
+
+1. **Pre-turn anonymization** (`_prepare_llm_payload()`):
+   - The agent receives `token_map` in the `session:message` or `task:updated` WebSocket event.
+   - If `pii_mesh_enabled` is true, the runner calls `PIIKeeperClient.session_prep()` which:
+     - Runs a fast regex pre-filter (`regex_hits()`) for emails, phones, SSNs, credit cards, DOBs, corp IDs.
+     - If regex hits exist (or `pii_use_slm` is true), calls Keeper `POST /session-prep` for SLM-validated entity extraction.
+   - The returned `scrubbed_context_summary` and `scrubbed_messages` replace the originals before the LLM call.
+
+2. **Local re-hydration** (`_post_process_response()`):
+   - After the LLM returns its response, the runner calls `PIIKeeperClient.rehydrate_local(text, session_id)`.
+   - This is a pure in-memory `str.replace` loop over the cached token_map — zero network latency.
+   - Tokens are sorted by length (descending) to avoid partial replacements.
+
+3. **Defense-in-depth in Core** (`reply_to_session`):
+   - Core runs a final regex scan on the outgoing text for stray `{{PII:...}}` tokens.
+   - If any remain, it calls `POST /session-prep/rehydrate` on Keeper as a fallback.
+   - If tokens still remain after fallback, it logs CRITICAL and delivers the text anyway (better to leak a token placeholder than silently drop the message).
+
+### Agent Configuration
+
+Two new fields in `Agent.config` JSONB:
+
+```json
+{
+  "pii_mesh_enabled": true,
+  "pii_use_slm": false
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pii_mesh_enabled` | `boolean` | `false` | Master toggle for PII anonymization/re-hydration |
+| `pii_use_slm` | `boolean` | `false` | When true, Keeper runs SLM inference for detection; when false, only regex pre-filter |
+
+### Board UI Integration
+
+The `AgentDetailPage.tsx` Model Strategy card now includes:
+- **PII Mesh toggle switch**: Enable/disable per agent
+- **Use Keeper SLM sub-toggle**: Appears only when PII Mesh is ON
+- **Save/Discard bar**: Dirty detection follows the same per-section pattern as Model Routing
+
+### Environment Variables
+
+Added to `docker-compose.yml` for the `core` service:
+- `PII_MESH_DEFAULT_ENABLED`
+- `PII_USE_SLM_DEFAULT`
+- `PII_REGEX_PRE_FILTER`
+- `PII_TOKEN_TTL_HOURS`
+
+Added to `agent-runner` service:
+- `KEEPER_URL=http://keeper:8001`
+
+### SDK Integration
+
+```python
+# AgentRunner.__init__
+self._pii_client = PIIKeeperClient(keeper_url=os.getenv("KEEPER_URL"))
+self._session_token_maps: dict[str, dict[str, str]] = {}
+
+# On session:message event
+if payload.get("token_map"):
+    self._pii_client.cache_token_map(session_id, payload["token_map"])
+
+# Before LLM call
+system_prompt, messages = await self._prepare_llm_payload(system_prompt, messages, session_id)
+
+# After LLM call
+final_text = await self._post_process_response(final_text, session_id)
+```
+
+---
+
 ## Dynamic Skill & Configuration Sync (Added 2026-05-24)
 
 Agents now support real-time configuration updates without requiring a process restart. This allows users to add/remove skills or modify personas via the Board UI and have those changes take effect immediately.
@@ -752,7 +830,9 @@ If Agent A knows Agent B, it does **not** mean B knows A. This is intentional:
 class Agent:
     id: str
     name: str
-    ...
+    description: str | None
+    persona: str | None
+    picture: str | None         # UUID of the blob in Redis (DB 10)
     known_agent_ids: list[str]   # JSON column; default []
 ```
 
@@ -1171,6 +1251,19 @@ elif event["type"] == "session:message":
 
 ---
 
+### Budget Enforcement
+
+Agents are subject to several budget constraints defined in `isli_core/budget.py` and enforced in the SDK:
+
+1.  **Lifetime Token Budget (`token_budget`)**: The total tokens an agent can consume before being automatically paused.
+2.  **Per-Turn Token Cap (`turn_token_cap`)**: A hard limit on the tokens sent to the LLM in a single turn (input + estimated output). 
+    - **Mechanism**: If the turn exceeds the cap, the SDK identifies `tool` role messages and truncates them proportionally until the turn fits within the limit.
+    - **Defaults**: 4,000 for local models (to ensure system prompts and context fit), 12,000 for cloud models.
+    - **Estimation**: Uses a stable heuristic of `len(text) // 3.5` with a 5% safety margin.
+3.  **Reasoning Budget**: Specific caps on tokens consumed during reasoning/Chain-of-Thought phases.
+
+---
+
 ## Agent System Gaps
  (2026-05-11 Research)
 
@@ -1198,6 +1291,8 @@ The following gaps were identified during a parallel 12-agent research review:
 - **No priority inversion detection** — high-priority tasks can be blocked behind low-priority ones.
 - **No conflict resolution for simultaneous assignments** — two tasks to the same agent may contradict each other.
 - **No monitoring for exponential relay degradation** — chain length and semantic drift are not measured.
-- ~~**Agent turn loop ignores `token_budget`**~~ — **Implemented 2026-05-21**. `isli_core/budget.py` enforces hard caps via `BudgetExceededError`; agent status set to `paused` on exceed. SDK reports LiteLLM `usage` after every turn.
+L1201: - ~~**Agent turn loop ignores `token_budget`**~~ — **Implemented 2026-05-21**. `isli_core/budget.py` enforces hard caps via `BudgetExceededError`; agent status set to `paused` on exceed. SDK reports LiteLLM `usage` after every turn.
+- ~~**Single oversized turn can deplete agent budget**~~ — **Implemented 2026-06-07**. `Agent.turn_token_cap` enforced in `isli-agent-sdk`. The SDK proportionally truncates `tool` role results if `estimated_input + max_tokens` exceeds the cap, ensuring the budget is preserved. Defaults: 4,000 (local) / 12,000 (cloud).
+
 
 > See `Memory/ISLI-Research-Report.md` for full details and recommendations.

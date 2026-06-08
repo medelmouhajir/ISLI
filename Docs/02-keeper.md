@@ -51,9 +51,23 @@ POST http://localhost:11434/api/embed
 }
 ```
 
-### 2. Context Injection (Fast-Path)
+### 2. Context Injection (Fast-Path) + PII Mesh
 
 Before any agent executes a task, the Keeper is called to produce a **context injection block**. Unlike standard RAG, ISLI uses a **pre-computed fast-path** to eliminate LLM latency during the injection phase.
+
+**PII Mesh integration (Added 2026-06-07):**
+When the agent has `pii_mesh_enabled: true`, the unified `POST /session-prep` endpoint returns **both** the context summary and a PII entity list in a single call:
+
+```json
+{
+  "context_summary": "Concise agent context...",
+  "entities": [
+    {"category": "email", "original_value": "alice@example.com", "confidence": 1.0}
+  ]
+}
+```
+
+Core translates `entities` into deterministic tokens (`{{PII:email:hash}}`) and forwards the scrubbed context + token_map to the agent runner. The agent caches the map locally and re-hydrates the LLM response with zero network latency.
 
 **Architecture (2026-06-04 Refactor):**
 - **Ingress-driven**: When a message or task is created, Core writes to a Redis Stream (`context:requests`) immediately.
@@ -268,8 +282,10 @@ The Keeper exposes a minimal internal HTTP API on `localhost:8001`:
 | `/model/route` | POST | Choose best secondary model for a task/session. Receives `{task_description, complexity_score, complexity_tier, secondary_models, default_model}`. Returns `{provider, model_id, reason}`. |
 | `/heartbeat` | POST | Validate an agent heartbeat |
 | `/heartbeat/validate` | POST | Deep heartbeat validation with LLM judge. Timeout: **180s** (was 30s). Records inference telemetry on failure. |
-| `/pii/scrub` | POST | Regex + LLM PII masking |
-| `/pii/unscrub` | POST | Restore masked PII placeholders |
+| `/session-prep` | POST | Unified context + PII detection. Returns `{context_summary, entities}`. Mode: `full` or `pii_only`. |
+| `/session-prep/rehydrate` | POST | Replace `{{PII:...}}` tokens with original values from the vault. |
+| `/pii/scrub` | POST | Legacy regex + LLM PII masking (kept for backward compatibility) |
+| `/pii/unscrub` | POST | Legacy restore masked PII placeholders (kept for backward compatibility) |
 | `/skill/clean` | POST | Extract structured data from raw skill output |
 | `/verify/logic` | POST | LLM-based logic verification |
 | `/models` | GET | List available Ollama models |
@@ -330,6 +346,7 @@ All Keeper prompts live in a single `prompts.yaml` at the repo root and are load
 | `keeper.journal_update` | `/journal/update` | `{old_journal}`, `{recent_messages}` |
 | `keeper.heartbeat_anomaly` | `/heartbeat` | `{agent_id}`, `{status}`, `{activity}` |
 | `keeper.heartbeat_validate` | `/heartbeat/validate` | `{agent_id}`, `{heartbeat_at}`, `{compressed_log}` |
+| `keeper.session_prep` | `/session-prep` | `{context}`, `{user_message}` |
 | `keeper.pii_scrub` | `/pii/scrub` | `{text}` |
 | `keeper.skill_clean` | `/skill/clean` | `{extraction_goal}`, `{raw_data}` |
 | `keeper.verify_logic` | `/verify/logic` | `{context}`, `{text}` |
@@ -381,7 +398,7 @@ Tasks are assigned a priority from **P0 (Highest)** to **P3 (Lowest)**. High-pri
 | Tier | Name | Endpoints | Default Timeout |
 |------|------|-----------|-----------------|
 | **P0** | **Critical** | `/context/inject`, `/model/route` | 45s (Fail-Fast) |
-| **P1** | **High** | `/heartbeat`, `/pii/scrub` | 120s |
+| **P1** | **High** | `/heartbeat`, `/session-prep` | 120s |
 | **P2** | **Standard** | `/summarize`, `/skill/clean`, `/verify/logic` | 120s |
 | **P3** | **Background** | `/journal/update`, `/embed` | 300s |
 

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     otel_service_name: str = "isli-audio"
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
     models_dir: str = "/app/models"
+    blob_store_db: int = 10
 
     @field_validator("jwt_secret", mode="before")
     @classmethod

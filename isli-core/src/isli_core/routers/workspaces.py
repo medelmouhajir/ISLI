@@ -60,7 +60,7 @@ async def upload_bytes_to_workspace(
                 url,
                 data=form_data,
                 files=files,
-                headers={"X-Internal-Auth": f"Bearer {token}"},
+                headers={"X-Internal-Auth": token},
             )
             resp.raise_for_status()
             return resp.json()
@@ -80,7 +80,7 @@ async def _proxy_request(method: str, endpoint: str, payload: dict[str, Any]) ->
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            resp = await client.post(url, json=payload, headers={"X-Internal-Auth": f"Bearer {token}"})
+            resp = await client.post(url, json=payload, headers={"X-Internal-Auth": token})
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPStatusError as exc:
@@ -189,7 +189,7 @@ async def upload_workspace_file(
                 "scope": scope,
                 "scope_id": scope_id or agent_id
             }
-            resp = await client.post(url, data=data, files=files, headers={"X-Internal-Auth": f"Bearer {token}"})
+            resp = await client.post(url, data=data, files=files, headers={"X-Internal-Auth": token})
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPStatusError as exc:
@@ -224,7 +224,7 @@ async def download_workspace_file(
                 "scope": scope,
                 "scope_id": scope_id or agent_id
             }
-            async with client.stream("GET", url, params=params, headers={"X-Internal-Auth": f"Bearer {token}"}) as resp:
+            async with client.stream("GET", url, params=params, headers={"X-Internal-Auth": token}) as resp:
                 resp.raise_for_status()
                 async for chunk in resp.aiter_bytes():
                     yield chunk

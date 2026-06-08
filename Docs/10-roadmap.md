@@ -662,3 +662,24 @@ This roadmap is derived from the comprehensive 12-agent research review document
 - Child task (clone) is linked to parent; parent shows child in "Execution History".
 - Board UI shows "Upcoming" filter working correctly for scheduled tasks.
 - All containers healthy after rebuild.
+
+---
+
+## Post-Roadmap — Context Safety (Hard Output Caps) (2026-06-07) ✅
+
+**Goal:** Prevent silent context window exhaustion by capping the size of data returned by high-volume skills (file-read, db-query, git-log).
+
+| Task | Effort | Deliverable |
+|------|--------|-------------|
+| file-read character cap | 0.5 day | 16k default, 64k max char cap in `isli-workspace`; server-side clamping; line-range slicing logic; enriched truncation notice with pagination hints |
+| db-query row/cell cap | 0.5 day | 50 row default; 500 char cell cap in `isli-skills`; max_rows+1 fetch optimization for `has_more` flag; original byte count hints in truncated cells |
+| git-log character cap | 0.3 day | 12k char cap in `isli-workspace` to protect against large diffs; explicit `truncated` status |
+| Structured observability | 0.2 day | Always return explicit `truncated: true/false` boolean across all three skills for system-wide tracking |
+| Agent SDK integration | 0.3 day | Update `file_read`, `db_query`, and `git_log` SDK tools to expose new parameters and defaults |
+| Documentation update | 0.2 day | Update `Docs/06-skills.md`, `Docs/10-roadmap.md`, and SDK README |
+
+**Exit criteria:**
+- Agent reading 1MB file receives 16KB + pagination notice + `truncated: true`.
+- Agent querying large DB table receives 50 rows + `has_more: true`.
+- Agent running `git log --patch` on large diff is capped by 12KB char limit.
+- All containers healthy after rebuild.

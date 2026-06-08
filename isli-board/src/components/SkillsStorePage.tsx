@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { ShoppingBag, Download, Search, ExternalLink, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
-import { postJSON } from '@/lib/api'
+import { postJSON, getJSON } from '@/lib/api'
+import type { SkillMetadata } from '@/types'
 
 interface RegistrySkill {
   id: string
@@ -25,7 +26,21 @@ export function SkillsStorePage() {
 
   useEffect(() => {
     fetchRegistry()
+    fetchInstalledSkills()
   }, [])
+
+  const fetchInstalledSkills = async () => {
+    try {
+      const allSkills = await getJSON<SkillMetadata[]>('/v1/skills')
+      // Dynamic skills are the ones installed via the store
+      const dynamicIds = allSkills
+        .filter(s => s.type === 'dynamic')
+        .map(s => s.name)
+      setInstalledIds(new Set(dynamicIds))
+    } catch (err) {
+      console.error('Failed to fetch installed skills:', err)
+    }
+  }
 
   const fetchRegistry = async () => {
     setIsLoading(true)

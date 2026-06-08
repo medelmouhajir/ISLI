@@ -30,7 +30,7 @@ class ContentScanner:
     }
 
     @classmethod
-    def scan(cls, text: str | None) -> ScanResult:
+    def scan(cls, text: str | None, pii_enabled: bool = True, threshold: float = 0.5) -> ScanResult:
         if not text:
             return ScanResult(blocked=False, risk_score=0.0)
 
@@ -43,12 +43,13 @@ class ContentScanner:
                 risk_score += 0.6
                 reasons.append(f"Prompt injection marker: {pattern}")
 
-        for name, pattern in cls.PII_PATTERNS.items():
-            if re.search(pattern, text):
-                risk_score += 0.15
-                reasons.append(f"Possible PII detected: {name}")
+        if pii_enabled:
+            for name, pattern in cls.PII_PATTERNS.items():
+                if re.search(pattern, text):
+                    risk_score += 0.15
+                    reasons.append(f"Possible PII detected: {name}")
 
-        blocked = risk_score >= 0.5
+        blocked = risk_score >= threshold
         logger.info(
             "content.scan_result",
             blocked=blocked,

@@ -1,7 +1,8 @@
+import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -62,13 +63,31 @@ def _compress_activity_log(
 
     Deduplicates consecutive entries with identical *summary* text (ignoring
     timestamp), prefixes each with its timestamp, and truncates from the end.
+    Entries older than 24 hours are dropped. If the most recent entry is older
+    than 1 hour, the agent is considered idle and no anomaly is possible.
     """
+    now = datetime.now(timezone.utc)
+    cutoff_24h = now - timedelta(hours=24)
+    cutoff_1h = now - timedelta(hours=1)
+
+    # Filter to entries within 24 hours
+    recent_entries = [(ts, s) for ts, s in entries if ts >= cutoff_24h]
+
+    # Also guard against a single 23-hour-old entry leaking stale data
+    last_activity = max((ts for ts, _ in entries), default=None)
+    if not recent_entries or (last_activity and last_activity < cutoff_1h):
+        age_text = ""
+        if last_activity:
+            hours_ago = int((now - last_activity).total_seconds() // 3600)
+            age_text = f" ({hours_ago}h ago)"
+        return f"[No recent activity{age_text}] Agent is idle — no anomaly possible."
+
     # Deduplicate consecutive identical summaries
     deduped: list[tuple[datetime, str]] = []
     prev_summary: str | None = None
     count = 1
     first_ts = None
-    for ts, summary in entries:
+    for ts, summary in recent_entries:
         if summary == prev_summary:
             count += 1
         else:
@@ -126,7 +145,7 @@ async def _generate_with_ollama(
         "agent_id": agent_id,
         "endpoint": endpoint,
         "model": model,
-        "prompt": prompt[:100],
+        "prompt": prompt[:2000],
     }
 
     metrics = get_metrics()
@@ -147,15 +166,41 @@ async def _generate_with_ollama(
         raise HTTPException(status_code=503, detail=str(exc))
 
 
+async def _keep_model_warm():
+    """Send a lightweight generate request every 60s to keep the model in VRAM."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            async with OllamaClient().session() as client:
+                await client.generate(
+                    model=get_gen_model(),
+                    prompt=".",
+                    options={"num_predict": 1},
+                    keep_alive=-1,
+                )
+        except Exception:
+            pass  # non-critical background task
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("keeper.startup", service=SERVICE_NAME)
     await init_db()
+    from .session_prep import init_pii_vault
+    await init_pii_vault()
     priority_manager.start()
-    yield
-    await priority_manager.stop()
-    await close_db()
-    logger.info("keeper.shutdown", service=SERVICE_NAME)
+    warm_task = asyncio.create_task(_keep_model_warm())
+    try:
+        yield
+    finally:
+        warm_task.cancel()
+        try:
+            await warm_task
+        except asyncio.CancelledError:
+            pass
+        await priority_manager.stop()
+        await close_db()
+        logger.info("keeper.shutdown", service=SERVICE_NAME)
 
 
 app = FastAPI(
@@ -220,6 +265,8 @@ class HeartbeatRequest(BaseModel):
 class HeartbeatValidateRequest(BaseModel):
     agent_id: str
     heartbeat_at: str
+    consecutive_idle_beats: int = 0
+    current_task_id: str | None = None
 
 
 class ScrubRequest(BaseModel):
@@ -834,6 +881,8 @@ async def heartbeat_validate(req: HeartbeatValidateRequest, auth: dict = Depends
         prompt = get_prompts()["keeper"]["heartbeat_validate"].format(
             agent_id=req.agent_id,
             heartbeat_at=req.heartbeat_at,
+            consecutive_idle_beats=req.consecutive_idle_beats,
+            current_task_id=req.current_task_id or "None",
             compressed_log=compressed_log,
         )
 
@@ -857,7 +906,7 @@ async def heartbeat_validate(req: HeartbeatValidateRequest, auth: dict = Depends
             if anomaly:
                 trusted_patterns = [
                     "crash", "fatal", "infinite loop", "infinite",
-                    "stuck", "loop", "repeated error", "repeated failure",
+                    "stuck", "repeated error", "repeated failure",
                     "retrying the same", "endless loop", "frozen",
                 ]
                 if not any(tp in anomaly for tp in trusted_patterns):
@@ -866,9 +915,22 @@ async def heartbeat_validate(req: HeartbeatValidateRequest, auth: dict = Depends
                         agent_id=req.agent_id,
                         original_anomaly=verdict.get("anomaly"),
                     )
-                    return {"is_valid": True, "anomaly": None}
-            return verdict
-        return {"is_valid": True}
+                    verdict = {"is_valid": True, "anomaly": None}
+        else:
+            verdict = {"is_valid": True}
+
+        latency = (time.monotonic() - start) * 1000
+        metrics = get_metrics()
+        metrics.record_inference(
+            agent_id=req.agent_id,
+            endpoint="heartbeat/validate",
+            model=get_gen_model(),
+            latency_ms=latency,
+            prompt=prompt,
+            completion=json.dumps(verdict),
+            status="success",
+        )
+        return verdict
     except Exception as exc:
         latency = (time.monotonic() - start) * 1000
         if isinstance(exc, httpx.TimeoutException):
@@ -950,6 +1012,27 @@ async def pii_scrub(
         logger.error("keeper.pii_scrub_failed", error=str(exc))
         # Fail-Safe: Return regex-scrubbed version if LLM fails
         return {"scrubbed_text": text, "mapping": mapping, "note": "LLM pass failed, only regex pass applied"}
+
+
+from .session_prep import session_prep, rehydrate as session_rehydrate
+from .pii_models import SessionPrepRequest, RehydrateRequest
+
+@app.post("/session-prep")
+async def session_prep_endpoint(
+    req: SessionPrepRequest,
+    auth: dict = Depends(require_internal_auth),
+):
+    """Unified context injection + PII anonymization."""
+    return await session_prep(req)
+
+
+@app.post("/session-prep/rehydrate")
+async def session_prep_rehydrate(
+    req: RehydrateRequest,
+    auth: dict = Depends(require_internal_auth),
+):
+    """Re-hydrate tokens back to original values."""
+    return await session_rehydrate(req)
 
 
 @app.post("/pii/unscrub")

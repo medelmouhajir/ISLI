@@ -88,6 +88,8 @@ SKILL_REGISTRY = {
     "create-engineering-plan": "inline",
     "ui-components": "inline",
     "notify-user": "inline",
+    "list-kanban-tasks": "inline",
+    "update-kanban-task": "inline",
 }
 
 # Metadata exposed via GET /v1/skills for dynamic skill discovery.
@@ -331,6 +333,16 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
         "description": "Send a notification to a user through the unified notification system. Respects user preferences, quiet hours, and rate limits (max 20/hour per user per agent).",
         "type": "inline",
         "category": "communication",
+    },
+    "list-kanban-tasks": {
+        "description": "Query the Kanban board for tasks based on status, assignee, or tags.",
+        "type": "inline",
+        "category": "kanban",
+    },
+    "update-kanban-task": {
+        "description": "Update an existing Kanban task's status, priority, or append a comment/handoff note.",
+        "type": "inline",
+        "category": "kanban",
     },
 }
 
@@ -797,6 +809,135 @@ async def skill_proxy(
             await db.commit()
             return {"status": "ok", "name": secret_name, "value": value}
 
+        if skill_name == "create-kanban-task" and action == "create":
+            title = body_json.get("title")
+            if not title:
+                raise HTTPException(status_code=400, detail="Missing title in request body")
+
+            from isli_core.routers.tasks import _create_task_core, TaskCreate, TaskOut
+            from datetime import datetime
+
+            scheduled_at_raw = body_json.get("scheduled_at")
+            scheduled_at: datetime | None = None
+            if scheduled_at_raw:
+                try:
+                    scheduled_at = datetime.fromisoformat(scheduled_at_raw.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=f"Invalid scheduled_at format: {exc}")
+
+            payload = TaskCreate(
+                title=title,
+                description=body_json.get("description"),
+                type=body_json.get("task_type", "task"),
+                priority=body_json.get("priority", 3),
+                agent_id=body_json.get("target_agent_id"),
+                created_by=agent_id,
+                input=body_json.get("input_data", ""),
+                parent_task_id=body_json.get("parent_task_id"),
+                scheduled_at=scheduled_at,
+                cron_expression=body_json.get("cron_expression"),
+            )
+
+            task = await _create_task_core(db, payload, estop_active=request.app.state.estop.active)
+            return {
+                "status": "created",
+                "task": TaskOut.model_validate(task).model_dump(mode="json"),
+            }
+
+        if skill_name == "list-kanban-tasks" and action == "list":
+            from isli_core.models import Task
+            from isli_core.routers.tasks import TaskOut
+            from sqlalchemy import select
+
+            stmt = select(Task).where(Task.deleted_at.is_(None))
+            if body_json.get("status"):
+                stmt = stmt.where(Task.status == body_json.get("status"))
+            if body_json.get("assignee_id"):
+                stmt = stmt.where(Task.agent_id == body_json.get("assignee_id"))
+            
+            # Use tags if provided in body
+            tags = body_json.get("tags")
+            if tags:
+                if isinstance(tags, str):
+                    tags = [tags]
+                for tag in tags:
+                    stmt = stmt.where(Task.tags.contains([tag]))
+
+            stmt = stmt.order_by(Task.created_at.desc())
+            result = await db.execute(stmt)
+            tasks = result.scalars().all()
+            return [TaskOut.model_validate(t).model_dump(mode="json") for t in tasks]
+
+        if skill_name == "update-kanban-task" and action == "update":
+            task_id = body_json.get("task_id")
+            if not task_id:
+                raise HTTPException(status_code=400, detail="Missing task_id in request body")
+            
+            from isli_core.models import Task
+            from isli_core.routers.tasks import TaskOut, VALID_STATUSES
+            from isli_core.event_manager import EventManager
+            from isli_core.audit_writer import AuditWriter
+            from datetime import datetime, timezone
+
+            result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
+            task = result.scalar_one_or_none()
+            if not task:
+                raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+            changes = {}
+            new_status = body_json.get("new_status")
+            if new_status:
+                if new_status not in VALID_STATUSES:
+                    raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
+                if task.status != new_status:
+                    old_status = task.status
+                    task.status = new_status
+                    changes["status"] = new_status
+                    if new_status == "doing":
+                        task.started_at = datetime.now(timezone.utc)
+                    if new_status in ("done", "failed"):
+                        task.completed_at = datetime.now(timezone.utc)
+                    
+                    await EventManager.emit("task:moved", {
+                        "task_id": task_id,
+                        "from": old_status,
+                        "to": new_status,
+                        "task": TaskOut.model_validate(task).model_dump(mode="json")
+                    })
+
+            new_priority = body_json.get("new_priority")
+            if new_priority is not None:
+                task.priority = new_priority
+                changes["priority"] = new_priority
+
+            comment = body_json.get("comment")
+            if comment:
+                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                addition = f"\n\n--- Handoff/Comment ({timestamp}) ---\n{comment}"
+                task.description = (task.description or "") + addition
+                changes["description_updated"] = True
+
+            if changes:
+                task.updated_at = datetime.now(timezone.utc)
+                task.version += 1
+                await db.commit()
+                await db.refresh(task)
+                
+                await AuditWriter.write(
+                    db, actor_type="agent", actor_id=agent_id, action="update_task_skill",
+                    target_type="task", target_id=task.id,
+                    payload={"changes": changes, "comment": comment},
+                )
+                await db.commit()
+                
+                await EventManager.emit("task:updated", {
+                    "task_id": task_id,
+                    "changes": changes,
+                    "task": TaskOut.model_validate(task).model_dump(mode="json")
+                })
+
+            return {"status": "success", "task_id": task_id, "updated": bool(changes)}
+
         raise HTTPException(status_code=404, detail=f"Action '{action}' not found for skill '{skill_name}'")
 
     body = body_bytes
@@ -816,7 +957,7 @@ async def skill_proxy(
         skill_name=skill_name,
         model_id=None,
         budget_exceeded=False,
-        estop_active=False,
+        estop_active=request.app.state.estop.active,
     )
     if not decision.allow:
         detail: dict[str, Any] = {

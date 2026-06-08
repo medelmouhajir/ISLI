@@ -176,33 +176,57 @@ class TelegramAdapter(ChannelAdapter):
         import asyncio
         import base64
         import io
+        import uuid
         from telegram import InputFile
         from ..attachments import convert_wav_to_opus_ogg
+        from ..redis_client import get_blob_redis
 
         agent_id = kwargs.get("agent_id")
         audio_b64 = kwargs.get("audio_b64")
+        audio_ref = kwargs.get("audio_ref")
+        
+        # Detect blob token in text if present
+        if text and "blob:audio:" in text and not audio_b64 and not audio_ref:
+            import re
+            match = re.search(r"(blob:audio:[a-f0-9-]+)", text)
+            if match:
+                audio_ref = match.group(1)
+                text = text.replace(audio_ref, "").strip()
+
         token = await self._resolve_token(agent_id)
         last_exc = None
         parse_mode = kwargs.get("parse_mode")
 
-        # --- Send text message first (fail-safe ordering) ---
-        for attempt in range(4):
+        # --- Resolve audio from blob store if ref is provided ---
+        if audio_ref and not audio_b64:
             try:
-                bot = Bot(token=token) if token != self.token else self.bot
-                await bot.send_message(
-                    chat_id=channel_user_id,
-                    text=text,
-                    parse_mode=parse_mode,
-                )
-                break
+                redis = await get_blob_redis()
+                wav_bytes = await redis.get(audio_ref)
+                if wav_bytes:
+                    audio_b64 = base64.b64encode(wav_bytes).decode("utf-8")
+                    logger.info("telegram.outbound_blob_resolved", ref=audio_ref, size=len(wav_bytes))
             except Exception as exc:
-                last_exc = exc
-                if attempt < 3:
-                    delay = min(1.0 * (2 ** attempt), 10.0)
-                    await asyncio.sleep(delay)
-        else:
-            logger.error("telegram.send_text_failed", chat_id=channel_user_id, error=str(last_exc), agent_id=agent_id)
-            return False
+                logger.error("telegram.blob_resolution_failed", ref=audio_ref, error=str(exc))
+
+        # --- Send text message first (fail-safe ordering) ---
+        if text:
+            for attempt in range(4):
+                try:
+                    bot = Bot(token=token) if token != self.token else self.bot
+                    await bot.send_message(
+                        chat_id=channel_user_id,
+                        text=text,
+                        parse_mode=parse_mode,
+                    )
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 3:
+                        delay = min(1.0 * (2 ** attempt), 10.0)
+                        await asyncio.sleep(delay)
+            else:
+                logger.error("telegram.send_text_failed", chat_id=channel_user_id, error=str(last_exc), agent_id=agent_id)
+                return False
 
         # --- Send voice message if audio is present ---
         if audio_b64:
@@ -210,7 +234,7 @@ class TelegramAdapter(ChannelAdapter):
                 wav_bytes = base64.b64decode(audio_b64)
                 ogg_bytes = convert_wav_to_opus_ogg(wav_bytes)
                 voice_file = InputFile(io.BytesIO(ogg_bytes), filename="voice.ogg")
-                caption = text[:1024] if len(text) <= 1024 else None
+                caption = text[:1024] if text and len(text) <= 1024 else None
 
                 bot = Bot(token=token) if token != self.token else self.bot
                 for attempt in range(4):
@@ -254,29 +278,6 @@ class TelegramAdapter(ChannelAdapter):
         except Exception as exc:
             logger.error("telegram.typing_failed", chat_id=channel_user_id, error=str(exc), agent_id=agent_id)
 
-    async def _transcribe_voice(self, audio_bytes: bytes, language: str = "auto") -> dict:
-        """Send audio bytes to isli-audio for transcription via multipart upload."""
-        if not self.audio_url:
-            return {"text": "", "error": "Audio service not configured"}
-        try:
-            headers = {}
-            if self.jwt_secret:
-                token = _create_internal_token(self.jwt_secret, agent_id="channels", scopes=["audio:stt"])
-                headers["X-Internal-Auth"] = token
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                files = {"audio": ("voice.ogg", audio_bytes, "audio/ogg")}
-                data = {"language": language}
-                resp = await client.post(
-                    f"{self.audio_url}/stt/transcribe",
-                    files=files,
-                    data=data,
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                return resp.json()
-        except Exception as exc:
-            logger.error("telegram.transcribe_failed", error=str(exc))
-            return {"text": "", "error": str(exc)}
 
     def parse_update(self, raw_update: dict) -> Optional[InboundMessage]:
         try:
@@ -310,6 +311,9 @@ class TelegramAdapter(ChannelAdapter):
 
     async def handle_webhook(self, raw_update: dict, agent_id: str):
         """Handle incoming webhook and forward to Core."""
+        import uuid
+        from ..redis_client import get_blob_redis
+
         inbound = self.parse_update(raw_update)
         if not inbound:
             return {"status": "ignored"}
@@ -343,36 +347,28 @@ class TelegramAdapter(ChannelAdapter):
             elif message and message.audio:
                 voice_file = await message.audio.get_file()
 
-            if voice_file and self.audio_url:
+            if voice_file:
                 audio_bytes = await voice_file.download_as_bytearray()
-                result = await self._transcribe_voice(bytes(audio_bytes))
-                transcribed = result.get("text", "").strip()
-                if transcribed:
-                    logger.info(
-                        "telegram.voice_transcribed",
-                        user_id=user_id,
-                        language=result.get("language"),
-                        confidence=result.get("confidence"),
-                        text_len=len(transcribed),
-                    )
-                    # Replace inbound text with transcription
-                    inbound.text = transcribed
-                    # Preserve original voice in metadata for audit
-                    inbound.metadata["voice_transcription"] = {
-                        "original_language": result.get("language"),
-                        "confidence": result.get("confidence"),
-                        "stt_model": result.get("model"),
-                    }
-                else:
-                    logger.warning("telegram.voice_transcription_empty", user_id=user_id)
-                    await self.send_message(
-                        user_id,
-                        "Sorry, I couldn't understand that voice message. Please try again or send text.",
-                        agent_id=agent_id,
-                    )
-                    return {"status": "transcription_empty"}
+                
+                # Store in Redis blob store and pass token to Core
+                blob_id = str(uuid.uuid4())
+                blob_key = f"blob:audio:{blob_id}"
+                
+                redis = await get_blob_redis()
+                await redis.setex(blob_key, 86400, bytes(audio_bytes))
+                
+                logger.info(
+                    "telegram.voice_stored",
+                    user_id=user_id,
+                    blob_key=blob_key,
+                    size=len(audio_bytes),
+                )
+                
+                # Forward token to Core; Core will call STT
+                inbound.text = blob_key
+                inbound.metadata["voice_ref"] = blob_key
         except Exception as exc:
-            logger.error("telegram.voice_processing_failed", user_id=user_id, error=str(exc))
+            logger.error("telegram.voice_storage_failed", user_id=user_id, error=str(exc))
             # Fail open: proceed with empty text so Core can handle it
 
         # Normal message flow

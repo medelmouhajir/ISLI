@@ -20,6 +20,7 @@ interface AgentFormData {
   model_provider: string
   model_id: string
   token_budget: string
+  turn_token_cap: string
 }
 
 export function CreateAgentPage() {
@@ -34,6 +35,7 @@ export function CreateAgentPage() {
     model_provider: '',
     model_id: '',
     token_budget: '',
+    turn_token_cap: '',
   })
 
   const { data: providers = [] } = useQuery({
@@ -64,6 +66,7 @@ export function CreateAgentPage() {
         ...formData,
         id: formData.id || undefined,
         token_budget: formData.token_budget ? Number(formData.token_budget) : null,
+        turn_token_cap: formData.turn_token_cap ? Number(formData.turn_token_cap) : null,
       })
       navigate('/agents')
     } catch (err) {
@@ -243,7 +246,7 @@ export function CreateAgentPage() {
                     </Select>
                   </div>
 
-                  <div className="space-y-1.5 md:col-span-2">
+                  <div className="space-y-1.5 md:col-span-1">
                     <label className="text-[10px] tracking-widest text-text-muted uppercase">Token Budget (LIFETIME)</label>
                     <div className="relative">
                       <Input 
@@ -254,6 +257,20 @@ export function CreateAgentPage() {
                         className="bg-bg-surface border-border-dim focus:border-accent-cyan text-text-primary rounded-none h-12 pl-12"
                       />
                       <Database className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted opacity-50" />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5 md:col-span-1">
+                    <label className="text-[10px] tracking-widest text-text-muted uppercase">Per-Turn Cap</label>
+                    <div className="relative">
+                      <Input 
+                        type="number"
+                        value={formData.turn_token_cap}
+                        onChange={(e) => updateField('turn_token_cap', e.target.value)}
+                        placeholder="e.g. 4000"
+                        className="bg-bg-surface border-border-dim focus:border-accent-cyan text-text-primary rounded-none h-12 pl-12"
+                      />
+                      <Zap className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted opacity-50" />
                     </div>
                   </div>
                 </div>

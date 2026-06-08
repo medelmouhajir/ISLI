@@ -42,15 +42,25 @@ export function AgentsPanel({ agents }: AgentsPanelProps) {
             <div className="shrink-0 relative">
               <div
                 className={cn(
-                  'w-8 h-8 rounded-lg flex items-center justify-center',
-                  a.status === 'online'
-                    ? 'bg-accent-green/10 text-accent-green'
-                    : a.status === 'paused'
-                    ? 'bg-accent-amber/10 text-accent-amber'
-                    : 'bg-accent-red/10 text-accent-red'
+                  'w-8 h-8 rounded-lg flex items-center justify-center overflow-hidden',
+                  !a.picture && (
+                    a.status === 'online'
+                      ? 'bg-accent-green/10 text-accent-green'
+                      : a.status === 'paused'
+                      ? 'bg-accent-amber/10 text-accent-amber'
+                      : 'bg-accent-red/10 text-accent-red'
+                  )
                 )}
               >
-                <Cpu className="w-4 h-4" />
+                {a.picture ? (
+                  <img 
+                    src={`/api/v1/blobs/${a.picture}`} 
+                    alt={a.name} 
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <Cpu className="w-4 h-4" />
+                )}
               </div>
               <span
                 className={cn(

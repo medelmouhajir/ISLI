@@ -3,12 +3,12 @@
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from isli_core.db import get_db
-from isli_core.auth import require_scopes
+from isli_core.auth import require_scopes, require_admin_auth
 from isli_core.security.content_scanner import ContentScanner
 from isli_core.security.policy_engine import PolicyEngine
 from isli_core.security.override_store import OverrideStore
@@ -121,3 +121,26 @@ async def check_policy(payload: PolicyCheckIn, db: AsyncSession = Depends(get_db
         rule=decision.rule,
         context_hash=decision.context_hash,
     )
+
+
+# ─── Emergency Stop ───────────────────────────────────────────────────
+
+class EStopStatusOut(BaseModel):
+    active: bool
+
+
+@router.get("/estop/status", response_model=EStopStatusOut)
+async def get_estop_status(request: Request):
+    return EStopStatusOut(active=request.app.state.estop.active)
+
+
+@router.post("/estop/trigger", response_model=EStopStatusOut)
+async def trigger_estop(request: Request, admin: str = Depends(require_admin_auth)):
+    await request.app.state.estop.trigger(reason=f"Admin trigger by {admin}")
+    return EStopStatusOut(active=True)
+
+
+@router.post("/estop/reset", response_model=EStopStatusOut)
+async def reset_estop(request: Request, admin: str = Depends(require_admin_auth)):
+    await request.app.state.estop.reset()
+    return EStopStatusOut(active=False)

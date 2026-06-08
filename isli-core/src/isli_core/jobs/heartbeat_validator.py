@@ -7,7 +7,8 @@ from isli_core.db import get_db_session_manual
 from isli_core.models import Agent
 from sqlalchemy import select
 
-ANOMALY_THRESHOLD = 3
+# ANOMALY_THRESHOLD = 3  # ~9 minutes at 3-min heartbeat intervals
+ANOMALY_THRESHOLD = 5    # ~15 minutes at 3-min heartbeat intervals
 ANOMALY_COUNTER_TTL_SECONDS = 600
 
 logger = structlog.get_logger()
@@ -36,9 +37,17 @@ async def heartbeat_validator_worker():
                             payload = event.get("payload", {})
                             agent_id = payload.get("agent_id")
                             heartbeat_at = payload.get("heartbeat_at")
-                            
+                            consecutive_idle_beats = payload.get("consecutive_idle_beats", 0)
+                            current_task_id = payload.get("current_task_id")
+
                             if agent_id and heartbeat_at:
-                                asyncio.create_task(validate_and_update(agent_id, heartbeat_at))
+                                asyncio.create_task(
+                                    validate_and_update(
+                                        agent_id, heartbeat_at,
+                                        consecutive_idle_beats=consecutive_idle_beats,
+                                        current_task_id=current_task_id,
+                                    )
+                                )
                     except Exception as e:
                         logger.debug("jobs.heartbeat_validator_parse_error", error=str(e))
                             
@@ -49,8 +58,19 @@ async def heartbeat_validator_worker():
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 60.0)
 
-async def validate_and_update(agent_id: str, heartbeat_at: str):
-    is_valid = await KeeperClient.validate_heartbeat(agent_id, heartbeat_at)
+async def validate_and_update(agent_id: str, heartbeat_at: str, consecutive_idle_beats: int = 0, current_task_id: str | None = None):
+    try:
+        is_valid = await asyncio.wait_for(
+            KeeperClient.validate_heartbeat(
+                agent_id, heartbeat_at,
+                consecutive_idle_beats=consecutive_idle_beats,
+                current_task_id=current_task_id,
+            ),
+            timeout=5.0
+        )
+    except asyncio.TimeoutError:
+        logger.warning("agent.heartbeat_validate_skipped_slow", agent_id=agent_id)
+        is_valid = True  # skip this beat, don't penalize the agent
     redis = await get_redis()
     counter_key = f"agent:heartbeat:anomaly:{agent_id}"
 

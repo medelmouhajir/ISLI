@@ -80,6 +80,32 @@ class CoreClient:
         resp.raise_for_status()
         return Task.model_validate(resp.json())
 
+    async def list_tasks(self, status: Optional[str] = None, agent_id: Optional[str] = None) -> list[Task]:
+        """List tasks from the Kanban board."""
+        params = {}
+        if status:
+            params["status"] = status
+        if agent_id:
+            params["agent_id"] = agent_id
+        
+        resp = await self.client.get(
+            "/v1/tasks",
+            params=params,
+            headers=self._get_headers(use_admin=True)
+        )
+        resp.raise_for_status()
+        return [Task.model_validate(t) for t in resp.json()]
+
+    async def update_task(self, task_id: str, payload: dict[str, Any]) -> Task:
+        """Update an existing task in the Kanban board."""
+        resp = await self.client.put(
+            f"/v1/tasks/{task_id}",
+            json=payload,
+            headers=self._get_headers(use_admin=True)
+        )
+        resp.raise_for_status()
+        return Task.model_validate(resp.json())
+
     async def heartbeat(self, agent_id: str) -> str:
         """Send heartbeat and receive a renewed JWT token."""
         resp = await self.client.post(

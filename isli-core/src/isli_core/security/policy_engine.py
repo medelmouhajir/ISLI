@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from isli_core.models import PolicyOverride, PermittedModel
 from isli_core.security.content_scanner import ContentScanner
+from isli_core.dynamic_config import get_setting
 
 logger = structlog.get_logger()
 
@@ -60,8 +61,11 @@ class PolicyEngine:
         budget_exceeded: bool = False,
         estop_active: bool = False,
     ) -> PolicyDecision:
-        # 1. Content scan
-        scan = ContentScanner.scan(input_text)
+        # 1. Content scan (PII and Injection)
+        pii_enabled = await get_setting(session, "security_pii_scrubber_enabled", scope="security", default=True)
+        injection_threshold = await get_setting(session, "security_prompt_injection_threshold", scope="security", default=0.5)
+
+        scan = ContentScanner.scan(input_text, pii_enabled=pii_enabled, threshold=injection_threshold)
         if scan.blocked:
             return PolicyDecision(
                 allow=False,

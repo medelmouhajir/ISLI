@@ -36,16 +36,23 @@ keeper:
     If an anomaly is found, describe it in one short sentence. Otherwise, respond with 'NONE'.
 
   heartbeat_validate: |
-    Analyze the recent activity for agent '{agent_id}'. Heartbeat received at: {heartbeat_at}
+    You are a reliability monitor for agent '{agent_id}'.
+
+    Heartbeat received at: {heartbeat_at}
+    Consecutive idle heartbeats: {consecutive_idle_beats}
+    Current in-flight task: {current_task_id}
 
     The Activity Log below is a summary of the agent's past session journals (conversation history), NOT a log of heartbeat events. Multiple entries close together simply reflect ongoing chat activity and are normal.
 
-    ONLY flag an anomaly if you see one of these:
-    - The agent is stuck retrying the same failing action repeatedly (e.g., repeated tool failures, repeated API errors).
-    - The agent is looping with no forward progress.
-    - A crash or fatal error appears in RECENT entries and has not been resolved.
+    An agent that has been idle for many beats is NORMAL if it has no pending tasks.
+    ONLY flag an anomaly if there is evidence of ACTIVE malfunction:
+    - The same tool or API call is failing repeatedly on the SAME task.
+    - A task has been in-flight for longer than 10 minutes with no updates.
+    - The agent's own logs report crashes or fatal errors.
 
     Ignore entries older than 24 hours unless the same failure repeats today.
+    If the Activity Log says the agent is idle with no recent activity, return is_valid: true.
+
     Activity Log:
     {compressed_log}
 
@@ -54,7 +61,7 @@ keeper:
     - "anomaly": string | null (short one-sentence description of the anomaly, or null)
 
     Example normal: {{"is_valid": true, "anomaly": null}}
-    Example anomaly: {{"is_valid": false, "anomaly": "Agent stuck in repetitive loop"}}
+    Example anomaly: {{"is_valid": false, "anomaly": "Task xyz stuck for 15 min with repeated API 500"}}
 
   pii_scrub: |
     Identify any REMAINING Personal Identifiable Information (PII) in the following text. PII includes names, proprietary IDs, and addresses. Do NOT re-scrub placeholders starting with [[PII_.
@@ -82,6 +89,30 @@ keeper:
     Agent Output: {text}
 
     Is this output valid? Respond with JSON: {{"is_valid": bool, "reason": "string"}}
+
+  session_prep: |
+    You are a context assembler and PII detection engine for an AI agent.
+
+    Your job has TWO parts, returned as a single JSON object:
+    1. Produce a concise context_summary for the agent's system prompt.
+    2. Detect ANY Personal Identifiable Information (PII) in the user's message and context.
+
+    PII categories: email, phone, name, address, ssn, credit_card, ip_address, api_key, password, proprietary_id.
+    For each PII entity found, emit an object with: category, original_value, confidence (0.0-1.0).
+
+    Return ONLY JSON:
+    {{
+      "context_summary": "string (max 300 words)",
+      "entities": [
+        {{"category": "email", "original_value": "alice@example.com", "confidence": 1.0}}
+      ]
+    }}
+
+    Context:
+    {context}
+
+    User Message:
+    {user_message}
 
   model_router: |
     You are a model router. Analyze the task and pick the best model from the available list.
@@ -123,6 +154,11 @@ agent:
        Create a Kanban task immediately with appropriate priority.
     4. Task depth > 2 or needs_human_approval -> HALT and surface state.
 
+    === PII MESH NOTICE ===
+    If the context or user message contains sensitive tokens like {{PII:category:hash}},
+    these are anonymized placeholders. Treat them as opaque references. Do NOT expand them.
+    The system will re-hydrate them automatically before the user sees the final response.
+
     === CONTEXT ===
     {context_summary}
     [Memory as of: {context_timestamp}]
@@ -153,6 +189,7 @@ agent:
     summarize: Summarize text into a concise format, optionally with a specific goal.
     translate: Translate text from one language to another.
     embed_text: Generate a vector embedding for a piece of text.
+    create_kanban_task: Create a new task on the Kanban board. Use this to delegate work to yourself or another agent. You may optionally schedule it for a future time (scheduled_at) or set a recurring cron expression (cron_expression) for periodic work.
     create_engineering_plan: Generate a structured implementation plan (PLAN.md) before starting complex tasks.
     test_skill: Dry-run test dynamic skill code in a sandbox with a test payload.
     register_skill: Register a new dynamic skill and submit it for human review. Call this ONLY after successful testing.

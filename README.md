@@ -92,3 +92,4 @@ All 7 implementation phases are complete:
 - Phase 9 — Browser Automation (Beta) — Hermes-style accessibility-tree snapshots with `@ref` IDs, persistent Playwright sessions, form filling, and screenshot capture
 - Phase 10 — Recurring Tasks & Full Scheduler — Standard 5-field cron support with transactional cloning, execution history, and "Upcoming" Kanban view
 - Phase 11 — Skill Metadata Updates — `update-skill` endpoint and SDK tool for modifying existing skill metadata without review gate
+- Phase 12 — Agent Identity Enhancements — Native support for agent avatars with specific upload endpoint, Redis blob storage (DB 10), and multi-view rendering (Grid, Panel, Detail)

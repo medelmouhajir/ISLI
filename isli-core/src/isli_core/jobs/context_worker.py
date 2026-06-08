@@ -33,6 +33,9 @@ from isli_core.redis_streams import (
 )
 from isli_core.routers.tasks import TaskOut
 
+from isli_core.compliance.pii_keeper_client import PIIKeeperClient
+from isli_core.dynamic_config import get_setting
+
 logger = structlog.get_logger()
 
 STREAM_NAME = "context:requests"
@@ -169,12 +172,20 @@ class ContextWorker:
         )
 
         if cached:
-            summary = cached
+            # cached is a dict when mesh is ON, str when OFF
+            if isinstance(cached, dict):
+                original_summary = cached.get("original_summary", "")
+                scrubbed_summary = cached.get("scrubbed_summary", "")
+                token_map = cached.get("token_map", {})
+            else:
+                original_summary = cached
+                scrubbed_summary = cached
+                token_map = {}
             logger.info("context_worker.cache_hit", type=type_, id=id_)
         else:
             logger.info("context_worker.cache_miss", type=type_, id=id_)
             try:
-                summary = await self._call_keeper(
+                original_summary, scrubbed_summary, token_map = await self._call_keeper(
                     agent_id,
                     task_description,
                     session_id,
@@ -189,20 +200,27 @@ class ContextWorker:
                 )
                 await acknowledge(STREAM_NAME, GROUP_NAME, message_id)
                 return
-            if summary:
+            if scrubbed_summary:
+                cache_value = scrubbed_summary
+                if token_map:
+                    cache_value = {
+                        "original_summary": original_summary,
+                        "scrubbed_summary": scrubbed_summary,
+                        "token_map": token_map,
+                    }
                 await ContextCache.set(
                     agent_id,
                     session_id,
                     task_description,
                     last_message_ids,
-                    summary,
+                    cache_value,
                     ttl=30,
                 )
 
-        if summary:
+        if scrubbed_summary:
             try:
                 await self._on_success(
-                    type_, id_, summary, payload, message_id
+                    type_, id_, original_summary, scrubbed_summary, token_map, payload, message_id
                 )
                 await acknowledge(STREAM_NAME, GROUP_NAME, message_id)
             except Exception as exc:
@@ -243,30 +261,64 @@ class ContextWorker:
         task_description: str | None,
         session_id: str | None,
         memory_similarity_threshold: float,
-    ) -> str | None:
-        """Fetch context from Keeper.  May raise ``KeeperAuthError``."""
+    ) -> tuple[str | None, str | None, dict[str, str]]:
+        """Fetch context from Keeper.
+        Returns (original_summary, scrubbed_summary, token_map).
+        May raise ``KeeperAuthError``."""
         # Load agent metadata for Keeper call
         async with async_session() as session:
             agent = await session.get(Agent, agent_id)
             if not agent:
                 logger.warning("context_worker.agent_not_found", agent_id=agent_id)
-                return None
+                return None, None, {}
 
-            return await KeeperClient.get_context_injection(
+            agent_config = agent.config or {}
+            if agent_config.get("pii_mesh_enabled", False):
+                # Unified context + PII path
+                sess = await session.get(Session, session_id) if session_id else None
+                messages = []
+                if sess and sess.messages:
+                    messages = sess.messages[-10:]
+                pii_client = PIIKeeperClient()
+                try:
+                    prep_result = await pii_client.session_prep(
+                        session_id=session_id or "",
+                        agent_id=agent_id,
+                        messages=messages,
+                        context_summary=sess.context_summary or "" if sess else "",
+                        mode="full",
+                        use_slm=agent_config.get("pii_use_slm", True),
+                        memory_similarity_threshold=memory_similarity_threshold,
+                        agent_config={"persona": agent.persona or "", "known_agent_ids": agent_config.get("known_agent_ids")},
+                    )
+                    original_summary = prep_result.get("original_context_summary", "")
+                    scrubbed_summary = prep_result.get("scrubbed_context_summary", "")
+                    token_map = prep_result.get("token_map", {})
+                    return original_summary, scrubbed_summary, token_map
+                except Exception as exc:
+                    logger.error("context_worker.pii_mesh_failed", error=str(exc), agent_id=agent_id)
+                    # Degrade to legacy path
+                    pass
+
+            # Legacy path (or mesh OFF / mesh failed)
+            summary = await KeeperClient.get_context_injection(
                 agent_id=agent_id,
                 task_description=task_description,
                 session_id=session_id,
                 agent_name=agent.name,
                 agent_description=agent.description,
                 memory_similarity_threshold=memory_similarity_threshold,
-                known_agent_ids=agent.config.get("known_agent_ids") if agent.config else None,
+                known_agent_ids=agent_config.get("known_agent_ids") if agent.config else None,
             )
+            return summary, summary, {}
 
     async def _on_success(
         self,
         type_: str,
         id_: str,
-        summary: str,
+        original_summary: str,
+        scrubbed_summary: str,
+        token_map: dict[str, str],
         payload: dict[str, Any],
         message_id: str,
     ) -> None:
@@ -278,7 +330,7 @@ class ContextWorker:
                     logger.warning("context_worker.task_not_found", task_id=id_)
                     return
 
-                task.context_summary = summary
+                task.context_summary = original_summary
                 task.status = "inbox"
                 task.context_inject_attempts = 0
                 task.context_inject_failed_at = None
@@ -313,10 +365,11 @@ class ContextWorker:
                     {
                         "task_id": task.id,
                         "changes": {
-                            "context_summary": summary,
+                            "context_summary": scrubbed_summary,
                             "status": "inbox",
                         },
                         "task": task_out,
+                        "token_map": token_map,
                     },
                 )
                 logger.info("context_worker.task_success", task_id=task.id)
@@ -327,7 +380,7 @@ class ContextWorker:
                     logger.warning("context_worker.session_not_found", session_id=id_)
                     return
 
-                sess.context_summary = summary
+                sess.context_summary = original_summary
                 sess.status = "ready"
                 sess.context_inject_attempts = 0
                 sess.context_inject_failed_at = None
@@ -374,7 +427,8 @@ class ContextWorker:
                         "user_id": sess.user_id,
                         "channel": sess.channel,
                         "messages": sess.messages,
-                        "context_summary": summary,
+                        "context_summary": scrubbed_summary,
+                        "token_map": token_map,
                         "metadata": sess.session_metadata or {},
                         "routed_model": {
                             "provider": sess.routed_model_provider,

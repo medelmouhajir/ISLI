@@ -31,7 +31,9 @@ import { ProviderSettingsPage } from '@/components/ProviderSettingsPage'
 import { LocalModelSettings } from '@/components/LocalModelSettings'
 import { GeneralSettingsPage } from '@/components/GeneralSettingsPage'
 import { AppearanceSettingsPage } from '@/components/AppearanceSettingsPage'
+import { SecuritySettingsPage } from '@/components/SecuritySettingsPage'
 import { PromptsPage } from '@/components/PromptsPage'
+import { SystemSettingsPage } from '@/components/SystemSettingsPage'
 import { NotificationPreferencesPage } from '@/components/NotificationPreferences'
 import { DigestPage } from '@/components/DigestPage'
 import PWAReloadPrompt from '@/components/PWAReloadPrompt'
@@ -51,7 +53,22 @@ function AppContent() {
   const { data: cost = null } = useCostDashboard()
   const { lastMessage } = useBoardSocket()
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('isli-sidebar-collapsed') === 'true'
+    } catch {
+      return false
+    }
+  })
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('isli-sidebar-collapsed', sidebarCollapsed.toString())
+    } catch {
+      // ignore
+    }
+  }, [sidebarCollapsed])
+
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
 
@@ -245,6 +262,8 @@ function AppContent() {
           <Route path="/settings/general" element={<GeneralSettingsPage />} />
           <Route path="/settings/appearance" element={<AppearanceSettingsPage />} />
           <Route path="/settings/providers" element={<ProviderSettingsPage />} />
+          <Route path="/settings/security" element={<SecuritySettingsPage />} />
+          <Route path="/settings/system" element={<SystemSettingsPage />} />
           <Route path="/settings/keeper" element={<LocalModelSettings />} />
           <Route path="/settings/prompts" element={<PromptsPage />} />
           <Route path="/settings/notifications" element={<NotificationPreferencesPage />} />

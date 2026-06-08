@@ -6,6 +6,7 @@ from isli_core.routers import (
     agents,
     audio,
     backups,
+    blobs,
     channels,
     commands,
     internal,
@@ -57,6 +58,7 @@ app.add_middleware(
 v1 = APIRouter(prefix="/v1")
 
 v1.include_router(agents.router)
+v1.include_router(blobs.router)
 v1.include_router(audio.router)
 v1.include_router(tasks.router)
 v1.include_router(skills.router)

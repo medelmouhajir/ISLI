@@ -21,6 +21,7 @@ Container           | Docker + docker-compose
 Tracing/Observ.     | Langfuse (self-hosted) or OpenTelemetry
 Channels            | python-telegram-bot, pyaileys, Twilio SDK, smtplib
 Browser Automation  | Playwright (async API, Chromium headless)
+PII Mesh            | Keeper SLM (Ollama) + regex pre-filter + local re-hydration
 Workspace VCS       | GitPython (libgit2 bindings) + system `git` binary
 ```
 
@@ -89,6 +90,7 @@ Workspace VCS       | GitPython (libgit2 bindings) + system `git` binary
 - **Redis Streams**: Used for task event broadcasting to all connected WebSocket clients.
 - **Redis Pub/Sub**: Used for agent heartbeat events.
 - **Redis Hash**: Used for session message buffers (with TTL).
+- **Redis Blob Store (DB 10)** (Added 2026-06-07): Dedicated database index for transient binary data (audio, screenshots) and persistent binary identity data (agent avatars). Uses opaque tokens to implement the Claim Check pattern, reducing network and logging overhead.
 - **Redis Draft + Debug Trace** (2026-05-31): `session:{id}:draft` stores partial streaming text for reconnect resilience. `session:{id}:debug_trace` stores `debug_prompt`/`debug_response` events (admin-only REST access, never broadcast over WS).
 
 ### React + TypeScript + Vite (Board Frontend)
@@ -167,6 +169,15 @@ class SystemSetting(Base):
 - **CORS Origins** — comma-separated allowed origins
 
 Each field is a debounced native input backed by `useUpdateSetting()` mutation (TanStack Query). Mutations invalidate the `['settings']` query cache.
+
+### Board UI — System & Environment Settings (Added 2026-06-07)
+
+`isli-board/src/components/SystemSettingsPage.tsx` (`/settings/system`) provides:
+
+- **PII Mesh Defaults** — `pii_mesh_default_enabled`, `pii_use_slm_default`, `pii_regex_pre_filter`, `pii_token_ttl_hours`
+- **Infrastructure** — `keeper_timeout_seconds`, `agent_spawn_timeout_seconds`
+
+All settings are toggle switches or numeric inputs backed by `useUpdateSetting()` with the same TanStack Query invalidation pattern as General Settings.
 
 ### Board UI — Prompts Management
 
@@ -350,6 +361,12 @@ AUDIO_STT_MODEL=whisper-tiny
 AUDIO_TTS_MODEL=piper-en-us-lessac-medium
 AUDIO_LANGUAGE=en
 
+# PII Mesh Defaults
+PII_MESH_DEFAULT_ENABLED=false
+PII_USE_SLM_DEFAULT=false
+PII_REGEX_PRE_FILTER=true
+PII_TOKEN_TTL_HOURS=24
+
 # Development
 AGENT_SDK_HOST_PATH=         # Absolute host path to isli-agent-sdk/src for live volume mount into agent containers
 AGENT_RUNNER_BUILD_CONTEXT=  # Absolute host path to isli-agent-sdk root for Docker image rebuilds
@@ -408,6 +425,10 @@ services:
       SKILLS_URL: http://skills:8100
       WORKSPACE_URL: http://workspace:8300
       AUDIO_URL: http://audio:8400
+      PII_MESH_DEFAULT_ENABLED: ${PII_MESH_DEFAULT_ENABLED:-false}
+      PII_USE_SLM_DEFAULT: ${PII_USE_SLM_DEFAULT:-false}
+      PII_REGEX_PRE_FILTER: ${PII_REGEX_PRE_FILTER:-true}
+      PII_TOKEN_TTL_HOURS: ${PII_TOKEN_TTL_HOURS:-24}
     secrets: [jwt_secret, admin_api_key, pii_encryption_key]
     networks: [isli-mesh, isli-data]
     depends_on:

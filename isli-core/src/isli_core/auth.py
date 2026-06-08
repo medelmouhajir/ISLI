@@ -50,6 +50,23 @@ def verify_internal_token(token: str) -> dict[str, Any]:
         ) from exc
 
 
+def verify_session_token(token: str | None = None, credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict[str, Any]:
+    """Verify a JWT token from either the Board UI (session) or internal services."""
+    token = token or credentials.credentials
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        # Support both 'internal' (agent-to-core) and 'session' (board-to-core) tokens
+        if payload.get("type") not in ("internal", "session"):
+            raise JWTError("Invalid token type")
+        return payload
+    except JWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session token",
+        ) from exc
+
+
 async def _check_token_revocation(payload: dict[str, Any]) -> None:
     """Reject the token if it was issued before the agent's current token_issued_at."""
     agent_id = payload.get("sub")

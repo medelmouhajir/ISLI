@@ -169,7 +169,65 @@ The admin key is stored in browser `localStorage`. This is a known limitation:
 - **Mitigation**: Board UI runs as a static SPA with CSP headers; no inline scripts
 - **Future**: Move to session-based auth or SSO when multi-tenancy is introduced
 
-### 6. Contact / Escalation
+### 6. Emergency Controls & Dynamic Security
+
+#### 6.1 Global Emergency Stop (E-Stop)
+
+ISLI includes a global circuit breaker that can halt all agent activity immediately.
+
+- **Effect**: Blocks all task creation, skill invocations, and agent coordination.
+- **Mechanism**: Redis pub/sub (`isli:estop` channel) + persistent key (`isli:estop:active`).
+- **Management**:
+    - **UI**: Settings -> Security -> Emergency Controls.
+    - **API (Trigger)**: `POST /v1/security/estop/trigger` (Requires Admin Key)
+    - **API (Reset)**: `POST /v1/security/estop/reset` (Requires Admin Key)
+    - **API (Status)**: `GET /v1/security/estop/status`
+
+#### 6.2 PII Mesh Verification
+
+To confirm the PII Mesh is active and no raw PII leaks to cloud LLMs:
+
+```bash
+# 1. Enable PII Mesh for an agent
+ curl -X PUT http://localhost:8000/v1/agents/kimi-02 \
+   -H "Authorization: Bearer $(cat secrets/admin_api_key.txt)" \
+   -H "Content-Type: application/json" \
+   -d '{"config": {"pii_mesh_enabled": true, "pii_use_slm": true}}'
+
+# 2. Send a test message containing PII
+ curl -X POST http://localhost:8000/v1/sessions/test-session/message \
+   -H "Authorization: Bearer $(cat secrets/admin_api_key.txt)" \
+   -H "Content-Type: application/json" \
+   -d '{"text": "My email is alice@example.com and SSN is 123-45-6789"}'
+
+# 3. Inspect the agent runner logs — the LLM payload should contain {{PII:email:...}} and {{PII:ssn:...}}
+ docker compose logs --tail=50 agent-runner-xxx | grep "pii_mesh\|scrubbed"
+
+# 4. Verify the user-facing response contains the original values (re-hydrated)
+# 5. Verify Core logs show no CRITICAL stray-token warnings
+ docker compose logs --tail=50 core | grep "pii_stray_token"
+```
+
+Expected: No `CRITICAL` lines. The user receives "My email is alice@example.com...", but the cloud LLM only saw tokens.
+
+### 6.3 Dynamic Security Settings
+
+Core security behaviors can be adjusted at runtime via the Board UI without restarting services.
+
+| Setting Key | Scope | Purpose | Default |
+|-------------|-------|---------|---------|
+| `security_pii_scrubber_enabled` | `security` | Toggle PII scanning (SSN, Email, CC) | `true` |
+| `security_prompt_injection_threshold` | `security` | Risk score threshold for blocking injections | `0.5` |
+| `security_default_monthly_usd_cap` | `security` | Default budget cap for new users | `50.0` |
+| `security_audit_retention_days` | `security` | Audit log retention period | `90` |
+| `pii_mesh_default_enabled` | `system` | Default PII Mesh state for new agents | `false` |
+| `pii_use_slm_default` | `system` | Default SLM usage for new agents | `false` |
+| `pii_regex_pre_filter` | `system` | Enable fast regex pre-filter before SLM | `true` |
+| `pii_token_ttl_hours` | `system` | Token map retention in Keeper vault | `24` |
+
+These settings are evaluated by the `PolicyEngine` during every interaction.
+
+### 7. Contact / Escalation
 
 | Scenario | Action |
 |----------|--------|

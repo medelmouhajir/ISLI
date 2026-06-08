@@ -14,6 +14,7 @@ from .auth import require_internal_auth, create_internal_token
 from .playwright_service import browse_url
 from .debugger import execute_with_trace
 from .db_query import validate_query, execute_query
+from .shell_executor import run_sandboxed_command
 from .browser.router import router as browser_router, set_session_manager
 from .browser.session_manager import BrowserSessionManager
 
@@ -166,7 +167,15 @@ class DbQueryRequest(BaseModel):
     query: str
     agent_id: str | None = None
     schema_name: str | None = None
-    max_rows: int = 100
+    max_rows: int = 50
+    max_cell_chars: int = 500
+
+
+class ShellExecRequest(BaseModel):
+    agent_id: str
+    command: str
+    timeout: int | None = None
+    working_dir: str | None = None
 
 
 KEEPER_URL = os.getenv("KEEPER_URL", "http://localhost:8001")
@@ -569,7 +578,25 @@ async def db_query(request: DbQueryRequest, auth: dict = Depends(require_interna
         sql=request.query,
         database_url=settings.database_url,
         max_rows=max_rows,
+        max_cell_chars=request.max_cell_chars,
         timeout_seconds=settings.db_query_timeout_seconds,
+    )
+    return result
+
+
+@app.post("/exec")
+@app.post("/skills/shell-exec/exec")
+async def shell_exec(request: ShellExecRequest, auth: dict = Depends(require_internal_auth)):
+    """Execute a shell command in a restricted sandbox."""
+    if len(request.command) > 4096:
+        raise HTTPException(status_code=400, detail="Command exceeds maximum length of 4096 characters")
+
+    logger.info("skills.shell_exec", agent_id=request.agent_id, command=request.command[:100])
+    result = await run_sandboxed_command(
+        agent_id=request.agent_id,
+        command=request.command,
+        timeout=request.timeout,
+        working_dir=request.working_dir,
     )
     return result
 

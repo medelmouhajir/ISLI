@@ -16,8 +16,10 @@ The standard library for building and running ISLI-compatible agents.
 |------|----------|-------------|
 | `web_search` | `web-search` | Search the web using a local SearXNG instance. |
 | `web_fetch` | `web-fetch` | Fetch and strip content from a URL. |
-| `file_read` | `file-read` | Read files from the agent's sandbox. |
+| `file_read` | `file-read` | Read files from the agent's sandbox. Supports line ranges and hard character caps (16k default). |
 | `file_write` | `file-write` | Write files to the agent's sandbox. |
+| `db_query` | `db-query` | Run read-only SQL queries. Supports row limiting (50 default) and cell truncation (500 chars). |
+| `git_log` | `git-log` | Show commit history. Capped by character count (12k) to prevent context bloat. |
 | `memory_save` | `memory-save` | Save facts to semantic memory. |
 | `memory_search`| `memory-search`| Search semantic memory. |
 | `send_message` | `send-message` | Send messages to users via channels. |

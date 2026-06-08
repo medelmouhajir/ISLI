@@ -58,6 +58,7 @@ instrument_fastapi(app, SERVICE_NAME)
 
 class TranscribeRequest(BaseModel):
     audio_b64: str | None = None
+    audio_ref: str | None = None
     language: str = "auto"
 
 
@@ -111,32 +112,51 @@ async def stt_transcribe(
     request: Request,
     audio: UploadFile | None = File(None),
     language: str = Form("auto"),
+    audio_ref: str | None = Form(None),
     auth: dict = Depends(require_internal_auth),
 ):
-    """Transcribe uploaded audio file to text. Supports multipart/form-data upload."""
+    """Transcribe audio to text. Supports multipart upload, JSON base64, or blob reference."""
     metrics = get_metrics()
     metrics.start_request()
     start = time.monotonic()
 
-    # Accept either multipart file upload or JSON with base64
-    if audio is not None:
+    audio_bytes = None
+
+    # 1. Check for audio_ref (Redis blob)
+    if audio_ref:
+        from isli_audio.redis_client import get_blob_redis
+        redis = await get_blob_redis()
+        audio_bytes = await redis.get(audio_ref)
+        if not audio_bytes:
+            logger.warning("audio.stt_ref_not_found", ref=audio_ref)
+            raise HTTPException(status_code=404, detail=f"Audio reference not found: {audio_ref}")
+        logger.info("audio.stt_ref_loaded", ref=audio_ref, size=len(audio_bytes))
+
+    # 2. Check for multipart file upload
+    elif audio is not None:
         audio_bytes = await audio.read()
+
+    # 3. Check for JSON body (audio_b64 or audio_ref)
     else:
         body = await request.body()
         if body:
             try:
                 data = TranscribeRequest.model_validate_json(body)
-                if data.audio_b64:
+                if data.audio_ref:
+                    from isli_audio.redis_client import get_blob_redis
+                    redis = await get_blob_redis()
+                    audio_bytes = await redis.get(data.audio_ref)
+                    if not audio_bytes:
+                        raise HTTPException(status_code=404, detail="Audio reference not found in store")
+                elif data.audio_b64:
                     audio_bytes = base64.b64decode(data.audio_b64)
-                else:
-                    raise HTTPException(status_code=400, detail="No audio provided")
+            except HTTPException:
+                raise
             except Exception:
-                raise HTTPException(status_code=400, detail="Invalid JSON body; provide multipart audio or audio_b64")
-        else:
-            raise HTTPException(status_code=400, detail="No audio provided")
+                raise HTTPException(status_code=400, detail="Invalid JSON body; provide multipart, audio_b64, or audio_ref")
 
     if not audio_bytes:
-        raise HTTPException(status_code=400, detail="Empty audio file")
+        raise HTTPException(status_code=400, detail="No audio provided")
 
     model_name = model_manager.get_model("stt")
     try:
@@ -176,7 +196,8 @@ async def tts_synthesize(
     req: SynthesizeRequest,
     auth: dict = Depends(require_internal_auth),
 ):
-    """Synthesize text to speech audio. Returns base64-encoded WAV."""
+    """Synthesize text to speech audio. Returns a blob reference."""
+    import uuid
     metrics = get_metrics()
     metrics.start_request()
     start = time.monotonic()
@@ -192,7 +213,18 @@ async def tts_synthesize(
             raise HTTPException(status_code=503, detail=f"Failed to download TTS voice: {exc}")
 
     try:
+        # result contains "audio_b64" (as bytes-like)
         result = tts_engine.synthesize(req.text, voice_name)
+        
+        # Strip Base64 and store raw bytes in Redis
+        wav_bytes = base64.b64decode(result["audio_b64"])
+        blob_id = str(uuid.uuid4())
+        blob_key = f"blob:audio:{blob_id}"
+        
+        from isli_audio.redis_client import get_blob_redis
+        redis = await get_blob_redis()
+        await redis.setex(blob_key, 86400, wav_bytes) # 24h TTL
+        
         latency = (time.monotonic() - start) * 1000
         metrics.record_inference(
             endpoint="tts",
@@ -200,8 +232,12 @@ async def tts_synthesize(
             latency_ms=latency,
             status="success",
         )
+        
         return {
-            **result,
+            "audio_ref": blob_key,
+            "format": result["format"],
+            "sample_rate": result["sample_rate"],
+            "duration_ms": result["duration_ms"],
             "voice": voice_name,
         }
     except Exception as exc:

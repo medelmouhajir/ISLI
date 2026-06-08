@@ -60,8 +60,16 @@ export function AgentsPage() {
             </div>
 
             <div className="flex items-start justify-between mb-4 relative z-10">
-              <div className="w-12 h-12 rounded-xl bg-bg-elevated border border-border-dim flex items-center justify-center text-accent-cyan group-hover:border-accent-cyan/50 transition-colors">
-                <Cpu className="w-6 h-6" />
+              <div className="w-12 h-12 rounded-xl bg-bg-elevated border border-border-dim flex items-center justify-center text-accent-cyan group-hover:border-accent-cyan/50 transition-colors overflow-hidden">
+                {agent.picture ? (
+                  <img 
+                    src={`/api/v1/blobs/${agent.picture}`} 
+                    alt={agent.name} 
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <Cpu className="w-6 h-6" />
+                )}
               </div>
               <StatusBadge status={agent.status} />
             </div>

@@ -65,6 +65,9 @@ class BaseWorkspaceRequest(BaseModel):
 
 class ReadRequest(BaseWorkspaceRequest):
     path: str
+    max_chars: int = 16000
+    line_start: int = 1
+    line_end: int | None = None
 
 
 class WriteRequest(BaseWorkspaceRequest):
@@ -154,7 +157,8 @@ class GitCheckoutRequest(BaseWorkspaceRequest):
 
 class GitLogRequest(BaseWorkspaceRequest):
     path: str
-    max_count: int = 10
+    max_count: int = 30
+    max_chars: int = 12000
 
 
 class PipInstallRequest(BaseWorkspaceRequest):
@@ -234,7 +238,10 @@ async def live():
 async def read(body: ReadRequest, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
     try:
-        result = read_file(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
+        result = read_file(
+            body.scope, body.effective_scope_id, settings.workspace_base_path, body.path,
+            max_chars=body.max_chars, line_start=body.line_start, line_end=body.line_end
+        )
         return {"status": "ok", **result}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -622,7 +629,7 @@ async def git_log_endpoint(body: GitLogRequest, auth: dict = Depends(require_int
     try:
         result = await git_log(
             body.scope, body.effective_scope_id, settings.workspace_base_path,
-            body.path, body.max_count,
+            body.path, body.max_count, body.max_chars,
         )
         return result
     except GitNotRepoError as exc:

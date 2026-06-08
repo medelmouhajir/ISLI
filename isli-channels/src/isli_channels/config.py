@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     core_api_url: str = ""
     webhook_secret: str = ""
     jwt_secret: str = ""
+    blob_store_db: int = 10
     otel_service_name: str = "isli-channels"
 
     @field_validator("jwt_secret", mode="before")

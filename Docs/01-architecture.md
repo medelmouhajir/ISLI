@@ -49,11 +49,12 @@ ISLI is built as a **layered, event-driven multi-agent system**. The architectur
   - **Audit Logging**: Cryptographically signed audit trail for system-level changes.
 - **Startup Architecture** (refactored 2026-06-04): `main.py` is a thin app factory (~80 lines). All startup logic lives in the `startup/` package:
   - `startup/infra.py` — signal handling, shutdown coordination
-  - `startup/notifications.py` — outbox handler registration
+  - `startup/outbox.py` — outbox handler registration (including session persistence and blob promotion)
   - `startup/agents.py` — `AgentProcessManager` initialization, stuck-agent reset, container reconciliation, online-agent restart
   - `startup/workers.py` — `WorkerManager` that data-drives all 16 background loops via a single `_WORKER_SPECS` list
   - `startup/__init__.py` — FastAPI `lifespan` context manager orchestrating the above
 - **Health Router** (refactored 2026-06-04): All `/health`, `/ready`, `/live`, and `/metrics` endpoints (v1 + legacy) live in `routers/health.py`.
+- **Blob Store (Claim Check Pattern)** (added 2026-06-07): Universal handling of large binary payloads (audio, images) using Redis DB 10 for transient storage and opaque tokens (`blob:{service}:{uuid}`) to prevent Base64 bloat in service-to-service communication.
 
 ### The Keeper (`isli-keeper`)
 - **Runtime**: Python process → Ollama (local)
@@ -185,18 +186,22 @@ Keeper (pre-turn)
   → fetches pre-computed **Structured Session Journal** from Tier 1 memory
   → fetches last 3 raw messages for immediate context
   → fetches relevant episodic/semantic memories via vector search
+  → (PII Mesh ON) scans context + user message for PII; mints deterministic tokens
   → assembles the **Fast-Path Context Block** (no LLM latency)
-  → returns: { context_injection, relevant_memories }
+  → returns: { context_injection, relevant_memories, token_map }
          │
          ▼
 Agent (e.g., Agent B)
-  → receives task + Keeper context injection
-  → calls its assigned model API (e.g., Claude, GPT-4o)
+  → receives task + Keeper context injection + token_map
+  → calls its assigned model API (e.g., Claude, GPT-4o) with anonymized payload
   → may invoke Skills (web search, file ops, etc.)
-  → produces response
+  → produces response (may contain {{PII:...}} tokens)
+  → zero-latency local re-hydration replaces tokens with original values
          │
          ▼
 Core API
+  → defense-in-depth: regex scan for stray {{PII:...}} tokens
+  → fallback to Keeper re-hydrate if tokens remain
   → task status → Done
   → **JournalWorker** (background) triggers on task completion:
     → calls Keeper to update structured journal incrementally
@@ -240,6 +245,65 @@ User sends message
 **Reconnect resilience:** The Redis draft (`session:{id}:draft`) persists partial text. A Board client reconnecting mid-stream fetches the draft via `GET /v1/sessions/{id}/draft` and resumes rendering from the last chunk.
 
 **External channels:** Telegram and WhatsApp adapters only receive the final assembled text via `reply_to_session`. Streaming events are WebSocket-only and do not affect external channel UX.
+
+---
+
+## PII De-Identification & Re-Identification Mesh (Added 2026-06-07)
+
+ISLI includes a **PII Mesh** that anonymizes sensitive data before it reaches cloud LLMs, then re-hydrates it locally in the agent runner before the user sees the response. The mesh is **opt-in per agent** and uses the local Keeper (Ollama SLM) as the vault — no new microservice, no external PII service.
+
+### Architecture
+
+```
+User Message
+    │
+    ├─→ Core API (ContextWorker)
+    │      └─→ Keeper /session-prep
+    │             ├─→ Regex pre-filter (Tier 1)
+    │             ├─→ SLM inference (Tier 2) — only if regex hits
+    │             ├─→ Mint deterministic token: {{PII:category:hash}}
+    │             └─→ Return { scrubbed_context, scrubbed_messages, token_map }
+    │
+    ├─→ Core caches token_map in Redis; forwards scrubbed context to Agent
+    │
+    └─→ Agent Runner
+           ├─→ Receives token_map via WebSocket session:message event
+           ├─→ Caches it in-memory (self._session_token_maps)
+           ├─→ Calls cloud LLM with anonymized system_prompt + messages
+           ├─→ Receives LLM response (may contain PII tokens)
+           └─→ _post_process_response() → local str.replace re-hydration
+```
+
+### Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **Unified Keeper call** | Context injection + PII detection collapsed into one `POST /session-prep` call, eliminating double Ollama latency. |
+| **Deterministic tokens** | `sha256(session_id + ":" + category + ":" + normalized_value)[:16]` produces stable, non-reversible placeholders. |
+| **Zero-latency re-hydration** | Agent runner caches `token_map` in-memory and does local `str.replace` — no network call after the LLM responds. |
+| **Opt-in per agent** | `Agent.config.pii_mesh_enabled` defaults to `false`. Each agent can be toggled independently via Board UI. |
+| **Defense-in-depth in Core** | `reply_to_session` regex-scans outgoing text for stray `{{PII:...}}` tokens. If found, falls back to `POST /session-prep/rehydrate` on Keeper and logs CRITICAL. |
+
+### Configuration
+
+**Per-agent (AgentDetailPage.tsx → Model Strategy card):**
+- `pii_mesh_enabled` — Master toggle
+- `pii_use_slm` — Sub-toggle: when ON, Keeper runs SLM inference for detection; when OFF, only regex pre-filter is used.
+
+**Global defaults (SystemSettingsPage.tsx → PII Mesh Defaults):**
+| Setting | Default | Scope |
+|---------|---------|-------|
+| `pii_mesh_default_enabled` | `false` | New agents |
+| `pii_use_slm_default` | `false` | New agents |
+| `pii_regex_pre_filter` | `true` | All agents |
+| `pii_token_ttl_hours` | `24` | Keeper vault retention |
+
+### New Keeper Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/session-prep` | POST | Returns `context_summary` + `entities` array in one call. Mode: `full` (context+PII) or `pii_only`. |
+| `/session-prep/rehydrate` | POST | Replaces `{{PII:...}}` tokens with original values from the vault. |
 
 ---
 
@@ -320,6 +384,7 @@ isli/
 | Keeper → outside world | **Never exposed**. Localhost only. |
 | Audio → outside world | **Never exposed**. Localhost only. JWT-verified. |
 | Agent ↔ Core API | JWT per agent. Scoped permissions. `token_issued_at` revocation on token recovery. |
+| PII Mesh → Cloud LLM | Deterministic token substitution via Keeper SLM; original values never leave `isli-mesh` network. |
 | Skills → Core API | **JWT-verified** (`X-Internal-Auth` header). No empty-JWT god-mode in production. Core signs every proxy request. |
 | Channels → Core API | **JWT-verified** (`X-Internal-Auth` header). `require_internal_auth` on `/send`. Webhook secret validation on inbound. |
 | Workspace → Core API | **JWT-verified** (`X-Internal-Auth` header). No empty-JWT god-mode in production. |
@@ -405,6 +470,12 @@ The **General Settings** page (`/settings/general` in the Board UI) exposes 12 r
 | `circuit_breaker_recovery_timeout` | `30.0` | `CircuitBreaker` constructor (at call sites) |
 | `bulkhead_max_queue` | `100` | `BulkheadRegistry.get_or_create()` |
 | `bulkhead_timeout_seconds` | `10.0` | `BulkheadRegistry.get_or_create()` |
+| `pii_mesh_default_enabled` | `false` | `Agent` default on creation |
+| `pii_use_slm_default` | `false` | `Agent` default on creation |
+| `pii_regex_pre_filter` | `true` | `PIIKeeperClient.regex_hits()` |
+| `pii_token_ttl_hours` | `24` | Keeper vault garbage collection |
+| `keeper_timeout_seconds` | `180` | Core→Keeper HTTP timeout |
+| `agent_spawn_timeout_seconds` | `120` | `ProcessManager` health-check wait |
 
 ### Prompt Management (`/settings/prompts`)
 

@@ -183,8 +183,16 @@ export function SessionsPage() {
                 className="flex flex-col gap-2 p-4 rounded-none bg-bg-elevated border border-border-dim hover:border-accent-cyan transition-all text-left group"
               >
                 <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-none bg-accent-cyan/10 flex items-center justify-center text-accent-cyan border border-accent-cyan/20">
-                    <Bot className="w-4 h-4" />
+                  <div className="w-8 h-8 rounded-none bg-accent-cyan/10 flex items-center justify-center text-accent-cyan border border-accent-cyan/20 overflow-hidden">
+                    {agent.picture ? (
+                      <img
+                        src={`/api/v1/blobs/${agent.picture}`}
+                        alt={agent.name}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <Bot className="w-4 h-4" />
+                    )}
                   </div>
                   <span className="text-sm font-mono font-bold text-text-primary group-hover:text-accent-cyan transition-colors">{agent.name}</span>
                 </div>
@@ -273,7 +281,9 @@ export function SessionsPage() {
         !selectedSessionId ? "hidden md:flex" : "flex"
       )}>
         {selectedSessionId ? (
-          selectedSession ? (
+          selectedSession ? (() => {
+            const activeAgent = agents?.find(a => a.id === selectedSession.agent_id);
+            return (
             <>
               {/* Chat Header */}
               <div className="h-14 border-b border-border-dim flex items-center px-4 md:px-6 gap-3 md:gap-4 bg-bg-surface shrink-0">
@@ -283,12 +293,20 @@ export function SessionsPage() {
                 >
                   <ChevronLeft className="w-5 h-5" />
                 </button>
-                <div className="w-8 h-8 md:w-9 md:h-9 rounded-none bg-accent-cyan/5 border border-accent-cyan/20 flex items-center justify-center text-accent-cyan">
-                  <Bot className="w-5 h-5 md:w-6 md:h-6" />
+                <div className="w-8 h-8 md:w-9 md:h-9 rounded-none bg-accent-cyan/5 border border-accent-cyan/20 flex items-center justify-center text-accent-cyan overflow-hidden">
+                  {activeAgent?.picture ? (
+                    <img
+                      src={`/api/v1/blobs/${activeAgent.picture}`}
+                      alt={activeAgent.name}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <Bot className="w-5 h-5 md:w-6 md:h-6" />
+                  )}
                 </div>
                 <div>
                   <h3 className="text-xs md:text-sm font-mono font-bold text-text-primary uppercase tracking-tight">
-                    {agents?.find(a => a.id === selectedSession.agent_id)?.name || 'SESSION_ID'}
+                    {activeAgent?.name || 'SESSION_ID'}
                   </h3>
                   <div className="flex items-center gap-2">
                     <span className={cn(
@@ -340,7 +358,7 @@ export function SessionsPage() {
                     )}
                   >
                     <div className={cn(
-                      'w-8 h-8 rounded-none shrink-0 flex items-center justify-center border',
+                      'w-8 h-8 rounded-none shrink-0 flex items-center justify-center border overflow-hidden',
                       msg.role === 'user'
                         ? 'bg-accent-purple/5 border-accent-purple/20 text-accent-purple'
                         : msg.role === 'action'
@@ -351,6 +369,12 @@ export function SessionsPage() {
                         <User className="w-4 h-4" />
                       ) : msg.role === 'action' ? (
                         <Clock className="w-4 h-4" />
+                      ) : activeAgent?.picture ? (
+                        <img
+                          src={`/api/v1/blobs/${activeAgent.picture}`}
+                          alt={activeAgent.name}
+                          className="w-full h-full object-cover"
+                        />
                       ) : (
                         <Bot className="w-4 h-4" />
                       )}
@@ -435,8 +459,16 @@ export function SessionsPage() {
                 ))}
                 {selectedSession.status !== 'ready' && (
                   <div className="flex gap-4 max-w-[80%]">
-                    <div className="w-8 h-8 rounded-none shrink-0 flex items-center justify-center border bg-accent-cyan/5 border-accent-cyan/20 text-accent-cyan">
-                      <Bot className="w-4 h-4" />
+                    <div className="w-8 h-8 rounded-none shrink-0 flex items-center justify-center border bg-accent-cyan/5 border-accent-cyan/20 text-accent-cyan overflow-hidden">
+                      {activeAgent?.picture ? (
+                        <img
+                          src={`/api/v1/blobs/${activeAgent.picture}`}
+                          alt={activeAgent.name}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <Bot className="w-4 h-4" />
+                      )}
                     </div>
                     <div className="bg-bg-elevated border border-border-dim p-4 rounded-none flex items-center gap-3">
                       <div className="flex gap-1">
@@ -481,7 +513,8 @@ export function SessionsPage() {
                 />
               </div>
             </>
-          ) : (
+            );
+          })() : (
             <div className="flex-1 flex items-center justify-center bg-bg-base">
               <div className="flex flex-col items-center gap-2">
                 <Loader2 className="w-8 h-8 text-accent-cyan animate-spin" />

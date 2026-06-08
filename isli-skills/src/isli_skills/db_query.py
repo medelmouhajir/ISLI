@@ -173,7 +173,8 @@ def validate_query(
 async def execute_query(
     sql: str,
     database_url: str,
-    max_rows: int = 100,
+    max_rows: int = 50,
+    max_cell_chars: int = 500,
     timeout_seconds: float = 15.0,
 ) -> dict[str, Any]:
     """Execute a validated read-only SQL query and return structured results.
@@ -184,6 +185,7 @@ async def execute_query(
             "columns": list[str],
             "rows": list[list[Any]],
             "row_count": int,
+            "has_more": bool,
             "truncated": bool,
             "execution_time_ms": float,
             "reference_id": str | None,
@@ -191,9 +193,8 @@ async def execute_query(
     """
     reference_id = hashlib.sha256(f"{sql}:{asyncio.get_event_loop().time()}".encode()).hexdigest()[:12]
 
-    # Inject/clamp LIMIT
-    safe_sql = _inject_or_clamp_limit(sql, max_rows)
-    truncated = safe_sql != sql.rstrip().rstrip(";")
+    # Optimization: Fetch max_rows + 1 to detect if more rows exist
+    safe_sql = _inject_or_clamp_limit(sql, max_rows + 1)
 
     conn: asyncpg.Connection | None = None
     start = asyncio.get_event_loop().time()
@@ -205,17 +206,31 @@ async def execute_query(
         rows = await conn.fetch(safe_sql, timeout=timeout_seconds)
         elapsed_ms = (asyncio.get_event_loop().time() - start) * 1000
 
+        has_more = len(rows) > max_rows
+        truncated = has_more
+        if has_more:
+            rows = rows[:max_rows]
+
         columns: list[str] = []
         result_rows: list[list[Any]] = []
         if rows:
             columns = list(rows[0].keys())
-            result_rows = [list(row.values()) for row in rows]
+            for row in rows:
+                processed_row = []
+                for val in row.values():
+                    if isinstance(val, str) and len(val) > max_cell_chars:
+                        truncated = True
+                        processed_row.append(f"{val[:max_cell_chars]}...[truncated: {len(val)} bytes]")
+                    else:
+                        processed_row.append(val)
+                result_rows.append(processed_row)
 
         return {
             "success": True,
             "columns": columns,
             "rows": result_rows,
             "row_count": len(result_rows),
+            "has_more": has_more,
             "truncated": truncated,
             "execution_time_ms": round(elapsed_ms, 2),
             "reference_id": reference_id,

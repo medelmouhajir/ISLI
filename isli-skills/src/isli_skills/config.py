@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     browser_max_snapshot_chars: int = 8000
     browser_redis_url: str = ""
     browser_max_concurrent_sessions: int = 5
+    blob_store_db: int = 10
+
+    # Shell Execution (Sandbox)
+    shell_exec_image: str = "alpine:latest"
+    shell_exec_mem_limit: str = "256m"
+    shell_exec_cpu_limit: float = 1.0
+    shell_exec_timeout_default: int = 30
+    shell_exec_timeout_max: int = 300
+    shell_exec_output_limit: int = 65536
+    workspace_base_path: str = "/workspaces"
 
 
 @lru_cache

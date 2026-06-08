@@ -70,7 +70,14 @@ from .memory import (
     MEMORY_DELETE_DEF,
     MEMORY_SEARCH_DEF,
 )
-from .kanban import create_kanban_task, CREATE_KANBAN_TASK_DEF
+from .kanban import (
+    create_kanban_task,
+    list_kanban_tasks,
+    update_kanban_task,
+    CREATE_KANBAN_TASK_DEF,
+    LIST_KANBAN_TASKS_DEF,
+    UPDATE_KANBAN_TASK_DEF,
+)
 from .audio import (
     speech_to_text,
     text_to_speech,
@@ -217,6 +224,10 @@ __all__ = [
     "MEMORY_SEARCH_DEF",
     "create_kanban_task",
     "CREATE_KANBAN_TASK_DEF",
+    "list_kanban_tasks",
+    "LIST_KANBAN_TASKS_DEF",
+    "update_kanban_task",
+    "UPDATE_KANBAN_TASK_DEF",
     "create_engineering_plan",
     "PLAN_DEF",
     "test_skill_code",
@@ -326,6 +337,8 @@ SKILL_TOOL_REGISTRY: dict[str, tuple] = {
     "memory_delete": (memory_delete, MEMORY_DELETE_DEF),
     "memory_search": (memory_search, MEMORY_SEARCH_DEF),
     "create_kanban_task": (create_kanban_task, CREATE_KANBAN_TASK_DEF),
+    "list_kanban_tasks": (list_kanban_tasks, LIST_KANBAN_TASKS_DEF),
+    "update_kanban_task": (update_kanban_task, UPDATE_KANBAN_TASK_DEF),
     "create_engineering_plan": (create_engineering_plan, PLAN_DEF),
     "test_skill": (test_skill_code, TEST_SKILL_DEF),
     "register_skill": (register_skill, REGISTER_SKILL_DEF),
@@ -384,6 +397,8 @@ SKILL_CATEGORY_MAP: dict[str, str] = {
     "memory_delete": "memory",
     "memory_search": "memory",
     "create_kanban_task": "kanban",
+    "list_kanban_tasks": "kanban",
+    "update_kanban_task": "kanban",
     "create_engineering_plan": "engineering",
     "test_skill": "engineering",
     "register_skill": "engineering",

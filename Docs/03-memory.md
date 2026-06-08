@@ -273,6 +273,7 @@ The following gaps were identified during a parallel 12-agent research review:
 - **Vector DB lacks agent-level isolation** — cross-agent guard is query-layer `agent_id` filter only, not DB-level.
 - **No memory inconsistency detection or repair** — no checksums, reconciliation jobs, or cross-tier audits.
 - ~~**Dual-write (PostgreSQL + ChromaDB) lacks atomicity**~~ — **Fixed 2026-05-19**. `OutboxPublisher` + `OutboxWorker` (`isli_core/memory/outbox.py` and `jobs/outbox_worker.py`) provide atomic outbox pattern with retry logic.
+- **Blob Promotion to Workspace** — **Added 2026-06-07**. The `OutboxWorker` detects `blob:*` tokens during session message persistence, copies the raw bytes from Redis to the Workspace disk (`_attachments/`), and updates the message to use the persistent disk URL. Redis keys are deleted immediately after successful promotion.
 
 ### Medium
 - **Semantic memory deduplication missing** — explicit saves can create redundant vectors.

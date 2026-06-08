@@ -366,10 +366,12 @@ Telegram voice message (.ogg)
   └─→ TelegramAdapter.handle_webhook()
         └─→ Detects `message.voice` attachment
               ├─→ Downloads audio bytes from Telegram file API
-              ├─→ POST /stt/transcribe to isli-audio (multipart/form-data)
-                    {"audio": <bytes>, "language": "auto"}
-              └─→ Replaces `message.text` with transcription
-                    └─→ Normal Session flow continues (text → Core → Agent)
+              ├─→ Stores bytes in Redis Blob Store (DB 10)
+              └─→ Sends `blob:audio:{uuid}` token to Core API
+                    └─→ Core API (channels router)
+                          ├─→ Detects blob token
+                          ├─→ POST /stt/transcribe to isli-audio (passing audio_ref)
+                          └─→ Replaces token with transcription in Session flow
 ```
 
 **Key characteristics:**
@@ -380,13 +382,13 @@ Telegram voice message (.ogg)
 
 ---
 
-### Outbound: TTS Audio Delivery (Added 2026-06-01)
+### Outbound: TTS Audio Delivery (Added 2026-06-01 / Refactored 2026-06-07)
 
 Agents can deliver synthesized voice messages to users across all supported channels. This works in two modes:
 
 #### Phase 1 — Explicit Agent-Initiated Voice Messages
 
-The agent invokes the `send_voice_message` SDK convenience wrapper (or manually calls `text-to-speech` followed by `send-message` with `audio_b64`):
+The agent invokes the `send_voice_message` SDK convenience wrapper (or manually calls `text-to-speech` followed by `send-message` with `audio_ref`):
 
 ```python
 from isli_agent import send_voice_message
@@ -401,20 +403,20 @@ await send_voice_message(
 )
 ```
 
-**Architecture:**
+**Architecture (Claim Check):**
 ```
 Agent SDK (send_voice_message)
   └─→ POST /v1/skills/text-to-speech/synthesize → isli-audio (piper-tts)
         ↓
-  ┌─→ Core receives {audio_b64, format: "wav", ...}
-  │     ├─→ Decodes base64 → raw WAV bytes
-  │     ├─→ Uploads to workspace: _attachments/audio/{session_id}/{uuid}.wav
-  │     ├─→ Appends audio_url to message dict
-  │     └─→ Forwards audio_b64 to channel gateway
-  │           ↓
-  │     TelegramAdapter: ffmpeg WAV → Opus/OGG → bot.send_voice() (text first, then voice)
-  │     WhatsAppAdapter: forwards audio_b64 to sidecar → Baileys sendMessage({audio, ptt: true})
-  │     Board UI: renders <audio controls> player below assistant bubble
+  ┌─→ isli-audio stores WAV bytes in Redis Blob Store (DB 10)
+  │     └─→ returns `audio_ref: "blob:audio:{uuid}"` to Core
+  │
+  ├─→ Core (reply_to_session): 
+  │     ├─→ Web/Board: Rewrites token to signed URL: `/v1/blobs/{uuid}`
+  │     ├─→ External Channels: Forwards `audio_ref` token to gateway
+  │     │     ↓
+  │     │     TelegramAdapter: Fetches from Redis (DB 10) → WAV → Opus/OGG → bot.send_voice()
+  │     └─→ OutboxWorker: Promotes from Redis to Workspace disk (_attachments/)
   └───────────────────────────────────────────────────────────────────────────────→
 ```
 

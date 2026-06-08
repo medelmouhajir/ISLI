@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     default_local_model: str = "qwen3:1.7b"
     audio_url: str = "http://localhost:8400"
     installed_skills_path: str = "./data/installed_skills" if IS_DEV else "/data/installed_skills"
+    blob_store_db: int = 10
 
     # Web Push VAPID Keys
     vapid_private_key: str = ""

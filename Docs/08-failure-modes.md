@@ -151,11 +151,11 @@ The **MAST (Multi-Agent System Failure Taxonomy)** from UC Berkeley (NeurIPS 202
 **What it is**: Malicious content in a web-fetched page or user message hijacks agent behavior.
 
 **ISLI mitigation**:
-- All skill outputs go through Keeper's summarization before agent context injection
-- Keeper is a small local model — less susceptible to sophisticated injection
-- Skill `web-fetch` strips HTML and returns plain text only
-- Memory stores with `read_only` flag for reference material (future feature)
-- User input is sanitized and labeled `[USER INPUT]` in agent prompts
+- **Dynamic Content Scanner**: All agent inputs pass through the `ContentScanner`. The risk threshold is configurable via `security_prompt_injection_threshold`.
+- **PII Scrubber**: Optional global PII scrubbing (`security_pii_scrubber_enabled`) detects and blocks SSNs, emails, and credit cards in agent turns.
+- All skill outputs go through Keeper's summarization before agent context injection.
+- Keeper is a small local model — less susceptible to sophisticated injection.
+- User input is sanitized and labeled `[USER INPUT]` in agent prompts.
 
 ---
 
@@ -163,11 +163,29 @@ The **MAST (Multi-Agent System Failure Taxonomy)** from UC Berkeley (NeurIPS 202
 **What it is**: Agent gains access to resources beyond its intended scope.
 
 **ISLI mitigation**:
-- Per-agent JWT tokens with scoped permissions
-- Skills proxy enforces `permissions_required` per skill per agent
-- Agents cannot read each other's memory scopes
-- All skill calls logged in Tier 4 archive — full audit trail
-- Memory stores: agents can only write to their own `agent:{id}` scope
+- Per-agent JWT tokens with scoped permissions.
+- Skills proxy enforces `permissions_required` per skill per agent.
+- Agents cannot read each other's memory scopes.
+- All skill calls logged in Tier 4 archive — full audit trail.
+- **Global E-Stop**: Admin can halt all agent activity immediately via a global circuit breaker, revoking all effective "permissions" until reset.
+
+---
+
+### F29: System-wide Cascading Failure (Manual Override)
+**What it is**: A bug or malicious agent begins a destructive loop that cannot be stopped by individual task cancellation.
+
+**ISLI mitigation**:
+- **Global Emergency Stop (E-Stop)**: A high-visibility "Trigger E-Stop" button in the Board UI (`/settings/security`) broadcasts a system-wide halt.
+- **Enforcement**: Both `create_task` and the Skill Proxy check the E-Stop status in Redis before every action.
+- **Reset**: Requires explicit admin authentication to resume system operation.
+
+### F30: Runaway Financial/Resource Exhaustion
+**What it is**: Agents or users consume cloud API tokens or infrastructure resources beyond organizational limits.
+
+**ISLI mitigation**:
+- **Dynamic Budget Caps**: Configurable default monthly USD caps (`security_default_monthly_usd_cap`) are applied to all new users.
+- **Budget Engine**: Tracks real-time spend across agents, users, and orgs.
+- **Audit Retention**: Configurable log rotation (`security_audit_retention_days`) ensures storage costs remain predictable.
 
 ---
 
@@ -417,6 +435,11 @@ The 2026 research review identified structural resilience patterns that ISLI cur
 | WhatsApp context injection fails silently | F10 | **Fixed 2026-05-29** | `SessionContextInjectorWorker` sends proactive message to user when session reaches `context_failed` |
 | WhatsApp sidecar returns 500 for 403 | F10 | **Fixed 2026-05-29** | `whatsapp_sidecar_webhook` catches adapter errors and returns appropriate status codes |
 | WhatsApp adapter state lost on restart | F8 | **Fixed 2026-05-29** | `get_status()` and `get_qr()` query sidecar directly instead of in-memory dicts |
+| Keeper heartbeat validation hallucinates idle agents as looping | F7, F10 | **Fixed 2026-06-06** | `_compress_activity_log()` time-gates to 24h + 1h stale check; prompt explicitly teaches "idle = normal"; trusted_patterns tightened (removed substring "loop") |
+| Heartbeat validation latency burns 12% of heartbeat window | F7, F15 | **Fixed 2026-06-06** | Core `validate_and_update()` wraps Keeper call in `asyncio.wait_for(..., timeout=5.0)` — skips validation on slow beats instead of blocking |
+| Keeper anomaly threshold too aggressive for flaky 1.7B model | F7 | **Fixed 2026-06-06** | `ANOMALY_THRESHOLD` raised 3→5 (~15 min tolerance at 3-min intervals); documented time-semantics assumption |
+| Ollama model cold-load causes 21s heartbeat validation latency | F7, F15 | **Fixed 2026-06-06** | Keeper `_keep_model_warm()` sends lightweight `generate` ping every 60s with `keep_alive=-1` to keep model resident in VRAM |
+| Heartbeat payload lacks signal for Keeper to judge stagnation | F7 | **Fixed 2026-06-06** | Payload enriched with `consecutive_idle_beats` and `current_task_id`; prompt receives actual state instead of isolated timestamp |
 | WhatsApp sidecar sends raw secret instead of HMAC | F21 | **Fixed 2026-05-29** | `forwardEvent()` in `index.js` now computes `crypto.createHmac('sha256', ...)` over JSON body |
 | Core hardcodes wrong webhook secret for WhatsApp | F22 | **Fixed 2026-05-29** | `config.py` reads `WEBHOOK_SECRET` from env; `docker-compose.yml` passes it to `core` service |
 | WhatsApp replies lost due to LID JID mismatch | F23 | **Fixed 2026-05-29** | `WhatsAppAdapter` preserves original `remote_jid` and uses it for outbound `send_message()` |

@@ -28,11 +28,26 @@ class WorkspacePermissionError(Exception):
     """Raised when the operation is not allowed on the given path (e.g., deleting a directory)."""
 
 
-async def file_read(agent_id: str, path: str, core_client: CoreClient) -> dict[str, Any]:
+async def file_read(
+    agent_id: str,
+    path: str,
+    core_client: CoreClient,
+    max_chars: int = 16000,
+    line_start: int = 1,
+    line_end: int | None = None
+) -> dict[str, Any]:
     """Read the contents of a file from the agent's workspace."""
     resp = await core_client.client.post(
         "/v1/skills/file-read/read",
-        json={"agent_id": agent_id, "path": path, "scope": "agent", "scope_id": agent_id},
+        json={
+            "agent_id": agent_id,
+            "path": path,
+            "scope": "agent",
+            "scope_id": agent_id,
+            "max_chars": max_chars,
+            "line_start": line_start,
+            "line_end": line_end,
+        },
         headers=core_client._get_headers(),
     )
     if resp.status_code == 404:

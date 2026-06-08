@@ -3,6 +3,7 @@ export interface Agent {
   name: string
   description: string | null
   persona: string | null
+  picture: string | null
   status: string
   model_provider: string | null
   model_id: string | null
@@ -10,6 +11,7 @@ export interface Agent {
   skills: string[]
   config: Record<string, unknown>
   token_budget: number | null
+  turn_token_cap: number | null
   token_used: number
   max_retries: number
   fallback_agent_id: string | null

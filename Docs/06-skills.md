@@ -64,11 +64,12 @@ skill:
 | `web-search` | Web search → structured results | Uses local SearXNG instance |
 | `web-fetch` | Fetch URL content → clean text | HTML stripped; returns `status_code` & `url` |
 | `pdf-extract` | Extract text from PDF | Returns paginated JSON |
-| `file-read` | Read file from agent's workspace | Path-scoped, per-agent isolation |
+| `file-read` | Read file from agent's workspace | Supports line ranges and hard character caps (16k-64k) |
 | `file-write` | Write file to agent's workspace | Path-scoped, per-agent isolation |
 | `file-list` | List directory entries in agent's workspace | Path-scoped, per-agent isolation |
 | `file-delete` | Delete a file from agent's workspace | Path-scoped, per-agent isolation |
-| `db-query` | Run read-only SQL query | Scoped to allowed schemas |
+| `db-query` | Run read-only SQL query | Row limiting (50) and cell truncation (500 chars) |
+| `shell-exec` | Execute shell command in sandbox | Ephemeral Docker container; network isolated; no privileges |
 | `send-email` | Send email via SMTP | Requires SMTP config |
 | `send-message` | Send message via channel | Routes to channel gateway |
 | `image-describe` | Get text description of image | Calls local vision model |
@@ -80,6 +81,8 @@ skill:
 | `memory-delete` | Delete from Tier 3 semantic memory | Inline in Core (ChromaDB) |
 | `memory-search` | Search semantic memory | Inline in Core (ChromaDB) |
 | `create-kanban-task` | Create a task on the Kanban board | Enables agent self-delegation |
+| `list-kanban-tasks` | Query board for tasks by status/assignee | Visibility into delegated work |
+| `update-kanban-task` | Update status, priority, or add comment | Task management and handoffs |
 | `create-engineering-plan` | Generate SE implementation plan | Saves PLAN.md to workspace |
 | `shared-file-read` | Read file from a shared workspace | Member-scoped; owner or member |
 | `shared-file-write` | Write file to a shared workspace | Member-scoped; enforces quota |
@@ -102,7 +105,7 @@ skill:
 | `git-branch-list` | List all branches with current indicator | Returns `current` branch name and `branches` array |
 | `git-branch-create` | Create a new branch, optionally checkout | `checkout: true` switches immediately |
 | `git-checkout` | Switch to an existing branch | Typed `GitInvalidOperationError` if branch does not exist |
-| `git-log` | Show commit history (last N commits) | Defaults to `max_count: 10`; returns `hash`, `short_hash`, `message`, `author`, `date` |
+| `git-log` | Show commit history | Capped by character count (12k) to prevent context bloat |
 | `notify-user` | Display a notification card in the user's web UI | Inline in Core; rate-limited (20/hour per user per agent); respects quiet hours and user preferences |
 | `web-browse-navigate` | Navigate a browser to a URL | Creates persistent session per agent; cookies/localStorage survive across calls |
 | `web-browse-snapshot` | Accessibility-tree snapshot of current page | Returns `@ref` IDs for interactive elements; default `full=false` (compact) |
@@ -183,6 +186,40 @@ ISLI enables agents (typically with an "Engineer" persona) to autonomously expan
 5. **Human/Auditor Review**: The skill remains "Pending" until a human or an auditor agent approves the Kanban task.
 6. **Hot-Reload**: Once approved, Core emits a config event, and all relevant agents automatically sync the new tool into their toolbox.
 
+### Shell Execution (Sandbox) — Added 2026-06-07
+
+ISLI provides a secure **sandboxed shell execution** environment via the `isli-skills` service. Agents can run arbitrary shell commands within highly restricted, ephemeral Docker containers.
+
+**Architecture:**
+```
+Agent SDK → Core API (skill proxy) → isli-skills:8100/exec → Docker Engine (sandbox)
+                                       ↓
+                                  Ephemeral Container (--rm)
+                                  /workspace/agents/{agent_id} (RW mount)
+```
+
+**Security Model:**
+- **Isolation**: Every command runs in a fresh ephemeral container (`--rm`).
+- **Network**: Disabled (`--network none`).
+- **Privileges**: Dropped (`--cap-drop ALL`, `--security-opt no-new-privileges`).
+- **Filesystem**: Read-only rootfs; only the agent's workspace directory is mounted read-write.
+- **User**: Runs as non-root (UID 1000:1000).
+- **Resource Limits**: 
+  - CPU: 1.0 (configurable)
+  - Memory: 256MB (configurable)
+  - Timeout: Default 30s, Max 300s.
+- **Output**: Truncated at 64KB to prevent context window blowout.
+
+**Configuration:**
+- `shell_exec_image`: Default `alpine:latest`.
+- `workspace_base_path`: Root directory for agent workspaces.
+
+**Example Usage (SDK):**
+```python
+result = await agent.shell_exec(command="ls -la && echo 'Ready'")
+# Returns: {"stdout": "...", "exit_code": 0, "duration_ms": 150, "timed_out": false}
+```
+
 ### Update Skill (`update-skill`) — Added 2026-06-03
 
 Agents can update metadata of an existing dynamic skill without triggering a review cycle or resetting usage telemetry.
@@ -259,10 +296,11 @@ The `db-query` skill lets agents run **read-only SQL queries** against the ISLI 
   3. Only top-level `SELECT` statements are allowed.
   4. Schema allow-list (`DB_QUERY_ALLOWED_SCHEMAS`, default `public`) blocks queries referencing unlisted schemas.
   5. `asyncpg` sets `SET TRANSACTION READ ONLY` before execution.
-- **Result Limiting:** `LIMIT` is auto-injected if absent; existing `LIMIT` is clamped to `db_query_max_rows` (default 100, max 1000).
+- **Result Limiting:** Fetches are limited to `max_rows` (default 50). Optimization: The skill fetches `max_rows + 1` to detect if more results exist (`has_more: true`) without requiring a second `COUNT(*)` query.
+- **Cell Truncation:** String or JSON cells exceeding `max_cell_chars` (default 500) are truncated, appending a hint with the original byte count (e.g., `...[truncated: 1200 bytes]`).
 - **Timeout Guard:** Queries are capped at 15 seconds to prevent long-running analytics from blocking the skill.
 - **Error Sanitization:** Raw PostgreSQL errors are logged server-side but surfaced to the agent as generic messages with a `reference_id` for support.
-- **Response Format:** `{"columns": [...], "rows": [...], "row_count": N, "truncated": bool, "execution_time_ms": float, "reference_id": str}`
+- **Response Format:** `{"columns": [...], "rows": [...], "row_count": N, "has_more": bool, "truncated": bool, "execution_time_ms": float, "reference_id": str}`
 
 **Example Usage (SDK):**
 ```python
@@ -399,6 +437,7 @@ from isli_agent.tools import SKILL_TOOL_REGISTRY, normalize_skill_name
 #   "summarize_text", "embed_text", "summarize", "translate",
 #   "file_read", "file_write", "file_list", "file_delete",
 #   "memory_save", "memory_delete", "memory_search",
+#   "create_kanban_task", "list_kanban_tasks", "update_kanban_task",
 #   "speech_to_text", "text_to_speech",
 #   "interactive_debugger",
 #   "update_skill",
@@ -438,17 +477,14 @@ from isli_agent import send_message, SEND_MESSAGE_DEF
 
 Each workspace tool is an async function that calls the Core skill proxy and raises typed exceptions on failure:
 
-| Tool | Exception (404) | Exception (403) | Exception (413) |
-|------|----------------|----------------|----------------|
-| `file_read` | `WorkspaceNotFoundError` | `WorkspacePathError` | — |
-| `file_write` | `WorkspaceNotFoundError` | `WorkspacePathError` | `WorkspaceQuotaError` |
-| `file_list` | `WorkspaceNotFoundError` | `WorkspacePathError` | — |
-| `file_delete` | `WorkspaceNotFoundError` | `WorkspacePathError` / `WorkspacePermissionError` | — |
-| `shared_file_read` | `WorkspaceNotFoundError` | `WorkspacePathError` | — |
-| `shared_file_write` | `WorkspaceNotFoundError` | `WorkspacePathError` | `WorkspaceQuotaError` |
-| `shared_file_list` | `WorkspaceNotFoundError` | `WorkspacePathError` | — |
-| `shared_file_delete` | `WorkspaceNotFoundError` | `WorkspacePathError` / `WorkspacePermissionError` | — |
-| `promote_output` | `WorkspaceNotFoundError` | `WorkspacePathError` | `WorkspaceQuotaError` |
+| Tool | Parameters | Exception (404) | Exception (403) | Exception (413) |
+|------|------------|----------------|----------------|----------------|
+| `file_read` | `path`, `max_chars`, `line_start`, `line_end` | `WorkspaceNotFoundError` | `WorkspacePathError` | — |
+| `file_write` | `path`, `content` | `WorkspaceNotFoundError` | `WorkspacePathError` | `WorkspaceQuotaError` |
+| `file_list` | `path` | `WorkspaceNotFoundError` | `WorkspacePathError` | — |
+| `file_delete` | `path` | `WorkspaceNotFoundError` | `WorkspacePathError` / `WorkspacePermissionError` | — |
+
+**Note on `file_read` Caps:** The `file_read` tool enforces a hard character limit (default 16,000). If a file is truncated, the response includes `truncated: true` and an enriched notice in the content guiding the agent to use `line_start` for pagination.
 
 These exceptions allow the agent's ReAct loop to recover gracefully instead of crashing on raw HTTP errors.
 
@@ -666,8 +702,16 @@ This is **advisory**, not automatic — skills don't rewrite themselves. But the
 
 ## Large Output Handling
 
-When a skill returns a large payload (e.g., web-fetch returns 8,000 words):
+ISLI uses a multi-layered defense to prevent large skill outputs from bloating agent context windows:
 
+1. **Hard Output Caps (First Defense):**
+   - `file-read`: Capped at `max_chars=16000` (max 64,000). Returns enriched truncation notice with line-range hints for pagination.
+   - `db-query`: Capped at `max_rows=50` and `max_cell_chars=500`. Returns `has_more` flag.
+   - `git-log`: Capped at `max_chars=12000` to prevent large diffs from `--patch` or `--stat` calls from exhausting context.
+   - All capped skills return `truncated: true` and an explicit `truncated: false` on success.
+
+2. **Keeper Summarization (Second Defense):**
+   When a skill (like `web-fetch` or `web-browse-snapshot`) returns a large payload that exceeds the token threshold:
 ```
 Skill returns large payload to Core API
 Core API detects payload > token_threshold (default: 2000 tokens)
@@ -689,7 +733,7 @@ This prevents skill outputs from bloating agent context windows.
 The following gaps were identified during a parallel 12-agent research review:
 
 ### Critical
-- **Skills have no internal auth or network isolation** — "No auth internally" means any local process can bypass Core API proxy RBAC.
+- **Skills have no internal auth or network isolation** — **Partially Fixed 2026-06-07**. `shell-exec` provides network isolation and non-privileged execution in a dedicated container. Other skills still lack granular network isolation.
 - **`web-fetch` lacks SSRF protections** — no URL blocklists, private IP filtering, or DNS rebinding checks.
 
 ### High

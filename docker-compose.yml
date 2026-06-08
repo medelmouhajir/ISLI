@@ -169,9 +169,14 @@ services:
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
       VAPID_CLAIMS_EMAIL: ${VAPID_CLAIMS_EMAIL}
+      PII_MESH_DEFAULT_ENABLED: ${PII_MESH_DEFAULT_ENABLED:-false}
+      PII_USE_SLM_DEFAULT: ${PII_USE_SLM_DEFAULT:-false}
+      PII_REGEX_PRE_FILTER: ${PII_REGEX_PRE_FILTER:-true}
+      PII_TOKEN_TTL_HOURS: ${PII_TOKEN_TTL_HOURS:-24}
       SKILLS_URL: http://skills:8100
     volumes:
     - chroma_data:/data/vectors
+    - installed_skills_data:/data/installed_skills
     - ./isli-core/src/isli_core:/app/src/isli_core
     - ./prompts.yaml:/app/prompts.yaml
     - ./isli-agent-sdk:/opt/isli/isli-agent-sdk:ro
@@ -364,7 +369,8 @@ services:
       core:
         condition: service_started
     volumes:
-    - workspace_data:/workspaces:ro
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    - workspace_data:/workspaces
     - browser-sessions:/data/browser-sessions
     deploy:
       resources:
@@ -428,6 +434,7 @@ services:
       ADMIN_API_KEY: ${ADMIN_API_KEY}
       AGENT_ID: ${AGENT_ID}
       REDIS_URL: redis://redis:6379/0
+      KEEPER_URL: http://keeper:8001
       MODEL_PROVIDER: ${MODEL_PROVIDER:-ollama}
       MODEL_ID: ${MODEL_ID:-qwen2.5:7b}
       OLLAMA_API_BASE: https://ollama.com
@@ -510,6 +517,7 @@ volumes:
   whatsapp_auth: null
   audio_models: null
   browser-sessions: null
+  installed_skills_data: null
 networks:
   isli-public:
     driver: bridge

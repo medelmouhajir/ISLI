@@ -310,10 +310,22 @@ async def reply_to_session(
     if auth.get("sub") != sess.agent_id:
         raise HTTPException(status_code=403, detail="Not authorized to reply to this session")
 
+    # ── PII Mesh defense-in-depth validation ──
+    agent_result = await db.execute(select(Agent).where(Agent.id == sess.agent_id))
+    agent = agent_result.scalar_one_or_none()
+    agent_config = agent.config or {} if agent else {}
+    reply_text = payload.text
+    if agent_config.get("pii_mesh_enabled", False):
+        pii_token_pattern = r"\{\{PII:[a-z_]+:[a-f0-9]+\}\}"
+        if re.search(pii_token_pattern, reply_text):
+            logger.critical("sessions.pii_tokens_in_reply", session_id=session_id, agent_id=sess.agent_id)
+            from isli_core.compliance.pii_keeper_client import PIIKeeperClient
+            rehydrated = await PIIKeeperClient().rehydrate(reply_text, session_id)
+            reply_text = rehydrated
+
     now = datetime.now(timezone.utc)
 
     # --- Audio handling ---
-    audio_url: str | None = None
     audio_b64_for_channels: str | None = payload.audio_b64
 
     # Phase 2: Auto-TTS when voice_mode is enabled and no explicit audio provided
@@ -331,102 +343,82 @@ async def reply_to_session(
                 )
                 tts_resp.raise_for_status()
                 tts_data = tts_resp.json()
-                audio_b64_for_channels = tts_data.get("audio_b64")
-                logger.info(
-                    "sessions.auto_tts_synthesized",
-                    session_id=session_id,
-                    voice=tts_data.get("voice"),
-                    duration_ms=tts_data.get("duration_ms"),
-                )
+                
+                # Check if it returned a reference (new pattern) or b64 (legacy)
+                if tts_data.get("audio_ref"):
+                    # It's already in Redis! We just use the ref.
+                    audio_ref = tts_data.get("audio_ref")
+                    audio_b64_for_channels = None # We'll use the ref
+                    logger.info("sessions.auto_tts_ref", session_id=session_id, ref=audio_ref)
+                else:
+                    audio_b64_for_channels = tts_data.get("audio_b64")
+                    logger.info("sessions.auto_tts_synthesized", session_id=session_id)
         except Exception as exc:
             logger.warning("sessions.auto_tts_failed", session_id=session_id, error=str(exc))
-            # Best-effort: continue with text-only reply
 
-    # If audio is provided (explicit or auto-TTS), decode, validate size, upload to workspace
-    if audio_b64_for_channels:
+    # If audio is provided as Base64 (legacy or explicit), store in Redis and get a token
+    audio_ref: str | None = locals().get("audio_ref")
+    if audio_b64_for_channels and not audio_ref:
         try:
-            # Secondary size guard: decoded bytes must be <= 5 MB
             MAX_AUDIO_BYTES = 5 * 1024 * 1024
             audio_bytes = base64.b64decode(audio_b64_for_channels)
-            if len(audio_bytes) > MAX_AUDIO_BYTES:
-                logger.warning(
-                    "sessions.audio_too_large",
-                    session_id=session_id,
-                    size=len(audio_bytes),
-                    max=MAX_AUDIO_BYTES,
-                )
-                audio_b64_for_channels = None
+            if len(audio_bytes) <= MAX_AUDIO_BYTES:
+                from isli_core.redis_blob_client import get_blob_redis
+                blob_id = str(uuid4())
+                audio_ref = f"blob:audio:{blob_id}"
+                redis = await get_blob_redis()
+                await redis.setex(audio_ref, 86400, audio_bytes)
+                logger.info("sessions.audio_blob_stored", session_id=session_id, ref=audio_ref)
             else:
-                from isli_core.routers.workspaces import upload_bytes_to_workspace
-                audio_filename = f"{uuid4()}.wav"
-                workspace_path = f"_attachments/audio/{session_id}/{audio_filename}"
-                await upload_bytes_to_workspace(
-                    agent_id=sess.agent_id,
-                    path=workspace_path,
-                    data=audio_bytes,
-                    scope="attachment",
-                    scope_id=session_id,
-                )
-                audio_url = f"/v1/sessions/{session_id}/audio/{audio_filename}"
-                logger.info(
-                    "sessions.audio_uploaded",
-                    session_id=session_id,
-                    filename=audio_filename,
-                    size=len(audio_bytes),
-                )
+                logger.warning("sessions.audio_too_large", session_id=session_id, size=len(audio_bytes))
         except Exception as exc:
-            logger.warning("sessions.audio_upload_failed", session_id=session_id, error=str(exc))
-            audio_b64_for_channels = None
-            audio_url = None
+            logger.warning("sessions.audio_blob_store_failed", session_id=session_id, error=str(exc))
 
-    # Append assistant reply to session messages, including inline components and audio
-    msg = {"role": "assistant", "content": payload.text, "timestamp": now.isoformat()}
+    # Prepare message dict
+    msg = {"role": "assistant", "content": reply_text, "timestamp": now.isoformat()}
     if payload.components:
         msg["components"] = [c.model_dump() for c in payload.components]
-    if audio_url:
-        msg["audio_url"] = audio_url
-    sess.messages = (sess.messages or []) + [msg]
+    if audio_ref:
+        msg["audio_ref"] = audio_ref
+
+    # --- Blob Token Rewrite for Web UI & Promotion Trigger ---
+    text_tokens = re.findall(r"(blob:(?:audio|browser):[a-f0-9-]+)", reply_text)
+
+    from isli_core.models import Outbox
+    outbox_item = Outbox(
+        topic="session:message_persist",
+        payload={
+            "session_id": session_id,
+            "message": msg,
+            "channel": sess.channel,
+            "user_id": sess.user_id,
+        }
+    )
+    db.add(outbox_item)
+
+    # For immediate response, rewrite tokens to URLs
+    settings = get_settings()
+    api_msg_content = reply_text
+    for token in text_tokens:
+        blob_uuid = token.split(":")[-1]
+        api_msg_content = api_msg_content.replace(token, f"{settings.core_api_url}/v1/blobs/{blob_uuid}")
+
+    api_response_msg = dict(msg)
+    api_response_msg["content"] = api_msg_content
+    if audio_ref:
+        blob_uuid = audio_ref.split(":")[-1]
+        api_response_msg["audio_url"] = f"{settings.core_api_url}/v1/blobs/{blob_uuid}"
+
     sess.last_activity_at = now
-    sess.last_message_at = now
-    sess.token_count = count_message_tokens(sess.messages)
     sess.status = "ready"
     await db.commit()
 
-    # Determine text to send to external channels (text_fallback if available)
-    channel_text = payload.text
-    if payload.components and payload.components[0].text_fallback:
-        channel_text = payload.components[0].text_fallback
-
-    # Store outbound channel message for audit
-    msg_audit = ChannelMessage(
-        session_id=session_id,
-        sequence_number=len(sess.messages),
-        channel=sess.channel or "unknown",
-        direction="outbound",
-        content=channel_text,
-        raw_payload={
-            "source": "agent_reply",
-            "agent_id": sess.agent_id,
-            "components": msg.get("components", []),
-        },
-    )
-    db.add(msg_audit)
-    await db.commit()
-
-    # Emit update event for UI
-    await EventManager.emit("session:updated", {"session_id": session_id})
-
-    # Clear streaming draft and debug trace keys
-    try:
-        redis = await get_redis()
-        await redis.delete(f"session:{session_id}:draft")
-        await redis.delete(f"session:{session_id}:debug_trace")
-    except Exception as exc:
-        logger.warning("sessions.clear_draft_failed", session_id=session_id, error=str(exc))
-
-    # Forward reply to user via channels service (only for external channels)
+    # Forward to external channels
     if sess.channel and sess.channel != "web" and sess.user_id:
-        settings = get_settings()
+        channel_text = payload.text
+        if payload.components and payload.components[0].text_fallback:
+            channel_text = payload.components[0].text_fallback
+
         async def _send_to_channels():
             payload_channels = {
                 "channel": sess.channel,
@@ -434,8 +426,8 @@ async def reply_to_session(
                 "text": channel_text,
                 "agent_id": sess.agent_id,
             }
-            if audio_b64_for_channels:
-                payload_channels["audio_b64"] = audio_b64_for_channels
+            if audio_ref:
+                payload_channels["audio_ref"] = audio_ref
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     f"{settings.channels_url}/send",
@@ -450,20 +442,19 @@ async def reply_to_session(
             max_retries = await get_setting(db, "default_max_retries", scope="general", default=3)
             base_delay = await get_setting(db, "default_base_delay_seconds", scope="general", default=1.0)
             max_delay = await get_setting(db, "default_max_delay_seconds", scope="general", default=10.0)
-            await exponential_backoff(
-                _send_to_channels,
-                max_retries=max_retries,
-                base_delay=base_delay,
-                max_delay=max_delay,
-            )
+            await exponential_backoff(_send_to_channels, max_retries=max_retries, base_delay=base_delay, max_delay=max_delay)
         except Exception as exc:
             logger.error("sessions.reply_send_failed", session_id=session_id, error=str(exc))
-            # We still return success because the message is persisted in the DB;
-            # the channels delivery can be retried later.
-    else:
-        logger.debug("sessions.skip_external_forward", session_id=session_id, channel=sess.channel)
 
-    return {"status": "sent", "session_id": session_id}
+    await EventManager.emit("session:updated", {"session_id": session_id})
+    try:
+        redis = await get_redis()
+        await redis.delete(f"session:{session_id}:draft")
+        await redis.delete(f"session:{session_id}:debug_trace")
+    except:
+        pass
+
+    return {"status": "sent", "session_id": session_id, "message": api_response_msg}
 
 
 @router.get("/{session_id}/draft")

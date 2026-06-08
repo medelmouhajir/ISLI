@@ -40,7 +40,7 @@ class OllamaClient:
             await self._client.aclose()
             self._client = None
 
-    async def generate(self, model: str, prompt: str, options: dict | None = None, timeout: float | None = None, format: str | None = None) -> dict:
+    async def generate(self, model: str, prompt: str, options: dict | None = None, timeout: float | None = None, format: str | None = None, keep_alive: int | str | None = None) -> dict:
         if self._client is None:
             raise RuntimeError("OllamaClient session not started")
 
@@ -56,6 +56,8 @@ class OllamaClient:
         }
         if format:
             payload["format"] = format
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
         # Use provided timeout or fall back to client's default (300s)
         resp = await self._client.post("/api/generate", json=payload, timeout=timeout)
         resp.raise_for_status()

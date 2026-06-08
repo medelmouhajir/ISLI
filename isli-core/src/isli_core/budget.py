@@ -64,6 +64,15 @@ async def check_budget(
             await session.commit()
             raise BudgetExceededError(agent_id, agent.token_budget, total)
 
+    # Agent-level per-turn cap
+    if agent.turn_token_cap is not None:
+        turn_total = input_tokens + output_tokens + reasoning_tokens
+        if turn_total > agent.turn_token_cap:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Agent {agent_id} per-turn token cap exceeded: {turn_total}/{agent.turn_token_cap}",
+            )
+
     # Agent-level reasoning budget
     if agent.reasoning_budget is not None and reasoning_tokens > 0:
         # reasoning_tokens are included in token_used already, but check specifically

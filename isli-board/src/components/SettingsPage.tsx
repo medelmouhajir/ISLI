@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Zap, SlidersHorizontal, Shield, Bell, Brain, FileText, Palette } from 'lucide-react'
+import { Zap, SlidersHorizontal, Shield, Bell, Brain, FileText, Palette, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const categories = [
@@ -39,11 +39,18 @@ const categories = [
     active: true,
   },
   {
+    title: 'System & Environment',
+    description: 'Global compliance knobs, PII defaults, and infrastructure timeouts.',
+    icon: ShieldAlert,
+    path: '/settings/system',
+    active: true,
+  },
+  {
     title: 'Security',
     description: 'Authentication, access control, and audit settings.',
     icon: Shield,
-    path: '#',
-    active: false,
+    path: '/settings/security',
+    active: true,
   },
   {
     title: 'Notifications',

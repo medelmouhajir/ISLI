@@ -63,7 +63,15 @@ def check_quota(scope: str, scope_id: str, base_path: str, additional_bytes: int
     return (current + additional_bytes) <= limit
 
 
-def read_file(scope: str, scope_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
+def read_file(
+    scope: str,
+    scope_id: str,
+    base_path: str,
+    relative_path: str,
+    max_chars: int = 16000,
+    line_start: int = 1,
+    line_end: int | None = None
+) -> dict[str, Any]:
     path = resolve_path(scope, scope_id, base_path, relative_path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {relative_path}")
@@ -74,16 +82,51 @@ def read_file(scope: str, scope_id: str, base_path: str, relative_path: str) -> 
     if size > MAX_FILE_SIZE_BYTES:
         raise OSError(f"File exceeds max size: {size} bytes")
     try:
-        content = path.read_text(encoding="utf-8")
+        raw_content = path.read_text(encoding="utf-8")
         encoding = "utf-8"
     except UnicodeDecodeError:
-        content = path.read_bytes().decode("latin-1")
+        raw_content = path.read_bytes().decode("latin-1")
         encoding = "binary"
+
+    # Line-range Logic
+    lines = raw_content.splitlines(keepends=True)
+    total_lines = len(lines)
+    total_chars = len(raw_content)
+
+    # 1-based indexing for line_start
+    start_idx = max(0, line_start - 1)
+    if line_end is None:
+        end_idx = total_lines
+    else:
+        end_idx = min(total_lines, line_end)
+
+    sliced_lines = lines[start_idx:end_idx]
+
+    # Truncation Logic
+    clamped_max_chars = min(max_chars, 64000)
+    current_content = ""
+    last_line_included = start_idx
+    truncated = False
+
+    for i, line in enumerate(sliced_lines):
+        if len(current_content) + len(line) > clamped_max_chars:
+            truncated = True
+            break
+        current_content += line
+        last_line_included = start_idx + i + 1
+
+    if truncated:
+        notice = f"\n... [truncated: {total_chars} chars total, showing lines {line_start}–{last_line_included} of ~{total_lines}. Use line_start={last_line_included + 1} to continue.]"
+        current_content += notice
+
     return {
-        "content": content,
+        "content": current_content,
         "size_bytes": size,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
         "encoding": encoding,
+        "truncated": truncated,
+        "total_lines": total_lines,
+        "last_line_included": last_line_included
     }
 
 

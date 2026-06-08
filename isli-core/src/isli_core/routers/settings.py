@@ -35,11 +35,13 @@ class ProviderOut(BaseModel):
     enabled: bool
     has_api_key: bool
     api_key_mask: str | None
+    api_base: str | None = None
     models: list[PermittedModelOut]
 
 
 class ProviderUpsert(BaseModel):
     api_key: str | None = None
+    api_base: str | None = None
     enabled: bool = True
 
 
@@ -70,6 +72,7 @@ def _build_provider_out(provider: LlmProvider, models: list[PermittedModel]) -> 
         enabled=provider.enabled,
         has_api_key=bool(provider.api_key),
         api_key_mask=_mask_key(provider.api_key),
+        api_base=provider.api_base,
         models=[PermittedModelOut.model_validate(m) for m in models],
     )
 
@@ -114,11 +117,18 @@ async def update_provider(
     row = result.scalar_one_or_none()
 
     if row is None:
-        row = LlmProvider(provider=provider, api_key=payload.api_key, enabled=payload.enabled)
+        row = LlmProvider(
+            provider=provider,
+            api_key=payload.api_key,
+            api_base=payload.api_base,
+            enabled=payload.enabled,
+        )
         db.add(row)
     else:
         if payload.api_key is not None:
             row.api_key = payload.api_key
+        if payload.api_base is not None:
+            row.api_base = payload.api_base
         row.enabled = payload.enabled
         row.updated_at = datetime.now(timezone.utc)
 
@@ -132,7 +142,7 @@ async def update_provider(
         action="update_provider",
         target_type="provider",
         target_id=provider,
-        payload={"enabled": row.enabled, "api_key_set": bool(row.api_key)},
+        payload={"enabled": row.enabled, "api_key_set": bool(row.api_key), "api_base_set": bool(row.api_base)},
     )
     await db.commit()
 

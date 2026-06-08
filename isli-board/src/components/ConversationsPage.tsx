@@ -283,7 +283,17 @@ export function ConversationsPage() {
       {/* Top filter bar */}
       <div className="h-14 border-b border-border-dim flex items-center px-4 gap-3 bg-bg-surface shrink-0">
         <div className="flex items-center gap-2">
-          <Bot className="w-4 h-4 text-text-muted" />
+          <div className="w-5 h-5 rounded-none bg-accent-cyan/10 border border-accent-cyan/20 flex items-center justify-center overflow-hidden shrink-0">
+            {selectedAgent?.picture ? (
+              <img
+                src={`/api/v1/blobs/${selectedAgent.picture}`}
+                alt={selectedAgent.name}
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <Bot className="w-3.5 h-3.5 text-text-muted" />
+            )}
+          </div>
           <Select
             value={selectedAgentId || ''}
             onChange={(e) => handleSelectAgent(e.target.value)}
@@ -496,6 +506,12 @@ export function ConversationsPage() {
                             <User className="w-4 h-4" />
                           ) : msg.role === 'action' ? (
                             <Clock className="w-4 h-4" />
+                          ) : selectedAgent?.picture ? (
+                            <img
+                              src={`/api/v1/blobs/${selectedAgent.picture}`}
+                              alt={selectedAgent.name}
+                              className="w-full h-full object-cover"
+                            />
                           ) : (
                             <Bot className="w-4 h-4" />
                           )}
@@ -587,7 +603,11 @@ export function ConversationsPage() {
                   {/* Streaming draft */}
                   {drafts[activeSessionId || ''] && (
                     <div className="mb-2">
-                      <StreamingMessageBubble text={drafts[activeSessionId || '']} />
+                      <StreamingMessageBubble
+                        text={drafts[activeSessionId || '']}
+                        agentPicture={selectedAgent?.picture}
+                        agentName={selectedAgent?.name}
+                      />
                     </div>
                   )}
 
@@ -602,8 +622,16 @@ export function ConversationsPage() {
                     activeClient.latestSession.status !== 'closed' &&
                     !drafts[activeSessionId || ''] && (
                       <div className="flex gap-4 max-w-[80%]">
-                        <div className="w-8 h-8 rounded-none shrink-0 flex items-center justify-center border bg-accent-cyan/5 border-accent-cyan/20 text-accent-cyan">
-                          <Bot className="w-4 h-4" />
+                        <div className="w-8 h-8 rounded-none shrink-0 flex items-center justify-center border bg-accent-cyan/5 border-accent-cyan/20 text-accent-cyan overflow-hidden">
+                          {selectedAgent?.picture ? (
+                            <img
+                              src={`/api/v1/blobs/${selectedAgent.picture}`}
+                              alt={selectedAgent.name}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <Bot className="w-4 h-4" />
+                          )}
                         </div>
                         <div className="bg-bg-elevated border border-border-dim p-4 rounded-none flex items-center gap-3">
                           <div className="flex gap-1">

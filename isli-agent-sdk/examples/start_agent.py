@@ -61,7 +61,9 @@ async def main():
         skills=data.get("skills") or [],
         config=data.get("config") or {},
         token_budget=data.get("token_budget"),
+        turn_token_cap=data.get("turn_token_cap"),
         api_key=data.get("api_key"),
+        api_base=data.get("api_base"),
         heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "180")),
     )
 

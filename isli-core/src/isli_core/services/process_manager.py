@@ -111,6 +111,92 @@ class AgentProcessManager:
         except Exception as exc:
             logger.warning("pm.reconcile.failed", error=str(exc))
 
+    # ── Agent env resolution ────────────────────────────────────────────
+
+    async def _resolve_agent_env(self, agent_id: str) -> dict[str, str]:
+        """Query DB to resolve agent-specific API keys and base URLs.
+
+        Maps the provider to the LiteLLM env-var name so the SDK doesn't
+        need to know every provider's convention.
+        """
+        from sqlalchemy import select
+        from isli_core.db import get_db_session_manual
+        from isli_core.models import Agent, LlmProvider
+
+        resolved: dict[str, str] = {}
+        try:
+            async with get_db_session_manual() as db:
+                agent_result = await db.execute(
+                    select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None))
+                )
+                agent = agent_result.scalar_one_or_none()
+                if not agent:
+                    logger.warning("pm.resolve_env.agent_not_found", agent_id=agent_id)
+                    return resolved
+
+                provider_name = agent.model_provider
+                if not provider_name:
+                    return resolved
+
+                api_key = agent.api_key
+                api_base = None
+                if not api_key:
+                    provider_result = await db.execute(
+                        select(LlmProvider).where(LlmProvider.provider == provider_name)
+                    )
+                    provider = provider_result.scalar_one_or_none()
+                    if provider:
+                        api_key = provider.api_key
+                        api_base = provider.api_base
+
+                # Map provider to LiteLLM env-var names
+                provider_env_map = {
+                    "ollama": "OLLAMA_API_KEY",
+                    "openai": "OPENAI_API_KEY",
+                    "anthropic": "ANTHROPIC_API_KEY",
+                    "google": "GEMINI_API_KEY",
+                    "deepseek": "DEEPSEEK_API_KEY",
+                    "azure": "AZURE_API_KEY",
+                    "vertex": "VERTEXAI_API_KEY",
+                    "vertex_ai": "VERTEXAI_API_KEY",
+                }
+                env_key = provider_env_map.get(provider_name.lower())
+                if env_key and api_key:
+                    resolved[env_key] = api_key
+
+                # Also inject api_base if we resolved one
+                base_env_map = {
+                    "ollama": "OLLAMA_API_BASE",
+                    "openai": "OPENAI_API_BASE",
+                    "anthropic": "ANTHROPIC_API_BASE",
+                    "google": "GEMINI_API_BASE",
+                    "deepseek": "DEEPSEEK_API_BASE",
+                    "azure": "AZURE_API_BASE",
+                    "vertex": "VERTEXAI_LOCATION",
+                    "vertex_ai": "VERTEXAI_LOCATION",
+                }
+                base_env = base_env_map.get(provider_name.lower())
+                if base_env and api_base:
+                    resolved[base_env] = api_base
+
+                # Inject PII mesh config per agent
+                agent_config = agent.config or {}
+                resolved["PII_MESH_ENABLED"] = str(agent_config.get("pii_mesh_enabled", False)).lower()
+                resolved["PII_USE_SLM"] = str(agent_config.get("pii_use_slm", True)).lower()
+                resolved["KEEPER_URL"] = get_settings().keeper_url
+
+                logger.info(
+                    "pm.resolve_env.done",
+                    agent_id=agent_id,
+                    provider=provider_name,
+                    key_injected=bool(api_key),
+                    base_injected=bool(api_base),
+                    pii_mesh=resolved.get("PII_MESH_ENABLED"),
+                )
+        except Exception as exc:
+            logger.warning("pm.resolve_env.failed", agent_id=agent_id, error=str(exc))
+        return resolved
+
     # ── Docker backend ──────────────────────────────────────────────────
 
     async def _spawn_docker(self, agent_id: str) -> None:
@@ -145,6 +231,8 @@ class AgentProcessManager:
         from isli_core.config import get_settings, IS_DEV
         settings = get_settings()
 
+        agent_env = await self._resolve_agent_env(agent_id)
+
         env = {
             "AGENT_ID": agent_id,
             "CORE_API_URL": self.core_url,
@@ -155,6 +243,8 @@ class AgentProcessManager:
             "MODEL_PROVIDER": os.getenv("MODEL_PROVIDER", "ollama"),
             "MODEL_ID": os.getenv("MODEL_ID", "qwen2.5:7b"),
         }
+        # Agent-specific resolved keys override generic env fallbacks
+        env.update(agent_env)
 
         logger.info(
             "pm.spawn.docker",
@@ -414,11 +504,15 @@ class AgentProcessManager:
 
         logger.info("pm.spawn.starting", agent_id=agent_id, script=script_path)
 
+        agent_env = await self._resolve_agent_env(agent_id)
+        subprocess_env = {**os.environ, "CORE_API_URL": self.core_url}
+        subprocess_env.update(agent_env)
+
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             script_path,
             agent_id,
-            env={**os.environ, "CORE_API_URL": self.core_url},
+            env=subprocess_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

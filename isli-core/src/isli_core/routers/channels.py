@@ -115,6 +115,39 @@ async def channel_webhook(channel: str, request: Request, db: AsyncSession = Dep
 
         # Append inbound message
         msg_text = payload.get("text", "")
+        
+        # --- Audio blob handling: detect token and call STT ---
+        if msg_text and msg_text.startswith("blob:audio:"):
+            from isli_core.config import get_settings
+            import httpx
+            from isli_core.auth import create_internal_token
+            
+            settings = get_settings()
+            logger.info("channels.webhook_stt_dispatch", blob_key=msg_text, session_id=session_id)
+            
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    stt_token = create_internal_token("core", scopes=["audio:stt"], expires_minutes=5)
+                    resp = await client.post(
+                        f"{settings.audio_url}/stt/transcribe",
+                        json={"audio_ref": msg_text},
+                        headers={"X-Internal-Auth": stt_token}
+                    )
+                    resp.raise_for_status()
+                    stt_result = resp.json()
+                    transcribed_text = stt_result.get("text", "").strip()
+                    
+                    if transcribed_text:
+                        logger.info("channels.webhook_stt_success", session_id=session_id, text_len=len(transcribed_text))
+                        msg_text = transcribed_text
+                    else:
+                        logger.warning("channels.webhook_stt_empty", session_id=session_id)
+                        # We keep the blob token as text so the agent knows it was audio, 
+                        # but ideally we'd have a fallback.
+            except Exception as exc:
+                logger.error("channels.webhook_stt_failed", session_id=session_id, error=str(exc))
+                # Fallback: keep the token in the text so it's not lost
+
         sess.messages = (sess.messages or []) + [
             {"role": "user", "content": msg_text, "timestamp": now.isoformat()}
         ]

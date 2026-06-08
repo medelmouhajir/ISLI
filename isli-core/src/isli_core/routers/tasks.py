@@ -3,7 +3,7 @@ from typing import Any
 
 import httpx
 from croniter import croniter
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -150,29 +150,8 @@ class TaskOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-@router.get("", response_model=list[TaskOut])
-async def list_tasks(
-    status: str | None = None,
-    agent_id: str | None = None,
-    db: AsyncSession = Depends(get_db),
-    admin: str = Depends(require_admin_auth)
-):
-    stmt = select(Task).where(Task.deleted_at.is_(None))
-    if status:
-        stmt = stmt.where(Task.status == status)
-    if agent_id:
-        stmt = stmt.where(Task.agent_id == agent_id)
-    stmt = stmt.order_by(Task.created_at.desc())
-    result = await db.execute(stmt)
-    return result.scalars().all()
-
-
-@router.post("", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
-async def create_task(
-    payload: TaskCreate,
-    db: AsyncSession = Depends(get_db),
-    admin: str = Depends(require_admin_auth)
-):
+async def _create_task_core(db: AsyncSession, payload: TaskCreate, estop_active: bool = False) -> Task:
+    """Core task creation logic reused by the REST router and the inline skill handler."""
     # Security scan and policy check
     scan = ContentScanner.scan(payload.input)
     decision = await PolicyEngine.evaluate(
@@ -183,7 +162,7 @@ async def create_task(
         skill_name=None,
         model_id=None,
         budget_exceeded=False,
-        estop_active=False,
+        estop_active=estop_active,
     )
     if not decision.allow:
         detail: dict[str, Any] = {
@@ -217,6 +196,7 @@ async def create_task(
         agent_config = agent_row.config or {}
 
     depth = 0
+    parent_task = None
     if payload.parent_task_id:
         parent = await db.execute(
             select(Task).where(Task.id == payload.parent_task_id, Task.deleted_at.is_(None))
@@ -228,14 +208,13 @@ async def create_task(
         max_depth = await get_setting(db, "delegation_max_depth", scope="general", default=3)
         depth = await validate_delegation(db, payload.parent_task_id, payload.agent_id, max_depth=max_depth)
         if await needs_human_approval(depth, approval_depth=await get_setting(db, "delegation_approval_depth", scope="general", default=2)):
-            # Store the approval requirement in the task payload for downstream handling
             if payload.payload is None:
                 payload.payload = {}
             payload.payload["needs_human_approval"] = True
 
     # Determine initial status
     now = datetime.now(timezone.utc)
-    
+
     scheduled_at = payload.scheduled_at
     if payload.cron_expression and not scheduled_at:
         it = croniter(payload.cron_expression, now)
@@ -277,7 +256,7 @@ async def create_task(
     await db.commit()
     await db.refresh(task)
 
-    if payload.parent_task_id:
+    if payload.parent_task_id and parent_task is not None:
         parent_task.child_task_ids = list(parent_task.child_task_ids or []) + [task.id]
         await db.commit()
 
@@ -309,6 +288,33 @@ async def create_task(
         )
 
     return task
+
+
+@router.get("", response_model=list[TaskOut])
+async def list_tasks(
+    status: str | None = None,
+    agent_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    admin: str = Depends(require_admin_auth)
+):
+    stmt = select(Task).where(Task.deleted_at.is_(None))
+    if status:
+        stmt = stmt.where(Task.status == status)
+    if agent_id:
+        stmt = stmt.where(Task.agent_id == agent_id)
+    stmt = stmt.order_by(Task.created_at.desc())
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+@router.post("", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
+async def create_task(
+    payload: TaskCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: str = Depends(require_admin_auth)
+):
+    return await _create_task_core(db, payload, estop_active=request.app.state.estop.active)
 
 
 @router.get("/{task_id}", response_model=TaskOut)

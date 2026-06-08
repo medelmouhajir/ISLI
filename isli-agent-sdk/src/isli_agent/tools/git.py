@@ -239,7 +239,8 @@ async def git_log(
     agent_id: str,
     path: str,
     core_client: CoreClient,
-    max_count: int = 10,
+    max_count: int = 30,
+    max_chars: int = 12000,
 ) -> dict[str, Any]:
     """Show the commit history of a git repository."""
     resp = await core_client.client.post(
@@ -248,6 +249,7 @@ async def git_log(
             "agent_id": agent_id,
             "path": path,
             "max_count": max_count,
+            "max_chars": max_chars,
         },
         headers=core_client._get_headers(),
     )

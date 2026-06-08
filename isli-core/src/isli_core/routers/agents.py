@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Response, status, WebSocket, WebSocketDisconnect, UploadFile, File
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,11 +11,12 @@ import os
 import asyncio
 import structlog
 from pathlib import Path
+from uuid import uuid4
 
 logger = structlog.get_logger()
 
-from isli_core.db import get_db
-from isli_core.models import Agent, Session, LlmProvider
+from isli_core.db import get_db, get_db_session_manual
+from isli_core.models import Agent, Session, LlmProvider, Task
 from isli_core.budget import check_budget, BudgetEngine, BudgetAlerter
 from isli_core.cost.dashboard import CostDashboard
 from isli_core.auth import (
@@ -30,6 +31,7 @@ from isli_core.audit_writer import AuditWriter
 from isli_core.config import get_settings
 from isli_core.event_manager import EventManager
 from isli_core.redis_client import get_redis
+from isli_core.redis_blob_client import get_blob_redis
 from isli_core.services.process_manager import get_pm, AgentProcessManager
 from isli_core.memory.context_cache import ContextCache
 
@@ -53,12 +55,14 @@ class AgentCreate(BaseModel):
     name: str
     description: str | None = None
     persona: str | None = None
+    picture: str | None = None
     model_provider: str | None = None
     model_id: str | None = None
     channels: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
     token_budget: int | None = None
+    turn_token_cap: int | None = None
     user_id: str | None = None
     org_id: str | None = None
     fallback_agent_id: str | None = None
@@ -96,6 +100,7 @@ class AgentUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     persona: str | None = None
+    picture: str | None = None
     status: str | None = None
     model_provider: str | None = None
     model_id: str | None = None
@@ -103,6 +108,7 @@ class AgentUpdate(BaseModel):
     skills: list[str] | None = None
     config: dict[str, Any] | None = None
     token_budget: int | None = None
+    turn_token_cap: int | None = None
     user_id: str | None = None
     org_id: str | None = None
     fallback_agent_id: str | None = None
@@ -150,6 +156,7 @@ class AgentOut(BaseModel):
     name: str
     description: str | None
     persona: str | None
+    picture: str | None = None
     status: str
     model_provider: str | None
     model_id: str | None
@@ -157,6 +164,7 @@ class AgentOut(BaseModel):
     skills: list[str]
     config: dict[str, Any]
     token_budget: int | None
+    turn_token_cap: int | None
     token_used: int
     user_id: str | None
     org_id: str | None
@@ -218,17 +226,28 @@ async def create_agent(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Agent already exists")
 
+    # Resolve default turn_token_cap if not provided
+    turn_token_cap = payload.turn_token_cap
+    if turn_token_cap is None:
+        provider = (payload.model_provider or "").lower()
+        if provider == "ollama" or not provider:
+            turn_token_cap = 4000
+        else:
+            turn_token_cap = 12000
+
     agent = Agent(
         id=agent_id,
         name=payload.name,
         description=payload.description,
         persona=payload.persona,
+        picture=payload.picture,
         model_provider=payload.model_provider,
         model_id=payload.model_id,
         channels=payload.channels,
         skills=payload.skills,
         config=payload.config,
         token_budget=payload.token_budget,
+        turn_token_cap=turn_token_cap,
         user_id=payload.user_id,
         org_id=payload.org_id,
         fallback_agent_id=payload.fallback_agent_id,
@@ -308,6 +327,7 @@ class AgentConfigOut(BaseModel):
     name: str
     description: str | None = None
     persona: str | None = None
+    picture: str | None = None
     model_provider: str | None = None
     model_id: str | None = None
     channels: list[str] = []
@@ -315,7 +335,9 @@ class AgentConfigOut(BaseModel):
     known_agent_ids: list[str] = []
     config: dict[str, Any] = {}
     token_budget: int | None = None
+    turn_token_cap: int | None = None
     api_key: str | None = None
+    api_base: str | None = None
 
 
 @router.get("/{agent_id}/config", response_model=AgentConfigOut)
@@ -340,6 +362,7 @@ async def get_agent_config(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     resolved_key = agent.api_key
+    resolved_base = None
     if not resolved_key and agent.model_provider:
         provider_result = await db.execute(
             select(LlmProvider).where(LlmProvider.provider == agent.model_provider)
@@ -347,12 +370,14 @@ async def get_agent_config(
         provider = provider_result.scalar_one_or_none()
         if provider:
             resolved_key = provider.api_key
+            resolved_base = provider.api_base
 
     return AgentConfigOut(
         id=agent.id,
         name=agent.name,
         description=agent.description,
         persona=agent.persona,
+        picture=agent.picture,
         model_provider=agent.model_provider,
         model_id=agent.model_id,
         channels=_safe_json(agent.channels, []),
@@ -360,8 +385,51 @@ async def get_agent_config(
         known_agent_ids=_safe_json(agent.known_agent_ids, []),
         config=_safe_json(agent.config, {}),
         token_budget=agent.token_budget,
+        turn_token_cap=agent.turn_token_cap,
         api_key=resolved_key,
+        api_base=resolved_base,
     )
+
+
+@router.post("/{agent_id}/picture")
+async def upload_agent_picture(
+    agent_id: str,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    admin: str = Depends(require_admin_auth)
+):
+    result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    # Generate a unique ID for the blob
+    blob_id = str(uuid4())
+    redis = await get_blob_redis()
+    
+    # Save to redis blob store
+    await redis.set(f"blob:agent:{blob_id}", content)
+    
+    # Update agent record
+    agent.picture = blob_id
+    agent.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    
+    # Invalidate caches
+    await ContextCache.invalidate_for_agent(agent.id)
+    
+    await AuditWriter.write(
+        db, actor_type="system", actor_id="core-api", action="upload_agent_picture",
+        target_type="agent", target_id=agent.id,
+        payload={"blob_id": blob_id},
+    )
+    await db.commit()
+    
+    return {"id": blob_id}
 
 
 @router.put("/{agent_id}", response_model=AgentOut)
@@ -499,6 +567,52 @@ async def agent_heartbeat(
     for sess in session_result.scalars().all():
         sess.last_activity_at = datetime.now(timezone.utc)
 
+    # Track idle streak and gather enrichment data for heartbeat validation
+    from isli_core.redis_client import get_redis
+    redis = await get_redis()
+
+    prev_heartbeat_key = f"agent:last_heartbeat:{agent_id}"
+    prev_heartbeat_str = await redis.get(prev_heartbeat_key)
+    prev_heartbeat = None
+    if prev_heartbeat_str:
+        try:
+            prev_heartbeat = datetime.fromisoformat(prev_heartbeat_str)
+        except ValueError:
+            pass
+
+    # Check if any session had activity since the last heartbeat
+    had_activity = False
+    if prev_heartbeat:
+        activity_result = await db.execute(
+            select(Session).where(
+                Session.agent_id == agent_id,
+                Session.deleted_at.is_(None),
+                Session.last_activity_at > prev_heartbeat,
+            )
+        )
+        had_activity = bool(activity_result.scalars().first())
+
+    idle_streak_key = f"agent:heartbeat:idle_streak:{agent_id}"
+    if had_activity:
+        await redis.delete(idle_streak_key)
+        consecutive_idle_beats = 0
+    else:
+        consecutive_idle_beats = await redis.incr(idle_streak_key)
+        await redis.expire(idle_streak_key, 86400)
+
+    # Find any in-flight task
+    in_flight_result = await db.execute(
+        select(Task).where(
+            Task.agent_id == agent_id,
+            Task.status.notin_(["done", "cancelled", "failed"]),
+        ).order_by(Task.updated_at.desc()).limit(1)
+    )
+    in_flight_task = in_flight_result.scalar_one_or_none()
+    current_task_id = in_flight_task.id if in_flight_task else None
+
+    # Store current heartbeat for next delta
+    await redis.set(prev_heartbeat_key, agent.heartbeat_at.isoformat(), ex=86400)
+
     now = datetime.now(timezone.utc)
     token = create_internal_token(agent_id, scopes=["agent"], expires_minutes=525600, iat=now)
     latency_ms = (time.perf_counter() - start) * 1000
@@ -513,7 +627,9 @@ async def agent_heartbeat(
     await EventManager.emit("agent:heartbeat", {
         "agent_id": agent_id,
         "status": agent.status,
-        "heartbeat_at": agent.heartbeat_at.isoformat() if agent.heartbeat_at else None
+        "heartbeat_at": agent.heartbeat_at.isoformat() if agent.heartbeat_at else None,
+        "consecutive_idle_beats": consecutive_idle_beats,
+        "current_task_id": current_task_id,
     })
 
     # Revoke the old token ONLY after all side effects succeeded and the new token
@@ -655,7 +771,7 @@ async def record_agent_usage(
     if agent:
         if agent.user_id:
             asyncio.create_task(
-                _fire_budget_alert(db, agent.user_id, agent.org_id)
+                _fire_budget_alert(agent.user_id, agent.org_id)
             )
 
     return UsageOut(
@@ -665,16 +781,17 @@ async def record_agent_usage(
     )
 
 
-async def _fire_budget_alert(db: AsyncSession, user_id: str | None, org_id: str | None) -> None:
+async def _fire_budget_alert(user_id: str | None, org_id: str | None) -> None:
     try:
-        if user_id:
-            status = await BudgetEngine.get_user_budget_status(db, user_id)
-            if status:
-                await BudgetAlerter.maybe_alert_user(db, user_id, status["token_used"], status["usd_used"])
-        if org_id:
-            status = await BudgetEngine.get_org_budget_status(db, org_id)
-            if status:
-                await BudgetAlerter.maybe_alert_org(db, org_id, status["token_used"], status["usd_used"])
+        async with get_db_session_manual() as db:
+            if user_id:
+                status = await BudgetEngine.get_user_budget_status(db, user_id)
+                if status:
+                    await BudgetAlerter.maybe_alert_user(db, user_id, status["token_used"], status["usd_used"])
+            if org_id:
+                status = await BudgetEngine.get_org_budget_status(db, org_id)
+                if status:
+                    await BudgetAlerter.maybe_alert_org(db, org_id, status["token_used"], status["usd_used"])
     except Exception:
         pass
 

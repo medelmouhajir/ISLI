@@ -6,6 +6,7 @@ interface NotificationItemRowProps {
   item: NotificationItem
   onMarkRead: () => void
   onDismiss: () => void
+  onClick: () => void
 }
 
 const categoryConfig = {
@@ -15,15 +16,16 @@ const categoryConfig = {
   low: { icon: CheckCircle2, color: 'text-text-muted', bg: 'bg-bg-elevated', border: 'border-border-dim' },
 }
 
-export function NotificationItemRow({ item, onMarkRead, onDismiss }: NotificationItemRowProps) {
+export function NotificationItemRow({ item, onMarkRead, onDismiss, onClick }: NotificationItemRowProps) {
   const config = categoryConfig[item.category] || categoryConfig.normal
   const isUnread = !item.read_at
 
   return (
     <div
+      onClick={onClick}
       className={cn(
-        'relative flex items-stretch gap-0 border-b border-border-dim/50 group transition-colors',
-        isUnread ? 'bg-bg-surface' : 'bg-bg-base/40 opacity-60'
+        'relative flex items-stretch gap-0 border-b border-border-dim/50 group transition-colors cursor-pointer',
+        isUnread ? 'bg-bg-surface hover:bg-bg-elevated/50' : 'bg-bg-base/40 opacity-60 hover:opacity-100 hover:bg-bg-base'
       )}
     >
       {/* Category Indicator Block */}
@@ -46,7 +48,10 @@ export function NotificationItemRow({ item, onMarkRead, onDismiss }: Notificatio
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             {isUnread && (
               <button
-                onClick={onMarkRead}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onMarkRead()
+                }}
                 className="w-5 h-5 flex items-center justify-center text-text-muted hover:text-accent-green border border-border-dim hover:border-accent-green transition-colors"
                 title="Mark Read"
               >
@@ -54,7 +59,10 @@ export function NotificationItemRow({ item, onMarkRead, onDismiss }: Notificatio
               </button>
             )}
             <button
-              onClick={onDismiss}
+              onClick={(e) => {
+                e.stopPropagation()
+                onDismiss()
+              }}
               className="w-5 h-5 flex items-center justify-center text-text-muted hover:text-accent-red border border-border-dim hover:border-accent-red transition-colors"
               title="Dismiss"
             >

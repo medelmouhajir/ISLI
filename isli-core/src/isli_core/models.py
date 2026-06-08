@@ -30,6 +30,7 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     persona: Mapped[str | None] = mapped_column(Text)
+    picture: Mapped[str | None] = mapped_column(String(512))
     status: Mapped[str] = mapped_column(String(32), default="registered", nullable=False)
     status_reason: Mapped[str | None] = mapped_column(Text)
     model_provider: Mapped[str | None] = mapped_column(String(64))
@@ -40,6 +41,7 @@ class Agent(Base):
     model_routing_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     secondary_models: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    turn_token_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     token_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     reasoning_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     user_id: Mapped[str | None] = mapped_column(String(64))
@@ -545,6 +547,7 @@ class LlmProvider(Base):
 
     provider: Mapped[str] = mapped_column(String(64), primary_key=True)
     api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_base: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, nullable=False

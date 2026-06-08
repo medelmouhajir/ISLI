@@ -276,34 +276,54 @@ class KeeperClient:
             return None
 
     @staticmethod
-    async def validate_heartbeat(agent_id: str, heartbeat_at: str) -> bool:
+    async def validate_heartbeat(
+        agent_id: str,
+        heartbeat_at: str,
+        consecutive_idle_beats: int = 0,
+        current_task_id: str | None = None,
+    ) -> bool:
         settings = get_settings()
         url = f"{settings.keeper_url}/heartbeat/validate"
         start = time.monotonic()
         try:
             token = create_internal_token("core-api", scopes=["keeper:heartbeat"], expires_minutes=1)
+            payload = {
+                "agent_id": agent_id,
+                "heartbeat_at": heartbeat_at,
+                "consecutive_idle_beats": consecutive_idle_beats,
+                "current_task_id": current_task_id,
+            }
             async with httpx.AsyncClient(timeout=180.0) as client:
                 resp = await client.post(
                     url,
-                    json={"agent_id": agent_id, "heartbeat_at": heartbeat_at},
+                    json=payload,
                     headers={"X-Internal-Auth": token, "X-Agent-ID": agent_id}
                 )
                 data = resp.json()
             latency = (time.monotonic() - start) * 1000
+            prompt_preview = (
+                f"Heartbeat validation for {agent_id} at {heartbeat_at}"
+                f" (idle_streak={consecutive_idle_beats}, task={current_task_id})"
+            )
             await EventManager.emit("keeper:inference", {
                 "agent_id": agent_id,
                 "endpoint": "heartbeat/validate",
                 "model": data.get("model"),
                 "latency_ms": round(latency, 2),
                 "status": "success",
-                "prompt": f"Heartbeat at {heartbeat_at}",
+                "prompt": prompt_preview,
                 "completion": json.dumps(data),
-                "prompt_preview": f"Heartbeat at {heartbeat_at}"[:80],
+                "prompt_preview": prompt_preview[:80],
                 "completion_preview": json.dumps(data)[:80],
+                "heartbeat_at": heartbeat_at,
             })
             return data.get("is_valid", True)
         except Exception as exc:
             latency = (time.monotonic() - start) * 1000
+            prompt_preview = (
+                f"Heartbeat validation for {agent_id} at {heartbeat_at}"
+                f" (idle_streak={consecutive_idle_beats}, task={current_task_id})"
+            )
             await EventManager.emit("keeper:inference", {
                 "agent_id": agent_id,
                 "endpoint": "heartbeat/validate",
@@ -311,8 +331,9 @@ class KeeperClient:
                 "latency_ms": round(latency, 2),
                 "status": "error",
                 "error": str(exc),
-                "prompt": f"Heartbeat at {heartbeat_at}",
-                "prompt_preview": f"Heartbeat at {heartbeat_at}"[:80],
+                "prompt": prompt_preview,
+                "prompt_preview": prompt_preview[:80],
+                "heartbeat_at": heartbeat_at,
             })
             logger.error(
                 "keeper.heartbeat_validate_failed",

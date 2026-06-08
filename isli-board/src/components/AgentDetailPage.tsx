@@ -8,7 +8,7 @@ import { Select } from '@/components/ui/Select'
 import { Textarea } from '@/components/ui/Textarea'
 import { Label } from '@/components/ui/Label'
 import { ConfirmationModal } from '@/components/ui/ConfirmationModal'
-import { getJSON, postJSON } from '@/lib/api'
+import { getJSON, postJSON, postFormData } from '@/lib/api'
 import {
   Bot,
   ChevronLeft,
@@ -28,6 +28,7 @@ import {
   Users,
   Radio,
   X,
+  Camera,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -43,6 +44,7 @@ function buildForm(agent: Agent | null): Record<string, unknown> {
     model_provider: agent.model_provider ?? '',
     model_id: agent.model_id ?? '',
     token_budget: agent.token_budget ?? '',
+    turn_token_cap: agent.turn_token_cap ?? '',
     max_retries: agent.max_retries,
     fallback_agent_id: agent.fallback_agent_id ?? '',
     known_agent_ids: [...agent.known_agent_ids],
@@ -56,6 +58,8 @@ function buildForm(agent: Agent | null): Record<string, unknown> {
     streaming_mode: agent.config?.streaming_mode || 'silent',
     stream_chunk_size: agent.config?.stream_chunk_size ?? 5,
     stream_delay_ms: agent.config?.stream_delay_ms ?? 20,
+    pii_mesh_enabled: agent.config?.pii_mesh_enabled || false,
+    pii_use_slm: agent.config?.pii_use_slm || false,
   }
 }
 
@@ -74,6 +78,24 @@ export function AgentDetailPage() {
   })
 
   const agent = useMemo(() => agents.find((a) => a.id === id), [agents, id])
+  const [uploadingPicture, setUploadingPicture] = useState(false)
+
+  const handleUploadPicture = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !agent) return
+
+    setUploadingPicture(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      await postFormData(`/v1/agents/${agent.id}/picture`, formData)
+      queryClient.invalidateQueries({ queryKey: ['agents'] })
+    } catch (err) {
+      console.error('Failed to upload picture:', err)
+    } finally {
+      setUploadingPicture(false)
+    }
+  }
 
   // Auto-refresh while starting, registered, or rebuilding
   useEffect(() => {
@@ -262,11 +284,14 @@ export function AgentDetailPage() {
       (form.model_id || '') !== (agent.model_id || '') ||
       (form.fallback_agent_id || '') !== (agent.fallback_agent_id || '') ||
       (form.token_budget || '') !== (agent.token_budget || '') ||
+      (form.turn_token_cap || '') !== (agent.turn_token_cap || '') ||
       Number(form.max_retries ?? 3) !== Number(agent.max_retries ?? 3) ||
       String(form.api_key || '').trim() !== '' ||
       Boolean(form.model_routing_enabled) !== Boolean(agent.model_routing_enabled) ||
       JSON.stringify(form.secondary_models || []) !== JSON.stringify(agent.secondary_models || []) ||
-      String(form.streaming_mode || 'silent') !== String(agentConfig.streaming_mode || 'silent')
+      String(form.streaming_mode || 'silent') !== String(agentConfig.streaming_mode || 'silent') ||
+      Boolean(form.pii_mesh_enabled) !== Boolean(agentConfig.pii_mesh_enabled) ||
+      Boolean(form.pii_use_slm) !== Boolean(agentConfig.pii_use_slm)
     )
   }, [form, agent])
 
@@ -323,6 +348,9 @@ export function AgentDetailPage() {
     const tokenBudget = Number(form.token_budget)
     if (!Number.isNaN(tokenBudget) && tokenBudget > 0) payload.token_budget = tokenBudget
     else payload.token_budget = null
+    const turnTokenCap = Number(form.turn_token_cap)
+    if (!Number.isNaN(turnTokenCap) && turnTokenCap > 0) payload.turn_token_cap = turnTokenCap
+    else payload.turn_token_cap = null
     const maxRetries = Number(form.max_retries)
     if (!Number.isNaN(maxRetries)) payload.max_retries = maxRetries
     const apiKey = String(form.api_key || '').trim()
@@ -331,9 +359,11 @@ export function AgentDetailPage() {
     payload.model_routing_enabled = Boolean(form.model_routing_enabled)
     payload.secondary_models = Array.isArray(form.secondary_models) ? form.secondary_models : []
 
-    // Include streaming_mode in config blob
+    // Include streaming_mode and PII mesh in config blob
     const config = JSON.parse(String(form.config || '{}'))
     config.streaming_mode = String(form.streaming_mode || 'silent')
+    config.pii_mesh_enabled = Boolean(form.pii_mesh_enabled)
+    config.pii_use_slm = Boolean(form.pii_use_slm)
     payload.config = config
 
     setSavingSection('model')
@@ -398,10 +428,13 @@ export function AgentDetailPage() {
       model_id: agent.model_id ?? '',
       fallback_agent_id: agent.fallback_agent_id ?? '',
       token_budget: agent.token_budget ?? '',
+      turn_token_cap: agent.turn_token_cap ?? '',
       max_retries: agent.max_retries,
       api_key: '',
       model_routing_enabled: agent.model_routing_enabled || false,
       secondary_models: agent.secondary_models || [],
+      pii_mesh_enabled: agent.config?.pii_mesh_enabled || false,
+      pii_use_slm: agent.config?.pii_use_slm || false,
     }))
   }
 
@@ -639,6 +672,44 @@ export function AgentDetailPage() {
                 </div>
 
                 <div className="p-8 border border-border-bright bg-bg-surface space-y-8">
+                  {/* Avatar Upload */}
+                  <div className="flex flex-col items-center gap-4 pb-8 border-b border-border-dim">
+                    <div className="relative group">
+                      <div className="w-32 h-32 bg-bg-elevated border-2 border-border-dim overflow-hidden flex items-center justify-center relative">
+                        {agent.picture ? (
+                          <img 
+                            src={`/api/v1/blobs/${agent.picture}`} 
+                            alt={agent.name} 
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <Bot className="w-12 h-12 text-text-muted opacity-20" />
+                        )}
+                        
+                        <label className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
+                          <Camera className="w-6 h-6 text-white mb-2" />
+                          <span className="text-[10px] text-white font-bold uppercase tracking-widest">
+                            {uploadingPicture ? 'UPLOADING...' : 'CHANGE_IMAGE'}
+                          </span>
+                          <input 
+                            type="file" 
+                            className="hidden" 
+                            accept="image/*" 
+                            onChange={handleUploadPicture}
+                            disabled={uploadingPicture}
+                          />
+                        </label>
+                      </div>
+                      
+                      {uploadingPicture && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-bg-surface/50">
+                          <div className="w-6 h-6 border-2 border-accent-cyan/20 border-t-accent-cyan rounded-full animate-spin" />
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-[9px] text-text-muted uppercase tracking-[0.2em]">NODE_IDENTICON_v1.0</p>
+                  </div>
+
                   <div className="space-y-2">
                     <Label className="text-[10px] tracking-widest text-text-muted uppercase">Display Name</Label>
                     <Input
@@ -813,7 +884,7 @@ export function AgentDetailPage() {
 
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <Label className="text-[10px] tracking-widest text-text-muted uppercase">Token Limit</Label>
+                      <Label className="text-[10px] tracking-widest text-text-muted uppercase">Lifetime Limit</Label>
                       <Input
                         type="number"
                         value={String(form.token_budget ?? '')}
@@ -822,6 +893,19 @@ export function AgentDetailPage() {
                         className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12"
                       />
                     </div>
+                    <div className="space-y-2">
+                      <Label className="text-[10px] tracking-widest text-text-muted uppercase">Per-Turn Cap</Label>
+                      <Input
+                        type="number"
+                        value={String(form.turn_token_cap ?? '')}
+                        onChange={(e) => setField('turn_token_cap', e.target.value === '' ? '' : Number(e.target.value))}
+                        placeholder="e.g. 4000"
+                        className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <Label className="text-[10px] tracking-widest text-text-muted uppercase">Retry Limit</Label>
                       <Input
@@ -948,6 +1032,62 @@ export function AgentDetailPage() {
                             + ADD_SECONDARY_NODE
                           </button>
                         )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* PII Mesh */}
+                  <div className="pt-6 border-t border-border-dim space-y-4">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px] tracking-widest text-text-muted uppercase flex items-center gap-2">
+                        <ShieldAlert className="w-3.5 h-3.5 text-accent-amber" />
+                        PII Mesh
+                      </Label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const enabled = !form.pii_mesh_enabled
+                          setField('pii_mesh_enabled', enabled)
+                          if (!enabled) setField('pii_use_slm', false)
+                        }}
+                        className={cn(
+                          "relative inline-flex h-5 w-9 items-center rounded-none transition-colors border",
+                          form.pii_mesh_enabled ? "border-accent-amber bg-accent-amber/10" : "border-border-bright bg-bg-elevated"
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "inline-block h-3 w-3 transform rounded-none transition-transform",
+                            form.pii_mesh_enabled ? "translate-x-5 bg-accent-amber" : "translate-x-1 bg-text-muted"
+                          )}
+                        />
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-text-secondary leading-relaxed uppercase tracking-tight">
+                      When enabled, the Keeper local model anonymizes PII before sending messages to the cloud LLM. Re-hydration happens locally in the agent runner.
+                    </p>
+
+                    {Boolean(form.pii_mesh_enabled) && (
+                      <div className="flex items-center justify-between animate-in fade-in slide-in-from-top-2 duration-300">
+                        <Label className="text-[10px] tracking-widest text-text-muted uppercase flex items-center gap-2">
+                          <Brain className="w-3 h-3 text-accent-cyan" />
+                          Use Keeper SLM for PII detection
+                        </Label>
+                        <button
+                          type="button"
+                          onClick={() => setField('pii_use_slm', !form.pii_use_slm)}
+                          className={cn(
+                            "relative inline-flex h-5 w-9 items-center rounded-none transition-colors border",
+                            form.pii_use_slm ? "border-accent-cyan bg-accent-cyan/10" : "border-border-bright bg-bg-elevated"
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "inline-block h-3 w-3 transform rounded-none transition-transform",
+                              form.pii_use_slm ? "translate-x-5 bg-accent-cyan" : "translate-x-1 bg-text-muted"
+                            )}
+                          />
+                        </button>
                       </div>
                     )}
                   </div>

@@ -8,9 +8,12 @@ import {
   useDismissNotification,
 } from '@/hooks/useNotifications'
 import { NotificationItemRow } from './NotificationItem'
+import { NotificationDetailModal } from './NotificationDetailModal'
+import type { NotificationItem } from '@/types'
 
 export function DigestPage() {
   const [filter, setFilter] = useState<'all' | 'unread' | 'read'>('all')
+  const [selectedNotification, setSelectedNotification] = useState<NotificationItem | null>(null)
   const { data, isLoading } = useDigestNotifications(filter)
   const markRead = useMarkRead()
   const markAllRead = useMarkAllRead()
@@ -96,11 +99,21 @@ export function DigestPage() {
                 item={item}
                 onMarkRead={() => markRead.mutate(item.id)}
                 onDismiss={() => dismiss.mutate(item.id)}
+                onClick={() => setSelectedNotification(item)}
               />
             </div>
           ))}
         </div>
       </div>
+
+      <NotificationDetailModal
+        open={!!selectedNotification}
+        notification={selectedNotification}
+        onMarkRead={(id) => markRead.mutate(id)}
+        onDismiss={(id) => dismiss.mutate(id)}
+        onClose={() => setSelectedNotification(null)}
+      />
     </div>
   )
 }
+

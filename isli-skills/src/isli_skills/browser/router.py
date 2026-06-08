@@ -352,20 +352,28 @@ async def browser_vision(
     request: VisionRequest, auth: dict = Depends(require_internal_auth)
 ):
     """Take a screenshot and optionally describe it via the Keeper."""
-    import base64
+    import uuid
+    from isli_skills.redis_client import get_blob_redis
 
     session = await _get_session(request.agent_id)
 
     async with session.lock:
         try:
             screenshot_bytes = await session.page.screenshot(type="png", full_page=False)
-            screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+            
+            # Store raw bytes in Redis blob store
+            blob_id = str(uuid.uuid4())
+            blob_key = f"blob:browser:{blob_id}"
+            
+            redis = await get_blob_redis()
+            await redis.setex(blob_key, 86400, screenshot_bytes) # 24h TTL
+            
             await _session_mgr.touch(request.agent_id)
 
             return {
                 "success": True,
                 "url": session.page.url,
-                "screenshot_b64": screenshot_b64,
+                "screenshot_ref": blob_key,
                 "question": request.question,
             }
         except Exception as exc:

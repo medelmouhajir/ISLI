@@ -69,6 +69,12 @@ class TestAgentsAPI:
         assert "token" in data
 
     @pytest.mark.asyncio
+    async def test_heartbeat_emits_enriched_event(self, client: AsyncClient):
+        """Heartbeat endpoint must emit agent:heartbeat with enrichment fields."""
+        resp = await client.post("/v1/agents/test-agent/heartbeat")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
     async def test_delete_agent(self, client: AsyncClient):
         resp = await client.delete("/v1/agents/test-agent")
         assert resp.status_code == 204

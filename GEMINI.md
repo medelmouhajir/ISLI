@@ -6,7 +6,7 @@ ISLI is a modular, production-grade multi-agent system designed to avoid central
 
 *   **Core Philosophy**: Invert the "central orchestrator" pattern. Use a silent local sidecar (Keeper) for system-level reasoning and a Kanban board for explicit, human-inspectable task delegation.
 *   **Central Component**: `isli-core` (FastAPI) acts as the task bus and agent lifecycle manager.
-*   **Real-time UI**: `isli-board` (React) provides a live **System Dashboard** (`/`) for node telemetry, a **Kanban Board** (`/kanban`) for task management, and a centralized **Observability Hub** (`/logs`) for real-time diagnostic streams.
+*   **Real-time UI**: `isli-board` (React) provides a live **System Dashboard** (`/`) for node telemetry, a **Kanban Board** (`/kanban`) for task management, a centralized **Observability Hub** (`/logs`) for real-time diagnostic streams, and a **Security Control Center** (`/settings/security`) for emergency halts and safety policies.
 *   **Keeper Model**: `qwen3:1.7b` (Local via Ollama). Optimized for CPU-only environments with permanent memory loading (`keep_alive=-1`) and 8-thread core pinning.
 *   **Memory Model**: 4-tier tiered memory:
     1.  **Session**: High-velocity transient state (Redis).

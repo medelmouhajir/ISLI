@@ -4,6 +4,7 @@ Provides async wrappers around GitPython with workspace sandbox integration.
 All paths are resolved through the workspace sandbox to prevent escape.
 """
 
+import json
 import os
 import re
 import shutil
@@ -355,23 +356,36 @@ async def git_log(
     scope_id: str,
     base_path: str,
     relative_path: str,
-    max_count: int = 10,
+    max_count: int = 30,
+    max_chars: int = 12000,
 ) -> dict[str, Any]:
     """Return commit history."""
     repo = _get_repo(scope, scope_id, base_path, relative_path)
     try:
         commits = []
+        clamped_max_chars = min(max_chars, 32000)
+        truncated = False
+
         for commit in repo.iter_commits(max_count=max_count):
-            commits.append({
+            commit_data = {
                 "hash": commit.hexsha,
                 "short_hash": commit.hexsha[:7],
                 "message": commit.message.strip(),
                 "author": str(commit.author),
                 "date": commit.committed_datetime.isoformat(),
-            })
+            }
+            
+            # Estimate if adding this commit would exceed max_chars
+            # Serializing the whole list is safer for exact capping
+            if len(json.dumps(commits + [commit_data])) > clamped_max_chars:
+                truncated = True
+                break
+            commits.append(commit_data)
+
         return {
             "status": "ok",
             "commits": commits,
+            "truncated": truncated,
         }
     except GitCommandError as exc:
         raise _map_git_error(exc) from exc

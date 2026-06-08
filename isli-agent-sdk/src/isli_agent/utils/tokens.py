@@ -12,32 +12,22 @@ import structlog
 
 logger = structlog.get_logger()
 
+# Force use of character-based heuristic for stability across architectures
+# and mixed-language content (Arabic/French/English).
 HAS_TIKTOKEN = False
 _enc = None
-
-try:
-    import tiktoken
-
-    _enc = tiktoken.encoding_for_model("gpt-4")
-    HAS_TIKTOKEN = True
-    logger.info("tokens.tiktoken_loaded", encoding="cl100k_base")
-except Exception:
-    logger.warning(
-        "tokens.tiktoken_unavailable",
-        fallback="len(str(text)) // 4",
-        reason="tiktoken not installed or binary wheel missing",
-    )
-
 
 def count_tokens(text: str) -> int:
     """Return the approximate token count for *text*.
 
-    Uses tiktoken when available; otherwise falls back to a character-count
-    heuristic that is accurate only for ASCII prose.
+    Uses a character-count heuristic (len // 3.5) with a 5% safety margin.
     """
-    if HAS_TIKTOKEN and _enc is not None:
-        return len(_enc.encode(text))
-    return len(str(text)) // 4
+    if not text:
+        return 0
+    # Use 3.5 divisor as it's safer for non-English/ASCII content.
+    # Add a 5% safety margin to prevent budget overruns.
+    estimate = len(str(text)) / 3.5
+    return int(estimate * 1.05)
 
 
 def count_message_tokens(messages: list[dict]) -> int:

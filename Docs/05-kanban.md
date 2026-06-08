@@ -328,6 +328,16 @@ researcher = next(p for p in peers if "web-research" in p["skills"])
 peers = await get_agent_info(agent_id)  # resolves known_agent_ids into metadata
 ```
 
+### Task Monitoring & Control
+
+Agents can now actively monitor the progress of tasks they've delegated or that are assigned to them:
+
+1. **Visibility (`list_kanban_tasks`)**: Agents use this skill to query the board for tasks based on `status` or `assignee_id`. This allows a coordinator agent (like Donna) to check if its sub-tasks are `done`, `blocked`, or still `inbox`.
+2. **Active Management (`update_kanban_task`)**: If an agent notices a delegated task is stuck, it can use this skill to:
+   - **Blink status**: Move a task to `review` or `blocked`.
+   - **Escalate**: Increase the `priority` of a critical path task.
+   - **Clarify**: Append a `comment` to the task description (handoff note) to provide extra context to the assignee without overwriting the original instructions.
+
 The Board UI's **"Agents this agent can delegate to"** card makes this visible to operators, who toggle peer relationships as team topology changes.
 
 ---
