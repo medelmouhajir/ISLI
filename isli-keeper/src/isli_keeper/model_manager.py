@@ -13,6 +13,8 @@ class ModelManager:
         self.config = {
             "gen": self.settings.ollama_gen_model,
             "embed": self.settings.ollama_embed_model,
+            "num_ctx": 4096,
+            "num_batch": 512,
         }
         self.load()
 
@@ -43,3 +45,16 @@ class ModelManager:
 
     def get_model(self, slot: str) -> str:
         return self.config.get(slot, "")
+
+    def set_generation_options(
+        self, num_ctx: int | None = None, num_batch: int | None = None
+    ) -> dict[str, int]:
+        if num_ctx is not None:
+            self.config["num_ctx"] = num_ctx
+        if num_batch is not None:
+            self.config["num_batch"] = num_batch
+        self.save()
+        return {
+            "num_ctx": self.config.get("num_ctx", 4096),
+            "num_batch": self.config.get("num_batch", 512),
+        }

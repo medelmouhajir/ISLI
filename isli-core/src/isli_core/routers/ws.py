@@ -227,6 +227,12 @@ async def redis_listener():
                             is_connected = target_agent_id in manager.agent_connections
                             logger.debug("ws.dispatch_to_agent", agent_id=target_agent_id, connected=is_connected)
                             await manager.send_to_agent(target_agent_id, data)
+
+                        # skill:enabled is broadcast to ALL connected agents so they can re-sync tools
+                        if event.get("type") == "skill:enabled":
+                            logger.info("ws.skill_enabled_broadcast", skill_id=payload.get("skill_id"))
+                            for agent_id in manager.agent_connections:
+                                await manager.send_to_agent(agent_id, data)
                     except Exception as e:
                         logger.debug("ws.dispatch_failed", error=str(e))
 

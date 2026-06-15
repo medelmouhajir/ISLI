@@ -28,9 +28,11 @@ from .models import AgentConfig, Task
 from .utils.tokens import count_message_tokens
 from .tools import (
     SKILL_TOOL_REGISTRY,
+    SKILL_NAME_ALIASES,
     normalize_skill_name,
     DATETIME_DEF,
     get_current_datetime,
+    fetch_dynamic_tools,
 )
 
 logger = structlog.get_logger()
@@ -65,6 +67,7 @@ def _normalize_provider(provider: str) -> str:
     """
     mapping = {
         "google": "gemini",
+        "nvidia": "nvidia_nim",
         "vertex": "vertex_ai",
     }
     normalized = mapping.get(provider.lower(), provider)
@@ -179,12 +182,23 @@ class AgentRunner:
         self._circuit_open_reason: str | None = None
         self._circuit_tripped_at: float | None = None
         self._consecutive_auth_failures: int = 0
+        # Drain-and-swap flag for skill:updated events
+        self._pending_tool_reload: bool = False
 
-    def add_tool(self, name: str, func: Callable, definition: Dict[str, Any]):
+    def add_tool(self, name: str, func: Callable, definition: Dict[str, Any], skill_name: str | None = None):
         """Register a tool with the agent."""
         from pydantic import validate_call
         # Wrap with Pydantic validation for strict type checking
         self.tools[name] = validate_call(func, config={"strict": True, "arbitrary_types_allowed": True})
+        if skill_name:
+            definition["x_isli_skill"] = skill_name
+        self.tool_definitions.append(definition)
+
+    def add_dynamic_tool(self, name: str, func: Callable, definition: Dict[str, Any], skill_name: str | None = None):
+        """Register a dynamic skill tool without Pydantic validation (generic **kwargs proxy)."""
+        if skill_name:
+            definition["x_isli_skill"] = skill_name
+        self.tools[name] = func
         self.tool_definitions.append(definition)
 
     def add_workspace_tools(self):
@@ -204,6 +218,36 @@ class AgentRunner:
         self.add_tool("file_write", file_write, FILE_WRITE_DEF)
         self.add_tool("file_list", file_list, FILE_LIST_DEF)
         self.add_tool("file_delete", file_delete, FILE_DELETE_DEF)
+
+    def add_shared_workspace_tools(self):
+        """Convenience method to register all shared workspace tools."""
+        from .tools import (
+            shared_promote_file_workspace,
+            SHARED_PROMOTE_FILE_WORKSPACE_DEF,
+            shared_file_read,
+            SHARED_FILE_READ_DEF,
+            shared_file_write,
+            SHARED_FILE_WRITE_DEF,
+            shared_file_list,
+            SHARED_FILE_LIST_DEF,
+            shared_file_delete,
+            SHARED_FILE_DELETE_DEF,
+            shared_file_move,
+            SHARED_FILE_MOVE_DEF,
+            shared_workspace_info,
+            SHARED_WORKSPACE_INFO_DEF,
+            shared_workspace_search,
+            SHARED_WORKSPACE_SEARCH_DEF,
+        )
+
+        self.add_tool("shared_promote_file_workspace", shared_promote_file_workspace, SHARED_PROMOTE_FILE_WORKSPACE_DEF)
+        self.add_tool("shared_file_read", shared_file_read, SHARED_FILE_READ_DEF)
+        self.add_tool("shared_file_write", shared_file_write, SHARED_FILE_WRITE_DEF)
+        self.add_tool("shared_file_list", shared_file_list, SHARED_FILE_LIST_DEF)
+        self.add_tool("shared_file_delete", shared_file_delete, SHARED_FILE_DELETE_DEF)
+        self.add_tool("shared_file_move", shared_file_move, SHARED_FILE_MOVE_DEF)
+        self.add_tool("shared_workspace_info", shared_workspace_info, SHARED_WORKSPACE_INFO_DEF)
+        self.add_tool("shared_workspace_search", shared_workspace_search, SHARED_WORKSPACE_SEARCH_DEF)
 
     @property
     def _pii_mesh_enabled(self) -> bool:
@@ -225,18 +269,31 @@ class AgentRunner:
 
         self.add_tool("notify_user", notify_user, NOTIFY_USER_DEF)
 
-    def _auto_register_tools_from_skills(self):
-        """Register tools based on the synced config.skills list from Core."""
-        from isli_agent.tools import SKILL_NAME_ALIASES
+    async def _auto_register_tools_from_skills(self):
+        """Register tools based on the synced config.skills list from Core.
+
+        Also fetches dynamic tools from Core's skill registry for any skills
+        not present in the static SDK registry.
+        """
         skills_to_register = self.config.skills or []
         logger.info("runner.auto_register_tools", skills=skills_to_register)
+
+        # Fetch dynamic tools from Core once
+        dynamic_tools, skill_tools_map = await fetch_dynamic_tools(self.client)
+
         for skill_name in skills_to_register:
             normalized = normalize_skill_name(skill_name)
             registry_key = SKILL_NAME_ALIASES.get(normalized, normalized)
             if registry_key in SKILL_TOOL_REGISTRY:
                 func, definition = SKILL_TOOL_REGISTRY[registry_key]
-                self.add_tool(registry_key, func, definition)
+                self.add_tool(registry_key, func, definition, skill_name=registry_key)
                 logger.info("runner.tool_registered", tool=registry_key, skill=skill_name)
+            elif normalized in skill_tools_map:
+                # Register all tools belonging to this dynamic skill
+                for tool_name in skill_tools_map[normalized]:
+                    func, definition = dynamic_tools[tool_name]
+                    self.add_dynamic_tool(tool_name, func, definition, skill_name=registry_key)
+                    logger.info("runner.dynamic_tool_registered", tool=tool_name, skill=skill_name)
             else:
                 logger.warning("runner.tool_not_found", skill=skill_name, normalized=normalized, available=list(SKILL_TOOL_REGISTRY.keys()))
 
@@ -416,15 +473,95 @@ class AgentRunner:
 
         return parsed
 
+    def _extract_legacy_tool_calls(self, content: str) -> list[_ParsedToolCall]:
+        """Parse <tool_call> blocks emitted by models that do not support native tool calling.
+
+        Supports blocks like:
+            <tool_call>
+              <function=tool_name>
+                <parameter=arg_name>value</parameter>
+              </function>
+            </tool_call>
+
+        Also handles the attribute-style variant:
+            <function name="tool_name">
+              <parameter name="arg_name">value</parameter>
+            </function>
+
+        Returns a list of _ParsedToolCall objects that mimic OpenAI's
+        tool_call interface so the existing execution loop works unchanged.
+        """
+        if "<tool_call>" not in content:
+            return []
+
+        parsed: list[_ParsedToolCall] = []
+        # Extract every <tool_call> block (non-greedy, multi-line)
+        blocks = re.findall(r"<tool_call>(.*?)</tool_call>", content, flags=re.DOTALL)
+        call_index = 0
+        for block in blocks:
+            # Extract function name: <function=NAME> or <function name="NAME">
+            func_match = re.search(r"<function\s*=\s*([^>\s'\"]+)", block)
+            if not func_match:
+                func_match = re.search(r'<function\s+name\s*=\s*["\']([^"\']+)["\']', block)
+            if not func_match:
+                continue
+            tool_name = func_match.group(1)
+            if tool_name not in self.tools:
+                continue
+
+            args: dict[str, Any] = {}
+            # Extract parameters: <parameter=NAME>value</parameter>
+            for param_match in re.finditer(
+                r"<parameter\s*=\s*([^>\s'\"]+)>(.*?)</parameter>",
+                block,
+                flags=re.DOTALL,
+            ):
+                param_name = param_match.group(1)
+                raw_value = param_match.group(2).strip()
+                try:
+                    args[param_name] = json.loads(raw_value)
+                except json.JSONDecodeError:
+                    args[param_name] = raw_value
+
+            # Extract parameters: <parameter name="NAME">value</parameter>
+            for param_match in re.finditer(
+                r'<parameter\s+name\s*=\s*["\']([^"\']+)["\']>(.*?)</parameter>',
+                block,
+                flags=re.DOTALL,
+            ):
+                param_name = param_match.group(1)
+                raw_value = param_match.group(2).strip()
+                try:
+                    args[param_name] = json.loads(raw_value)
+                except json.JSONDecodeError:
+                    args[param_name] = raw_value
+
+            parsed.append(
+                _ParsedToolCall(
+                    id=f"legacy_call_{call_index}",
+                    name=tool_name,
+                    arguments=json.dumps(args),
+                )
+            )
+            call_index += 1
+
+        if parsed:
+            logger.info("runner.legacy_tool_calls_extracted", count=len(parsed), tools=[tc.function.name for tc in parsed])
+
+        return parsed
+
     def _extract_tool_calls(self, message) -> list[Any]:
-        """Return tool_calls from the message object, falling back to XML/JSON parsing."""
+        """Return tool_calls from the message object, falling back to XML/JSON/legacy parsing."""
         if getattr(message, "tool_calls", None):
             return message.tool_calls
         content = message.content or ""
         xml_calls = self._extract_xml_tool_calls(content)
         if xml_calls:
             return xml_calls
-        return self._extract_json_tool_calls(content)
+        json_calls = self._extract_json_tool_calls(content)
+        if json_calls:
+            return json_calls
+        return self._extract_legacy_tool_calls(content)
 
     @staticmethod
     def _strip_xml_tool_calls(content: str) -> str:
@@ -468,10 +605,16 @@ class AgentRunner:
         result_parts.append(content[last_end:])
         return "".join(result_parts).strip()
 
+    @staticmethod
+    def _strip_legacy_tool_calls(content: str) -> str:
+        """Remove <tool_call> blocks from message content, preserving surrounding text."""
+        return re.sub(r"<tool_call>.*?</tool_call>", "", content, flags=re.DOTALL).strip()
+
     def _strip_tool_calls(self, content: str) -> str:
-        """Remove both XML and JSON tool call markup from message content."""
+        """Remove XML, JSON, and legacy tool call markup from message content."""
         content = self._strip_xml_tool_calls(content)
         content = self._strip_json_tool_calls(content)
+        content = self._strip_legacy_tool_calls(content)
         return content
 
     # ── Streaming infrastructure ────────────────────────────────────────────────
@@ -502,6 +645,8 @@ class AgentRunner:
                 "draft_complete",
                 "tool_call",
                 "error",
+                "phase_start",
+                "phase_end",
             ):
                 return
             if mode == "trace" and event_type in ("debug_prompt", "debug_response"):
@@ -694,6 +839,8 @@ class AgentRunner:
                 "anthropic": "ANTHROPIC_API_KEY",
                 "gemini": "GEMINI_API_KEY",
                 "google": "GEMINI_API_KEY",
+                "nvidia": "NVIDIA_NIM_API_KEY",
+                "nvidia_nim": "NVIDIA_NIM_API_KEY",
                 "deepseek": "DEEPSEEK_API_KEY",
                 "azure": "AZURE_API_KEY",
                 "vertex_ai": "VERTEXAI_API_KEY",
@@ -741,7 +888,66 @@ class AgentRunner:
                 )
         raise last_error or RuntimeError("No model available")
 
-    def _assemble_system_prompt(self, context_summary: str, session_info: dict | None = None) -> str:
+    def _filter_tools_by_relevance(self, relevant_skills: list[str] | None) -> list[dict[str, Any]]:
+        """Return a subset of tool definitions based on Keeper's intent classification.
+
+        Behavior is controlled by ``config.tool_injection_strategy``:
+
+        - ``auto`` (default): filter by ``relevant_skills``; fall back to the full
+          set when Keeper returns empty / none.
+        - ``all``: skip filtering entirely; always return the full tool set.
+        - ``strict``: filter even when ``relevant_skills`` is empty, so only
+          ``x_isli_always_active`` tools survive a blank classification.
+        """
+        strategy = self.config.config.get("tool_injection_strategy", "auto")
+        all_defs = getattr(self, "_all_tool_definitions", None) or self.tool_definitions
+
+        if strategy == "all":
+            logger.info(
+                "runner.tools_filtered",
+                strategy=strategy,
+                active_count=len(all_defs),
+                total_count=len(all_defs),
+            )
+            return all_defs
+
+        if strategy == "auto" and not relevant_skills:
+            logger.info(
+                "runner.tools_filtered",
+                strategy=strategy,
+                active_count=len(all_defs),
+                total_count=len(all_defs),
+            )
+            return all_defs
+
+        active_set: set[str] = set()
+        for skill_name in relevant_skills or []:
+            normalized = normalize_skill_name(skill_name)
+            registry_key = SKILL_NAME_ALIASES.get(normalized, normalized)
+            active_set.add(registry_key)
+
+        filtered = [
+            defn for defn in all_defs
+            if defn.get("function", {}).get("name") in active_set
+            or defn.get("x_isli_skill") in active_set
+            or defn.get("x_isli_always_active", False)
+        ]
+        logger.info(
+            "runner.tools_filtered",
+            strategy=strategy,
+            requested=relevant_skills,
+            active_count=len(filtered),
+            total_count=len(all_defs),
+        )
+        return filtered
+
+    def _assemble_system_prompt(
+        self,
+        context_summary: str,
+        session_info: dict | None = None,
+        relevant_skills: list[str] | None = None,
+        task_mode: bool = False,
+    ) -> str:
         """Assemble the system prompt from identity, tools, and context."""
         from .prompts_loader import get_prompts
 
@@ -749,13 +955,17 @@ class AgentRunner:
         template = prompts["agent"]["system_prompt_template"]
 
         persona_line = f"Persona: {self.config.persona}\n" if self.config.persona else ""
-        tools_list = "\n".join(
-            f"- {definition.get('function', {}).get('name', 'unknown')}: "
-            f"{definition.get('function', {}).get('description', 'No description.')}"
-            for definition in self.tool_definitions
-        )
+        active_defs = self._filter_tools_by_relevance(relevant_skills)
+        if active_defs:
+            tools_list = "\n".join(
+                f"- {definition.get('function', {}).get('name', 'unknown')}: "
+                f"{definition.get('function', {}).get('description', 'No description.')}"
+                for definition in active_defs
+            )
+        else:
+            tools_list = ""
 
-        logger.debug("runner.assemble_prompt", tools=tools_list)
+        logger.debug("runner.assemble_prompt", tools=tools_list, task_mode=task_mode)
 
         system_prompt = template.format(
             name=self.config.name,
@@ -765,6 +975,14 @@ class AgentRunner:
             context_summary=context_summary,
             context_timestamp=datetime.now(timezone.utc).isoformat(),
         )
+
+        # Inject task-mode execution discipline when running a Kanban task.
+        if task_mode:
+            block = prompts.get("agent", {}).get("task_execution_block")
+            if block:
+                system_prompt += "\n\n" + block
+            else:
+                logger.warning("runner.task_execution_block_missing")
 
         # Inject current session metadata so the agent knows who it's talking to
         if session_info:
@@ -839,12 +1057,24 @@ class AgentRunner:
             )
 
         # 3. Auto-register tools from synced skills
-        self._auto_register_tools_from_skills()
+        await self._auto_register_tools_from_skills()
 
-        # 4. Always register the datetime system tool
+        # 4. Always register universal tools
+        from .tools import discover_skills, DISCOVER_SKILLS_DEF
         self.add_tool("get_current_datetime", get_current_datetime, DATETIME_DEF)
 
-        # 5. Start heartbeat loop in background
+        # 5. Snapshot full tool set for per-turn filtering
+        self._all_tool_definitions: list[dict[str, Any]] = list(self.tool_definitions)
+        self._active_tool_definitions: list[dict[str, Any]] = list(self.tool_definitions)
+        self._expand_tools_next_iteration: bool = False
+
+        # discover_skills wrapper reads the current list at call time (not capture time)
+        def _discover_skills_wrapper():
+            return discover_skills(self._all_tool_definitions)
+
+        self.add_tool("discover_skills", _discover_skills_wrapper, DISCOVER_SKILLS_DEF)
+
+        # 6. Start heartbeat loop in background
         asyncio.create_task(self._heartbeat_loop())
 
         # 5. Start WebSocket listener (main loop)
@@ -865,9 +1095,20 @@ class AgentRunner:
                 self.tool_definitions = []
                 
                 # Re-register tools
-                self._auto_register_tools_from_skills()
+                await self._auto_register_tools_from_skills()
+                from .tools import discover_skills, DISCOVER_SKILLS_DEF
                 self.add_tool("get_current_datetime", get_current_datetime, DATETIME_DEF)
-                
+
+                # Re-snapshot full tool set
+                self._all_tool_definitions = list(self.tool_definitions)
+                self._active_tool_definitions = list(self.tool_definitions)
+
+                # discover_skills wrapper reads current list at call time (not capture time)
+                def _discover_skills_wrapper():
+                    return discover_skills(self._all_tool_definitions)
+
+                self.add_tool("discover_skills", _discover_skills_wrapper, DISCOVER_SKILLS_DEF)
+
                 logger.info(
                     "runner.config_reloaded",
                     agent_id=self.config.id,
@@ -935,6 +1176,20 @@ class AgentRunner:
                             elif event["type"] == "agent:config_updated":
                                 logger.info("runner.config_update_event_detected", agent_id=self.config.id)
                                 asyncio.create_task(self._sync_config())
+                            elif event["type"] == "skill:enabled":
+                                logger.info(
+                                    "runner.skill_enabled_event_detected",
+                                    agent_id=self.config.id,
+                                    skill_id=event.get("payload", {}).get("skill_id"),
+                                )
+                                asyncio.create_task(self._sync_config())
+                            elif event["type"] == "skill:updated":
+                                logger.info(
+                                    "runner.skill_updated_event_detected",
+                                    agent_id=self.config.id,
+                                    skill_id=event.get("payload", {}).get("skill_id"),
+                                )
+                                self._pending_tool_reload = True
                             elif event["type"] == "session:message":
                                 payload = event["payload"]
                                 logger.info(
@@ -1023,10 +1278,17 @@ class AgentRunner:
 
             # 2. Read context_summary inline from the WebSocket payload
             context_summary = task_data.get("context_summary") or ""
+            relevant_skills = task_data.get("relevant_skills")
 
             await self._emit_stream_event(stream_id, "phase_end", {"phase": "context_inject", "duration_ms": 0})
 
-            system_prompt = self._assemble_system_prompt(context_summary)
+            # Per-turn tool filtering; reset expansion flag at task start
+            self._active_tool_definitions = self._filter_tools_by_relevance(relevant_skills)
+            self._expand_tools_next_iteration = False
+
+            system_prompt = self._assemble_system_prompt(
+                context_summary, relevant_skills=relevant_skills, task_mode=True
+            )
             messages = [{"role": "user", "content": task_data.get("input", "")}]
 
             # PII Mesh: anonymize before LLM
@@ -1080,14 +1342,30 @@ class AgentRunner:
                 # Apply per-turn token cap truncation
                 messages = self._truncate_tool_results_to_cap(messages, max_tokens=1000)
 
+                # If discover_skills was called last turn, expand tool set for this turn
+                if self._expand_tools_next_iteration:
+                    logger.info("runner.expanding_tools_after_discovery", task_id=task_id)
+                    self._active_tool_definitions = self._all_tool_definitions
+                    self._expand_tools_next_iteration = False
+
                 completion_kwargs: dict[str, Any] = {
                     "model": f"{_normalize_provider(self.config.model_provider or '')}/{self.config.model_id}",
                     "messages": [{"role": "system", "content": system_prompt}] + messages,
-                    "tools": self.tool_definitions if self.tool_definitions else None,
+                    "tools": self._active_tool_definitions if self._active_tool_definitions else None,
                     "timeout": self.config.config.get("litellm_timeout", 120) if self.config.config else 120,
                 }
                 self._apply_auth_to_kwargs(completion_kwargs)
+                await self._emit_stream_event(
+                    stream_id,
+                    "phase_start",
+                    {"phase": "llm_inference", "label": "THINKING...", "turn": turn_number},
+                )
                 response = await self._model_with_fallback(completion_kwargs, turn_label=f"task:{task_id}")
+                await self._emit_stream_event(
+                    stream_id,
+                    "phase_end",
+                    {"phase": "llm_inference", "turn": turn_number},
+                )
 
                 # Record cost usage back to Core
                 try:
@@ -1169,7 +1447,7 @@ class AgentRunner:
                     self._consecutive_auth_failures = 0
 
                     clean_content = self._strip_tool_calls(message.content or "")
-                    clean_content = await self._post_process_response(clean_content, stream_id)
+                    clean_content = self._post_process_response(clean_content, stream_id)
                     await self._stream_text(stream_id, clean_content)
                     await self.client.complete_task(task_id, clean_content)
                     logger.info("runner.task_success", task_id=task_id)
@@ -1240,6 +1518,11 @@ class AgentRunner:
                     else:
                         consecutive_tool_failures = 0
 
+                # If discover_skills was invoked, expand tool set for the next iteration
+                if any(tc.function.name == "discover_skills" for tc in tool_calls):
+                    logger.info("runner.discover_skills_triggered", task_id=task_id)
+                    self._expand_tools_next_iteration = True
+
                 await self._emit_stream_event(
                     stream_id,
                     "turn_end",
@@ -1248,6 +1531,12 @@ class AgentRunner:
 
                 # CHECKPOINT 2: Post-Execution (As required by Plan Phase 4)
                 await self.client.save_checkpoint(task_id, turn_number, messages)
+
+            # Drain-and-swap: reload tool registry between turns if a skill was updated
+            if self._pending_tool_reload:
+                logger.info("runner.tool_reload_after_task", task_id=task_id)
+                await self._auto_register_tools_from_skills()
+                self._pending_tool_reload = False
 
         except Exception as e:
             category, user_message = _classify_model_error(e)
@@ -1299,13 +1588,19 @@ class AgentRunner:
         self._pending_components.clear()
         try:
             context_summary = payload.get("context_summary") or ""
+            relevant_skills = payload.get("relevant_skills")
             await self._emit_stream_event(session_id, "phase_start", {"phase": "context_inject"})
             session_info = {
                 "user_id": payload.get("user_id"),
                 "channel": payload.get("channel"),
                 "session_id": session_id,
             }
-            system_prompt = self._assemble_system_prompt(context_summary, session_info)
+
+            # Per-turn tool filtering; reset expansion flag at session start
+            self._active_tool_definitions = self._filter_tools_by_relevance(relevant_skills)
+            self._expand_tools_next_iteration = False
+
+            system_prompt = self._assemble_system_prompt(context_summary, session_info, relevant_skills=relevant_skills)
             await self._emit_stream_event(session_id, "phase_end", {"phase": "context_inject", "duration_ms": 0})
 
             # Circuit breaker check
@@ -1386,10 +1681,16 @@ class AgentRunner:
                 # Apply per-turn token cap truncation
                 messages = self._truncate_tool_results_to_cap(messages, max_tokens=1000)
 
+                # If discover_skills was called last turn, expand tool set for this turn
+                if self._expand_tools_next_iteration:
+                    logger.info("runner.expanding_tools_after_discovery", session_id=session_id)
+                    self._active_tool_definitions = self._all_tool_definitions
+                    self._expand_tools_next_iteration = False
+
                 completion_kwargs = {
                     "model": f"{_normalize_provider(self.config.model_provider or '')}/{self.config.model_id}",
                     "messages": [{"role": "system", "content": system_prompt}] + messages,
-                    "tools": self.tool_definitions if self.tool_definitions else None,
+                    "tools": self._active_tool_definitions if self._active_tool_definitions else None,
                     "timeout": self.config.config.get("litellm_timeout", 120) if self.config.config else 120,
                 }
 
@@ -1402,7 +1703,17 @@ class AgentRunner:
                 )
 
                 self._apply_auth_to_kwargs(completion_kwargs)
+                await self._emit_stream_event(
+                    session_id,
+                    "phase_start",
+                    {"phase": "llm_inference", "label": "THINKING...", "turn": turn_number},
+                )
                 response = await self._model_with_fallback(completion_kwargs, turn_label=f"session:{session_id}")
+                await self._emit_stream_event(
+                    session_id,
+                    "phase_end",
+                    {"phase": "llm_inference", "turn": turn_number},
+                )
 
                 # Record cost usage back to Core
                 try:
@@ -1490,7 +1801,7 @@ class AgentRunner:
                     self._consecutive_auth_failures = 0
 
                     final_text = self._strip_tool_calls(message.content or "")
-                    final_text = await self._post_process_response(final_text, session_id)
+                    final_text = self._post_process_response(final_text, session_id)
                     components = list(self._pending_components)
                     self._pending_components.clear()
                     # Attach any audio generated by text_to_speech this turn
@@ -1571,11 +1882,22 @@ class AgentRunner:
                     else:
                         consecutive_tool_failures = 0
 
+                # If discover_skills was invoked, expand tool set for the next iteration
+                if any(tc.function.name == "discover_skills" for tc in tool_calls):
+                    logger.info("runner.discover_skills_triggered", session_id=session_id)
+                    self._expand_tools_next_iteration = True
+
                 await self._emit_stream_event(
                     session_id,
                     "turn_end",
                     {"turn_number": turn_number},
                 )
+
+            # Drain-and-swap: reload tool registry between turns if a skill was updated
+            if self._pending_tool_reload:
+                logger.info("runner.tool_reload_after_session", session_id=session_id)
+                await self._auto_register_tools_from_skills()
+                self._pending_tool_reload = False
 
         except Exception as e:
             category, user_message = _classify_model_error(e)
@@ -1619,6 +1941,18 @@ class AgentRunner:
                 )
         finally:
             self._inflight_sessions.discard(session_id)
+            await self._notify_core_session_ready(session_id)
+
+    async def _notify_core_session_ready(self, session_id: str):
+        """Explicitly mark session as ready so UI clears streaming state.
+
+        Covers edge cases where reply_to_session is not reached (crashes, timeouts).
+        """
+        try:
+            await self.client.update_session_status(session_id, "ready")
+            logger.info("runner.session_status_reset", session_id=session_id, status="ready")
+        except Exception as e:
+            logger.warning("runner.session_status_reset_failed", session_id=session_id, error=str(e))
 
     async def stop(self):
         """Gracefully stop the agent."""

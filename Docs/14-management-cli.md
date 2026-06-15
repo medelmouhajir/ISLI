@@ -69,6 +69,31 @@ Nukes the environment for a clean start.
 - Deletes the `.env` file.
 - **Confirmation:** Requires typing `yes` explicitly to prevent accidental data loss.
 
+### `isli skill` (Added 2026-06-12)
+One-click skill lifecycle management from the terminal.
+
+| Command | Purpose |
+|---------|---------|
+| `isli skill install <git-url>` | Install and auto-enable a skill from a public git repository |
+| `isli skill install <git-url> --no-auto-enable` | Install only (status remains `pending`) |
+| `isli skill enable <skill-id>` | Build and start a previously installed skill |
+| `isli skill disable <skill-id>` | Stop a running skill container |
+| `isli skill uninstall <skill-id>` | Remove a skill completely (image, source, DB row) |
+| `isli skill list` | Table view of all installed skills with status, probe health, version, and category |
+
+**Example:**
+```bash
+isli skill install https://github.com/isli-ai/skill-web-search
+# → ✓ Skill 'skill-web-search' installed and enabled.
+# → Build time: 12450ms
+# → Health probe: OK
+
+isli skill list
+# → Table: ID | Name | Status | Probe | Version | Category
+```
+
+The CLI calls Core's admin endpoints directly using `urllib.request` and `X-Admin-Key` — no additional Python dependencies required.
+
 ## Operational Philosophy
 
 The `isli` CLI is designed to be the "Human-in-the-Loop" interface for system operators. While the agents handle tasks and the Kanban board handles coordination, the CLI ensures the underlying infrastructure remains healthy, updated, and backed up.

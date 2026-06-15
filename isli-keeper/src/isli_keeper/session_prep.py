@@ -91,36 +91,52 @@ def _extract_json_block(text: str) -> str | None:
     return None
 
 
-def _build_unified_prompt(combined_text: str, agent_config: dict[str, Any] | None) -> str:
-    """Assemble the SLM prompt for dual context+PII output."""
+def _build_unified_prompt(
+    combined_text: str,
+    agent_config: dict[str, Any] | None,
+    available_skills: list[dict[str, str]],
+) -> str:
+    """Assemble the SLM prompt for dual context+PII+skill-intent output."""
     persona = (agent_config or {}).get("persona", "")
     persona_hint = f"\nAgent persona: {persona}" if persona else ""
-    return SESSION_PREP_PROMPT.format(text=combined_text + persona_hint)
+    skills_block = ""
+    if available_skills:
+        lines = [f"- {s['name']}: {s.get('hint', '')}" for s in available_skills]
+        skills_block = "\n".join(lines)
+    return SESSION_PREP_PROMPT.format(
+        available_skills=skills_block,
+        text=combined_text + persona_hint,
+    )
 
 
 def _build_pii_only_prompt(combined_text: str) -> str:
     return PII_ONLY_PROMPT.format(text=combined_text)
 
 
-def _parse_dual_output(raw_output: str) -> tuple[str, list[dict[str, str]]]:
-    """Parse context_summary and entities from SLM JSON output."""
+def _parse_dual_output(raw_output: str) -> tuple[str, list[dict[str, str]], list[str]]:
+    """Parse context_summary, entities, and relevant_skills from SLM JSON output."""
     block = _extract_json_block(raw_output)
     if not block:
         logger.warning("session_prep.no_json_block", raw=raw_output[:200])
-        return raw_output, []
+        return raw_output, [], []
     try:
         data = json.loads(block)
         if isinstance(data, list):
             # LLM returned just the entities array
-            return "", data
+            return "", data, []
         summary = data.get("context_summary", "")
         entities = data.get("entities", [])
         if not isinstance(entities, list):
             entities = []
-        return summary, entities
+        relevant_skills = data.get("relevant_skills", [])
+        if not isinstance(relevant_skills, list):
+            relevant_skills = []
+        # Validate: only string skill names
+        relevant_skills = [s for s in relevant_skills if isinstance(s, str)]
+        return summary, entities, relevant_skills
     except json.JSONDecodeError:
         logger.warning("session_prep.json_parse_failed", raw=raw_output[:200])
-        return raw_output, []
+        return raw_output, [], []
 
 
 async def _persist_tokens_to_db(session_id: str, token_map: dict[str, str]) -> None:
@@ -223,9 +239,10 @@ async def session_prep(request: SessionPrepRequest) -> SessionPrepResponse:
         return response
 
     # ── Tier 2: SLM call (unified or PII-only) ──
+    relevant_skills: list[str] = []
     if request.use_slm:
         if request.mode == "full":
-            prompt = _build_unified_prompt(combined_text, request.agent_config)
+            prompt = _build_unified_prompt(combined_text, request.agent_config, request.available_skills)
         else:
             prompt = _build_pii_only_prompt(combined_text)
 
@@ -238,16 +255,18 @@ async def session_prep(request: SessionPrepRequest) -> SessionPrepResponse:
                 endpoint="session-prep",
             )
             raw_output = result.get("response", "")
-            context_summary, entities = _parse_dual_output(raw_output)
+            context_summary, entities, relevant_skills = _parse_dual_output(raw_output)
         except Exception as exc:
             logger.error("session_prep.slm_failed", error=str(exc))
             # Degrade to regex-only
             context_summary = combined_text if request.mode == "full" else ""
             entities = []
+            relevant_skills = []
     else:
         # Regex-only mode
         context_summary = combined_text if request.mode == "full" else ""
         entities = []
+        relevant_skills = []
 
     # ── Merge regex + SLM entities ──
     all_entities: list[dict[str, str]] = []
@@ -307,6 +326,7 @@ async def session_prep(request: SessionPrepRequest) -> SessionPrepResponse:
         token_map=full_map,
         categories_found=sorted(categories_found),
         cache_hit=False,
+        relevant_skills=relevant_skills,
     )
     _set_cached(request, response.model_dump())
 

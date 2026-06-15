@@ -13,12 +13,22 @@ from .workspace import (
     PULL_TASK_ATTACHMENT_DEF,
     promote_output,
     PROMOTE_OUTPUT_DEF,
+    shared_promote_file_workspace,
+    SHARED_PROMOTE_FILE_WORKSPACE_DEF,
     shared_file_read,
     SHARED_FILE_READ_DEF,
     shared_file_write,
     SHARED_FILE_WRITE_DEF,
     shared_file_list,
     SHARED_FILE_LIST_DEF,
+    shared_file_delete,
+    SHARED_FILE_DELETE_DEF,
+    shared_file_move,
+    SHARED_FILE_MOVE_DEF,
+    shared_workspace_info,
+    SHARED_WORKSPACE_INFO_DEF,
+    shared_workspace_search,
+    SHARED_WORKSPACE_SEARCH_DEF,
     WorkspacePathError,
     WorkspaceQuotaError,
     WorkspaceNotFoundError,
@@ -152,6 +162,10 @@ from .notifications import (
     NotificationRateLimitError,
     NotificationDeliveryError,
 )
+from .discover_skills import (
+    discover_skills,
+    DISCOVER_SKILLS_DEF,
+)
 
 __all__ = [
     "file_read",
@@ -168,12 +182,22 @@ __all__ = [
     "PULL_TASK_ATTACHMENT_DEF",
     "promote_output",
     "PROMOTE_OUTPUT_DEF",
+    "shared_promote_file_workspace",
+    "SHARED_PROMOTE_FILE_WORKSPACE_DEF",
     "shared_file_read",
     "SHARED_FILE_READ_DEF",
     "shared_file_write",
     "SHARED_FILE_WRITE_DEF",
     "shared_file_list",
     "SHARED_FILE_LIST_DEF",
+    "shared_file_delete",
+    "SHARED_FILE_DELETE_DEF",
+    "shared_file_move",
+    "SHARED_FILE_MOVE_DEF",
+    "shared_workspace_info",
+    "SHARED_WORKSPACE_INFO_DEF",
+    "shared_workspace_search",
+    "SHARED_WORKSPACE_SEARCH_DEF",
     "WorkspacePathError",
     "WorkspaceQuotaError",
     "WorkspaceNotFoundError",
@@ -287,15 +311,88 @@ __all__ = [
     "NOTIFY_USER_DEF",
     "NotificationRateLimitError",
     "NotificationDeliveryError",
+    "discover_skills",
+    "DISCOVER_SKILLS_DEF",
     "SKILL_TOOL_REGISTRY",
     "SKILL_CATEGORY_MAP",
     "normalize_skill_name",
+    "fetch_dynamic_tools",
 ]
 
 
 def normalize_skill_name(skill_name: str) -> str:
     """Normalize a Core skill name to a Python-identifier tool name."""
     return skill_name.replace("-", "_")
+
+
+async def fetch_dynamic_tools(core_client) -> tuple[dict[str, tuple], dict[str, list[str]]]:
+    """Fetch skills from Core and generate tool bindings for any not in the static registry.
+
+    Returns a tuple of:
+      - tool_name -> (invoker_function, definition_dict)
+      - normalized_skill_name -> list of tool_names belonging to that skill
+    """
+    from typing import Callable
+
+    try:
+        resp = await core_client.client.get("/v1/skills", headers=core_client._get_headers())
+        resp.raise_for_status()
+    except Exception as exc:
+        return {}, {}
+
+    skills = resp.json()
+    dynamic: dict[str, tuple[Callable, dict]] = {}
+    skill_tools_map: dict[str, list[str]] = {}
+
+    for skill in skills:
+        skill_name = skill.get("name", "")
+        skill_type = skill.get("type", "external")
+        if skill_type == "inline":
+            continue
+
+        tools = skill.get("tools", [])
+        if not tools and skill.get("manifest"):
+            tools = skill["manifest"].get("tools", [])
+
+        normalized_skill = normalize_skill_name(skill_name)
+
+        for tool in tools:
+            tool_name = tool.get("name", "")
+            if not tool_name or tool_name in SKILL_TOOL_REGISTRY:
+                continue
+
+            definition = {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("parameters", {}),
+                },
+            }
+
+            endpoint = tool.get("endpoint", tool_name)
+            _skill_name = skill_name
+            _endpoint = endpoint
+
+            def _make_invoker(sn: str, ep: str):
+                async def _invoker(agent_id: str, core_client=None, **kwargs):
+                    if core_client is None:
+                        raise RuntimeError("core_client is required for dynamic skill invocation")
+                    payload = {"agent_id": agent_id, **kwargs}
+                    resp = await core_client.client.post(
+                        f"/v1/skills/{sn}/{ep.lstrip('/')}",
+                        json=payload,
+                        headers=core_client._get_headers(),
+                    )
+                    resp.raise_for_status()
+                    return resp.json()
+                return _invoker
+
+            invoker = _make_invoker(_skill_name, _endpoint)
+            dynamic[tool_name] = (invoker, definition)
+            skill_tools_map.setdefault(normalized_skill, []).append(tool_name)
+
+    return dynamic, skill_tools_map
 
 
 # Core hyphenated names (e.g. web-browse-navigate) normalize to keys that may
@@ -330,9 +427,14 @@ SKILL_TOOL_REGISTRY: dict[str, tuple] = {
     "attach_to_task": (attach_to_task, ATTACH_TO_TASK_DEF),
     "pull_task_attachment": (pull_task_attachment, PULL_TASK_ATTACHMENT_DEF),
     "promote_output": (promote_output, PROMOTE_OUTPUT_DEF),
+    "shared_promote_file_workspace": (shared_promote_file_workspace, SHARED_PROMOTE_FILE_WORKSPACE_DEF),
     "shared_file_read": (shared_file_read, SHARED_FILE_READ_DEF),
     "shared_file_write": (shared_file_write, SHARED_FILE_WRITE_DEF),
     "shared_file_list": (shared_file_list, SHARED_FILE_LIST_DEF),
+    "shared_file_delete": (shared_file_delete, SHARED_FILE_DELETE_DEF),
+    "shared_file_move": (shared_file_move, SHARED_FILE_MOVE_DEF),
+    "shared_workspace_info": (shared_workspace_info, SHARED_WORKSPACE_INFO_DEF),
+    "shared_workspace_search": (shared_workspace_search, SHARED_WORKSPACE_SEARCH_DEF),
     "memory_save": (memory_save, MEMORY_SAVE_DEF),
     "memory_delete": (memory_delete, MEMORY_DELETE_DEF),
     "memory_search": (memory_search, MEMORY_SEARCH_DEF),
@@ -372,6 +474,7 @@ SKILL_TOOL_REGISTRY: dict[str, tuple] = {
     "browser_console": (browser_console, BROWSER_CONSOLE_DEF),
     "browser_vision": (browser_vision, BROWSER_VISION_DEF),
     "browser_get_images": (browser_get_images, BROWSER_GET_IMAGES_DEF),
+    "discover_skills": (discover_skills, DISCOVER_SKILLS_DEF),
 }
 
 SKILL_CATEGORY_MAP: dict[str, str] = {
@@ -390,9 +493,14 @@ SKILL_CATEGORY_MAP: dict[str, str] = {
     "attach_to_task": "workspace",
     "pull_task_attachment": "workspace",
     "promote_output": "workspace",
+    "shared_promote_file_workspace": "workspace",
     "shared_file_read": "workspace",
     "shared_file_write": "workspace",
     "shared_file_list": "workspace",
+    "shared_file_delete": "workspace",
+    "shared_file_move": "workspace",
+    "shared_workspace_info": "workspace",
+    "shared_workspace_search": "workspace",
     "memory_save": "memory",
     "memory_delete": "memory",
     "memory_search": "memory",

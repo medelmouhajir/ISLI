@@ -1,44 +1,73 @@
-## Double Persona Injection — Remove Persona from Keeper Context
+## Plan: Configurable Keeper Context Length in Board UI
 
-### Problem
-The agent's persona appears twice in the prompt stack:
+### Goal
+Expose the Keeper's Ollama `num_ctx` (and optionally `num_batch`) as editable settings on the Board's **Keeper Settings** page (`/settings/keeper`), so admins can tune the local inference context window without rebuilding containers.
 
-1. **SDK (`isli-agent-sdk`)** — In the system prompt template (`prompts.yaml`) under `=== IDENTITY ===` as `Persona: ...`. This is rendered by `runner.py::_assemble_system_prompt()` and appears **first** in the final prompt.
-2. **Keeper (`isli-keeper`)** — In the context summary under `=== AGENT IDENTITY ===` as `Persona: ...`. This is injected by the `/context/inject` endpoint and appended later in the prompt.
+---
 
-Because the SDK version appears first, it is the authoritative source. The Keeper duplicate wastes tokens and adds noise.
+### Background
+- `num_ctx` (default 4096) and `num_batch` (default 512) are currently **hardcoded** in `isli-keeper/src/isli_keeper/ollama_client.py`.
+- The Board's `LocalModelSettings.tsx` (`/settings/keeper`) only manages model slots (gen/embed/stt/tts); it has no generation-options UI.
+- The Keeper already has a `ModelManager` class that persists slot assignments to `/app/data/model_config.json`. We can extend it to store `num_ctx`/`num_batch` using the same persistence mechanism.
 
-### Solution
-Remove persona from the Keeper context injection pipeline entirely. The SDK is the single source of truth for agent identity.
+---
 
-### Files to Change
+### Approach
 
-1. **`isli-keeper/src/isli_keeper/main.py`**
-   - Remove `agent_persona: str | None = None` from `ContextInjectRequest`
-   - Remove the `if req.agent_persona:` block from the `=== AGENT IDENTITY ===` assembly
+#### 1. Keeper Backend (`isli-keeper/`)
 
-2. **`isli-core/src/isli_core/memory/keeper_client.py`**
-   - Remove `agent_persona: str | None = None` parameter from `KeeperClient.get_context_injection()`
-   - Remove `"agent_persona": agent_persona` from the payload dict
+**`src/isli_keeper/model_manager.py`**
+- Extend `__init__` to seed `self.config["num_ctx"]` and `self.config["num_batch"]` with hardcoded defaults (4096, 512) if missing.
+- Add `set_generation_options(num_ctx: int | None, num_batch: int | None)` method that updates `self.config`, calls `self.save()`, and returns the new values.
 
-3. **`isli-core/src/isli_core/jobs/context_injector.py`**
-   - Remove `Agent.persona` from the SELECT statement
-   - Remove `agent_persona = row[3]`
-   - Re-index subsequent row variables (`agent_config` → `row[3]`, `model_routing_enabled` → `row[4]`, `secondary_models_raw` → `row[5]`, `default_provider` → `row[6]`, `default_model` → `row[7]`)
-   - Remove `agent_persona=agent_persona` from the `KeeperClient.get_context_injection()` call
+**`src/isli_keeper/ollama_client.py`**
+- In `OllamaClient.generate()`, replace the hardcoded defaults with a lazy import of `model_manager` from `isli_keeper.main` (avoids circular import) and read:
+  ```python
+  default_options = {
+      "num_ctx": model_manager.config.get("num_ctx", 4096),
+      "num_batch": model_manager.config.get("num_batch", 512),
+  }
+  ```
 
-4. **`isli-core/src/isli_core/jobs/session_context_injector.py`**
-   - Same changes as `context_injector.py`, with the same row re-indexing
-   - `agent_user_id` becomes `row[8]` (was `row[9]`)
+**`src/isli_keeper/main.py`**
+- Update `GET /admin/config` to return `num_ctx` and `num_batch` from `model_manager.config`.
+- Add a new `POST /admin/config` endpoint (Pydantic model: `AdminConfigUpdateRequest` with optional `num_ctx: int` and `num_batch: int`). Call `model_manager.set_generation_options(...)` and return the updated config.
+- Update the `/dashboard` endpoint's `config` block to return live `num_ctx`/`num_batch` values instead of hardcoded literals.
 
-5. **`isli-core/src/isli_core/routers/agents.py`**
-   - Remove `agent_persona=agent.persona` from the `KeeperClient.get_context_injection()` call (~line 533)
+#### 2. Core API (`isli-core/`)
 
-### No Test Changes Needed
-Existing keeper tests (`test_memory_injection.py`) do not reference `agent_persona`.
+**`src/isli_core/routers/model_management.py`**
+- Add `KeeperConfigUpdateRequest` Pydantic model with optional `num_ctx: int` and `num_batch: int`.
+- Add `GET /v1/model-management/config` → proxy to Keeper `GET /admin/config`.
+- Add `PUT /v1/model-management/config` → proxy to Keeper `POST /admin/config`.
 
-### Verification
-- After the change, Keeper's context summary still contains `=== AGENT IDENTITY ===` with Name / ID / Description, but **no Persona line**.
-- The SDK system prompt remains the single source of truth for persona under `=== IDENTITY ===`.
-- Functional behavior for agents is unchanged — they still see persona in the system prompt.
-- Token usage is slightly reduced by eliminating the duplicate.
+#### 3. Board UI (`isli-board/`)
+
+**`src/components/LocalModelSettings.tsx`**
+- Add a new local state `keeperConfig: { num_ctx: number; num_batch: number } | null`.
+- On mount (inside the existing `useEffect`), also call `fetchConfig()` via `GET /v1/model-management/config`.
+- Add a new UI section/card below the model-slot grid titled **"Generation Options"** with:
+  - Numeric input for **Context Length (`num_ctx`)** — min 1024, step 1024, sensible upper bound (e.g., 131072).
+  - (Optional) Numeric input for **Batch Size (`num_batch`)** — min 1, step 512.
+  - "Apply" / "Save" button that calls `PUT /v1/model-management/config`.
+- Show a success toast / inline confirmation when the update succeeds.
+
+---
+
+### Validation & Edge Cases
+- **Range**: `num_ctx` must be ≥ 512 and ≤ 524288 (Ollama's practical upper bound). `num_batch` must be ≥ 1.
+- **Persistence**: Values are persisted by `ModelManager` to `/app/data/model_config.json` inside the container. This matches the existing persistence model for active model slots (survives container restart, resets on image rebuild — acceptable and consistent with current behavior).
+- **Active sessions**: Unlike model activation, changing `num_ctx` does not require blocking active sessions. The next inference call picks up the new value.
+- **Backward compatibility**: If the config file lacks `num_ctx`/`num_batch`, defaults (4096/512) are used. No migration needed.
+
+### Files to Modify
+1. `isli-keeper/src/isli_keeper/model_manager.py`
+2. `isli-keeper/src/isli_keeper/ollama_client.py`
+3. `isli-keeper/src/isli_keeper/main.py`
+4. `isli-core/src/isli_core/routers/model_management.py`
+5. `isli-board/src/components/LocalModelSettings.tsx`
+
+### Testing
+- Unit test `ModelManager.set_generation_options()` in Keeper (new test file or existing if present).
+- API test for Core `GET/PUT /v1/model-management/config` (assert proxy behavior and validation).
+- Manual UI verification: set `num_ctx` to 8192, trigger a summarization, confirm dashboard reflects the new value.

@@ -223,6 +223,16 @@ class CoreClient:
             return []
         return resp.json()
 
+    async def update_session_status(self, session_id: str, status: str) -> dict[str, Any]:
+        """Explicitly update session status (e.g. ready after agent finishes processing)."""
+        resp = await self.client.post(
+            f"/v1/sessions/{session_id}/status",
+            json={"status": status},
+            headers=self._get_headers()
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def reply_to_session(
         self,
         session_id: str,

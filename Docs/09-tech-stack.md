@@ -195,13 +195,15 @@ All settings are toggle switches or numeric inputs backed by `useUpdateSetting()
 
 ## Model Management
 
-The stack includes a full model lifecycle system for local models:
+The stack includes a full model lifecycle system for local models. The permitted-model list is stored dynamically in the `system_settings` table (`key="local_permitted_models"`, `scope="system"`) so administrators can extend it from the Board UI without code changes.
 
 **Core API (`isli-core`):**
-- `GET /v1/model-management/status` — current active models, permitted list, available list
-- `POST /v1/model-management/pull` — download and activate a model
-- `POST /v1/model-management/activate` — switch active model without re-downloading
-- `POST /v1/model-management/remove` — delete a model
+- `GET /v1/model-management/status` — current active models, permitted list (from DB + defaults), available list
+- `POST /v1/model-management/pull` — download and activate a model (blocked if active sessions)
+- `POST /v1/model-management/activate` — switch active model without re-downloading (blocked if active sessions)
+- `POST /v1/model-management/remove` — delete a model (blocked if active sessions)
+- `POST /v1/model-management/permitted` — **(2026-06-10)** add a model name to a slot's permitted list
+- `DELETE /v1/model-management/permitted/{slot}/{model_name}` — **(2026-06-10)** remove a model name from a slot's permitted list
 
 **Keeper (`isli-keeper`) — `gen` / `embed` slots:**
 - `GET /admin/config` — runtime model config
@@ -218,7 +220,8 @@ The stack includes a full model lifecycle system for local models:
 **Board UI (`isli-board`):**
 - `/settings/keeper` page with three modules: Local Generation (`[KM-01-GEN]`), Local Embeddings (`[KM-02-EMB]`), and Audio Processing (`[KM-03-AUD]`)
 - Model cards showing active/available/missing states
-- Activate, Remove, and Download actions per model
+- Activate, Remove-from-system (trash), and Remove-from-list (X) actions per model
+- **Add Model input** at the bottom of each slot — type an Ollama tag and click "Add Model"
 - Global "Pull in progress" guard
 
 ### Model Routing (Added 2026-05-31)

@@ -32,6 +32,9 @@ export function SharedWorkspacesPage() {
     title: string;
     description: string;
     onConfirm: () => void | Promise<void>;
+    variant?: 'danger' | 'warning' | 'primary';
+    hideCancel?: boolean;
+    confirmText?: string;
   }>({
     open: false,
     title: '',
@@ -52,7 +55,14 @@ export function SharedWorkspacesPage() {
       setDescription('')
       setOwnerId('')
     } catch (err) {
-      alert('Failed to create workspace: ' + (err instanceof Error ? err.message : String(err)))
+      setConfirmModal({
+        open: true,
+        title: 'Error',
+        description: 'Failed to create workspace: ' + (err instanceof Error ? err.message : String(err)),
+        onConfirm: () => {},
+        hideCancel: true,
+        variant: 'danger'
+      })
     }
   }
 
@@ -60,12 +70,21 @@ export function SharedWorkspacesPage() {
     setConfirmModal({
       open: true,
       title: 'Delete Shared Workspace',
+      variant: 'danger',
+      confirmText: 'Delete Workspace',
       description: `Are you sure you want to delete shared workspace "${wsName}"? This action cannot be undone and will permanently remove all files and member associations.`,
       onConfirm: async () => {
         try {
           await deleteMutation.mutateAsync(id)
         } catch (err) {
-          alert('Failed to delete workspace: ' + (err instanceof Error ? err.message : String(err)))
+          setConfirmModal({
+            open: true,
+            title: 'Error',
+            description: 'Failed to delete workspace: ' + (err instanceof Error ? err.message : String(err)),
+            onConfirm: () => {},
+            hideCancel: true,
+            variant: 'danger'
+          })
         }
       },
     })
@@ -246,8 +265,9 @@ export function SharedWorkspacesPage() {
         open={confirmModal.open}
         title={confirmModal.title}
         description={confirmModal.description}
-        variant="danger"
-        confirmText="Delete Workspace"
+        variant={confirmModal.variant || "danger"}
+        confirmText={confirmModal.confirmText || "Delete Workspace"}
+        hideCancel={confirmModal.hideCancel}
         onConfirm={confirmModal.onConfirm}
         onClose={() => setConfirmModal(prev => ({ ...prev, open: false }))}
         isLoading={deleteMutation.isPending}

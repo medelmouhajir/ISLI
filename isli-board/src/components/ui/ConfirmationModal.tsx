@@ -13,6 +13,7 @@ interface ConfirmationModalProps {
   cancelText?: string
   variant?: 'danger' | 'warning' | 'primary'
   isLoading?: boolean
+  hideCancel?: boolean
 }
 
 export function ConfirmationModal({
@@ -21,13 +22,15 @@ export function ConfirmationModal({
   onConfirm,
   title,
   description,
-  confirmText = 'Confirm',
+  confirmText,
   cancelText = 'Cancel',
   variant = 'primary',
   isLoading = false,
+  hideCancel = false,
 }: ConfirmationModalProps) {
   const Icon = variant === 'danger' ? AlertCircle : variant === 'warning' ? AlertTriangle : Info
   const iconColor = variant === 'danger' ? 'text-accent-red' : variant === 'warning' ? 'text-accent-amber' : 'text-accent-cyan'
+  const finalConfirmText = confirmText || (hideCancel ? 'OK' : 'Confirm')
 
   const handleConfirm = async () => {
     try {
@@ -69,15 +72,17 @@ export function ConfirmationModal({
               variant === 'danger' && "bg-accent-red border-accent-red hover:bg-accent-red/90 text-white"
             )}
           >
-            {isLoading ? 'PROCESSING...' : confirmText.toUpperCase()}
+            {isLoading ? 'PROCESSING...' : finalConfirmText.toUpperCase()}
           </Button>
-          <button
-            onClick={onClose}
-            disabled={isLoading}
-            className="w-full py-3 text-[10px] tracking-[0.2em] text-text-muted hover:text-text-primary uppercase font-bold transition-colors disabled:opacity-50"
-          >
-            {cancelText.toUpperCase()}
-          </button>
+          {!hideCancel && (
+            <button
+              onClick={onClose}
+              disabled={isLoading}
+              className="w-full py-3 text-[10px] tracking-[0.2em] text-text-muted hover:text-text-primary uppercase font-bold transition-colors disabled:opacity-50"
+            >
+              {cancelText.toUpperCase()}
+            </button>
+          )}
         </div>
       </div>
     </Modal>

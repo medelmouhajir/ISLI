@@ -633,3 +633,62 @@ class Secret(Base):
         Index("ix_secrets_agent_id", "agent_id"),
         Index("ix_secrets_agent_id_name", "agent_id", "name", unique=True),
     )
+
+
+class SkillRegistry(Base):
+    __tablename__ = "skill_registry"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[str | None] = mapped_column(String(32))
+    author: Mapped[str | None] = mapped_column(String(128))
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    last_probe_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_probe_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    last_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    installed_by: Mapped[str | None] = mapped_column(String(64))
+    installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False)
+    # Versioning fields
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_ref: Mapped[str] = mapped_column(String(64), nullable=False, server_default="main")
+    installed_commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    latest_commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    latest_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    update_policy: Mapped[str] = mapped_column(String(16), nullable=False, server_default="manual")
+    previous_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    previous_commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    previous_image_tag: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    changelog: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_skill_registry_status", "status"),
+        Index("ix_skill_registry_category", "category"),
+        Index("ix_skill_registry_update_policy", "update_policy"),
+    )
+
+
+class SkillRun(Base):
+    __tablename__ = "skill_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    skill_id: Mapped[str] = mapped_column(String(64), ForeignKey("skill_registry.id", ondelete="CASCADE"), nullable=False)
+    container_id: Mapped[str | None] = mapped_column(String(128))
+    container_name: Mapped[str | None] = mapped_column(String(128))
+    host_port: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    error_log: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_skill_runs_skill_id", "skill_id"),
+        Index("ix_skill_runs_status", "status"),
+    )

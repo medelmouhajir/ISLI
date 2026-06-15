@@ -1,39 +1,47 @@
-from datetime import datetime, timezone
-from typing import Any
+import asyncio
 import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status, WebSocket, WebSocketDisconnect, UploadFile, File
+import structlog
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import os
-import asyncio
-import structlog
-from pathlib import Path
-from uuid import uuid4
-
 logger = structlog.get_logger()
 
-from isli_core.db import get_db, get_db_session_manual
-from isli_core.models import Agent, Session, LlmProvider, Task
-from isli_core.budget import check_budget, BudgetEngine, BudgetAlerter
-from isli_core.cost.dashboard import CostDashboard
+from isli_core.audit_writer import AuditWriter
 from isli_core.auth import (
-    create_internal_token, 
-    require_admin_auth, 
+    _check_token_revocation,
+    create_internal_token,
+    require_admin_auth,
     require_internal_auth,
     security,
     verify_internal_token,
-    _check_token_revocation
 )
-from isli_core.audit_writer import AuditWriter
+from isli_core.budget import BudgetAlerter, BudgetEngine, check_budget
 from isli_core.config import get_settings
+from isli_core.cost.dashboard import CostDashboard
+from isli_core.db import get_db, get_db_session_manual
 from isli_core.event_manager import EventManager
-from isli_core.redis_client import get_redis
-from isli_core.redis_blob_client import get_blob_redis
-from isli_core.services.process_manager import get_pm, AgentProcessManager
 from isli_core.memory.context_cache import ContextCache
+from isli_core.models import Agent, LlmProvider, Session, Task
+from isli_core.redis_blob_client import get_blob_redis
+from isli_core.redis_client import get_redis
+from isli_core.services.process_manager import AgentProcessManager, get_pm
 
 
 def _safe_json(value: Any, default: Any = None) -> Any:
@@ -46,6 +54,24 @@ def _safe_json(value: Any, default: Any = None) -> Any:
         except json.JSONDecodeError:
             return default if default is not None else value
     return value
+
+
+async def _scrub_peer_references(db: AsyncSession, deleted_agent_id: str) -> list[Agent]:
+    """Remove deleted_agent_id from every non-deleted agent's known_agent_ids.
+
+    Returns the list of agents that were modified so callers can emit events
+    and invalidate caches.
+    """
+    result = await db.execute(select(Agent).where(Agent.deleted_at.is_(None)))
+    affected: list[Agent] = []
+    for agent in result.scalars().all():
+        peer_ids = _safe_json(agent.known_agent_ids, []) or []
+        if deleted_agent_id in peer_ids:
+            agent.known_agent_ids = [pid for pid in peer_ids if pid != deleted_agent_id]
+            agent.updated_at = datetime.now(UTC)
+            affected.append(agent)
+    return affected
+
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -82,7 +108,7 @@ class AgentCreate(BaseModel):
 
     @field_validator("config")
     @classmethod
-    def _normalize_streaming_mode(cls, v: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_config(cls, v: dict[str, Any]) -> dict[str, Any]:
         valid = {"silent", "text", "tools", "trace", "debug"}
         mode = v.get("streaming_mode", "silent")
         if mode not in valid:
@@ -93,6 +119,9 @@ class AgentCreate(BaseModel):
         delay_ms = v.get("stream_delay_ms", 20)
         if not isinstance(delay_ms, int) or delay_ms < 0:
             v["stream_delay_ms"] = 20
+        tool_strategy = v.get("tool_injection_strategy", "auto")
+        if tool_strategy not in {"auto", "all", "strict"}:
+            v["tool_injection_strategy"] = "auto"
         return v
 
 
@@ -127,7 +156,7 @@ class AgentUpdate(BaseModel):
 
     @field_validator("config")
     @classmethod
-    def _normalize_streaming_mode(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _normalize_config(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
         if v is None:
             return {"streaming_mode": "silent"}
         valid = {"silent", "text", "tools", "trace", "debug"}
@@ -140,6 +169,9 @@ class AgentUpdate(BaseModel):
         delay_ms = v.get("stream_delay_ms", 20)
         if not isinstance(delay_ms, int) or delay_ms < 0:
             v["stream_delay_ms"] = 20
+        tool_strategy = v.get("tool_injection_strategy", "auto")
+        if tool_strategy not in {"auto", "all", "strict"}:
+            v["tool_injection_strategy"] = "auto"
         return v
 
 
@@ -203,7 +235,7 @@ class AgentRegistrationOut(AgentOut):
 
 @router.get("", response_model=list[AgentOut])
 async def list_agents(
-    status: str | None = None, 
+    status: str | None = None,
     db: AsyncSession = Depends(get_db),
     admin: str = Depends(require_admin_auth)
 ):
@@ -216,7 +248,7 @@ async def list_agents(
 
 @router.post("", response_model=AgentRegistrationOut, status_code=status.HTTP_201_CREATED)
 async def create_agent(
-    payload: AgentCreate, 
+    payload: AgentCreate,
     db: AsyncSession = Depends(get_db),
     pm: AgentProcessManager = Depends(get_pm),
     admin: str = Depends(require_admin_auth)
@@ -256,8 +288,8 @@ async def create_agent(
         api_key=payload.api_key,
     )
     db.add(agent)
-    agent.token_issued_at = datetime.now(timezone.utc)
-    
+    agent.token_issued_at = datetime.now(UTC)
+
     if payload.auto_start:
         try:
             await pm.spawn(agent.id)
@@ -266,7 +298,7 @@ async def create_agent(
             # Don't fail the whole creation if auto-spawn fails, just log it
             import structlog
             structlog.get_logger().error("agent.auto_start_failed", agent_id=agent.id, error=str(e))
-    
+
     await db.commit()
     await db.refresh(agent)
 
@@ -281,7 +313,7 @@ async def create_agent(
         payload={"name": agent.name, "model_id": agent.model_id, "workspace_path": str(ws_path)},
     )
     await db.commit()
-    
+
     base = AgentOut.from_agent(agent)
     out = AgentRegistrationOut(**base.model_dump(), token=token)
     return out
@@ -349,13 +381,13 @@ async def get_agent_config(
     # Allow either a valid internal agent token OR the admin API key
     settings = get_settings()
     is_admin = auth.credentials == settings.admin_api_key
-    
+
     if not is_admin:
         payload = verify_internal_token(auth.credentials)
         await _check_token_revocation(payload)
         if payload["sub"] != agent_id:
             raise HTTPException(status_code=403, detail="Not authorized for this agent")
-    
+
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
     agent = result.scalar_one_or_none()
     if not agent:
@@ -410,25 +442,25 @@ async def upload_agent_picture(
     # Generate a unique ID for the blob
     blob_id = str(uuid4())
     redis = await get_blob_redis()
-    
+
     # Save to redis blob store
     await redis.set(f"blob:agent:{blob_id}", content)
-    
+
     # Update agent record
     agent.picture = blob_id
-    agent.updated_at = datetime.now(timezone.utc)
+    agent.updated_at = datetime.now(UTC)
     await db.commit()
-    
+
     # Invalidate caches
     await ContextCache.invalidate_for_agent(agent.id)
-    
+
     await AuditWriter.write(
         db, actor_type="system", actor_id="core-api", action="upload_agent_picture",
         target_type="agent", target_id=agent.id,
         payload={"blob_id": blob_id},
     )
     await db.commit()
-    
+
     return {"id": blob_id}
 
 
@@ -447,7 +479,7 @@ async def update_agent(
     changes = payload.model_dump(exclude_unset=True)
     for field, value in changes.items():
         setattr(agent, field, value)
-    agent.updated_at = datetime.now(timezone.utc)
+    agent.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(agent)
 
@@ -489,9 +521,20 @@ async def delete_agent(
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    agent.deleted_at = datetime.now(timezone.utc)
+    agent.deleted_at = datetime.now(UTC)
     agent.status = "deleted"
     await db.commit()
+
+    # Remove this agent from every other agent's delegation map
+    affected_peers = await _scrub_peer_references(db, agent.id)
+    if affected_peers:
+        await db.commit()
+        for peer in affected_peers:
+            await EventManager.emit(
+                "agent:config_updated",
+                {"agent_id": peer.id, "fields": ["known_agent_ids"]},
+            )
+            await ContextCache.invalidate_for_agent(peer.id)
 
     settings = get_settings()
     ws_path = Path(settings.workspace_base_path) / agent_id
@@ -528,7 +571,7 @@ async def issue_agent_token(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    agent.token_issued_at = datetime.now(timezone.utc)
+    agent.token_issued_at = datetime.now(UTC)
     token = create_internal_token(agent_id, scopes=["agent"], expires_minutes=525600)
     await db.commit()
     return {"token": token, "agent_id": agent_id}
@@ -551,7 +594,7 @@ async def agent_heartbeat(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     old_status = agent.status
-    agent.heartbeat_at = datetime.now(timezone.utc)
+    agent.heartbeat_at = datetime.now(UTC)
     agent.status = "online" if agent.status in ("registered", "starting", "offline", "paused", "stopped", "crashed") else agent.status
 
     if old_status != agent.status and agent.status == "online":
@@ -565,7 +608,7 @@ async def agent_heartbeat(
         )
     )
     for sess in session_result.scalars().all():
-        sess.last_activity_at = datetime.now(timezone.utc)
+        sess.last_activity_at = datetime.now(UTC)
 
     # Track idle streak and gather enrichment data for heartbeat validation
     from isli_core.redis_client import get_redis
@@ -613,7 +656,7 @@ async def agent_heartbeat(
     # Store current heartbeat for next delta
     await redis.set(prev_heartbeat_key, agent.heartbeat_at.isoformat(), ex=86400)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     token = create_internal_token(agent_id, scopes=["agent"], expires_minutes=525600, iat=now)
     latency_ms = (time.perf_counter() - start) * 1000
     from isli_core.telemetry import get_heartbeat_latency_histogram
@@ -918,18 +961,18 @@ async def get_agent_process_status(
 @router.websocket("/{agent_id}/logs/stream")
 async def stream_agent_logs(websocket: WebSocket, agent_id: str):
     await websocket.accept()
-    
+
     redis = await get_redis()
     pubsub = redis.pubsub()
     channel = f"agent:{agent_id}:logs"
-    
+
     try:
         await pubsub.subscribe(channel)
-        
+
         async for message in pubsub.listen():
             if message["type"] == "message":
                 await websocket.send_text(message["data"])
-            
+
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -949,15 +992,15 @@ async def get_agent_logs_history(
     """Fetch historical logs for this agent from Redis using end-relative pagination."""
     redis = await get_redis()
     history_key = f"agent:{agent_id}:logs:history"
-    
+
     # Calculate Redis indices relative to the end (newest)
     # offset=0, limit=100 -> start=-100, end=-1 (the 100 newest)
     # offset=100, limit=100 -> start=-200, end=-101 (the next 100 older)
     start = -(offset + limit)
     end = -(offset + 1)
-    
+
     logs = await redis.lrange(history_key, start, end)
-    
+
     parsed_logs = []
     for log_str in logs:
         try:
@@ -966,7 +1009,7 @@ async def get_agent_logs_history(
             parsed_logs.append(json.loads(log_str))
         except Exception:
             continue
-            
+
     return parsed_logs
 
 
@@ -1020,7 +1063,7 @@ async def get_agent_memory_events(agent_id: str):
     redis = await get_redis()
     key = f"agent:{agent_id}:memory_events"
     events = await redis.lrange(key, 0, -1)
-    
+
     parsed_events = []
     for event_str in events:
         try:
@@ -1029,7 +1072,50 @@ async def get_agent_memory_events(agent_id: str):
             parsed_events.append(json.loads(event_str))
         except Exception:
             continue
-            
+
     # Return in chronological order (Redis LPUSH/LRANGE returns newest first)
     parsed_events.reverse()
     return parsed_events
+
+
+class CleanupPeerRefsOut(BaseModel):
+    cleaned: int
+    affected_agent_ids: list[str]
+
+
+@router.post("/cleanup-peer-refs", response_model=CleanupPeerRefsOut)
+async def cleanup_peer_references(
+    db: AsyncSession = Depends(get_db),
+    admin: str = Depends(require_admin_auth),
+):
+    """Remove deleted or non-existent agent IDs from every agent's known_agent_ids."""
+    result = await db.execute(select(Agent))
+    all_agents = result.scalars().all()
+
+    valid_ids = {a.id for a in all_agents if a.deleted_at is None}
+    affected_agent_ids: list[str] = []
+
+    for agent in all_agents:
+        if agent.deleted_at is not None:
+            continue
+        peer_ids = _safe_json(agent.known_agent_ids, []) or []
+        cleaned = [pid for pid in peer_ids if pid in valid_ids]
+        if cleaned != peer_ids:
+            agent.known_agent_ids = cleaned
+            agent.updated_at = datetime.now(UTC)
+            affected_agent_ids.append(agent.id)
+
+    if affected_agent_ids:
+        await db.commit()
+        for agent_id in affected_agent_ids:
+            await EventManager.emit(
+                "agent:config_updated",
+                {"agent_id": agent_id, "fields": ["known_agent_ids"]},
+            )
+            await ContextCache.invalidate_for_agent(agent_id)
+
+    logger.info("agents.cleanup_peer_refs", cleaned=len(affected_agent_ids))
+    return CleanupPeerRefsOut(
+        cleaned=len(affected_agent_ids),
+        affected_agent_ids=affected_agent_ids,
+    )

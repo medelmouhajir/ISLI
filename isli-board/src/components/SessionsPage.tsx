@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
+import { useLocation } from 'react-router-dom'
 import { useSessions, useSession, useSendMessage, useCreateSession, useCloseSession, useDeleteSession } from '@/hooks/useSessions'
 import { useAgents } from '@/hooks/useAgents'
 import { useSessionAction } from '@/hooks/useSessionAction'
@@ -12,9 +13,22 @@ import { UiComponentRenderer } from '@/components/ui/registry/UiComponentRegistr
 import type { ComponentPayload } from '@/types'
 
 export function SessionsPage() {
+  const location = useLocation()
   const { data: sessions = [], isLoading: loadingSessions } = useSessions()
   const { data: agents = [] } = useAgents()
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    (location.state as { sessionId?: string })?.sessionId || null
+  )
+
+  // Clear state after reading to prevent re-selection on refresh if desired, 
+  // though React Router state persists in history.
+  useEffect(() => {
+    if ((location.state as { sessionId?: string })?.sessionId) {
+      setSelectedSessionId((location.state as { sessionId?: string })?.sessionId!)
+      // Optional: clear state to avoid sticky selection
+      window.history.replaceState({}, document.title)
+    }
+  }, [location.state])
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [confirmModal, setConfirmModal] = useState<{
@@ -380,17 +394,19 @@ export function SessionsPage() {
                       )}
                     </div>
                     <div className={cn('space-y-1', msg.role === 'user' || msg.role === 'action' ? 'text-right' : '')}>
-                      <div
-                        className={cn(
-                          'p-3 md:p-4 rounded-none text-sm leading-relaxed border font-mono relative group',
-                          msg.role === 'user'
-                            ? 'bg-accent-purple/5 border-accent-purple/20 text-text-primary'
-                            : msg.role === 'action'
-                              ? 'bg-accent-amber/5 border-accent-amber/20 text-text-muted'
-                              : 'bg-bg-elevated border-border-dim text-text-primary'
-                        )}
-                      >
-                        {msg.content}
+                      <div className="relative group">
+                        <div
+                          className={cn(
+                            'p-3 md:p-4 rounded-none text-sm leading-relaxed border font-mono',
+                            msg.role === 'user'
+                              ? 'bg-accent-purple/5 border-accent-purple/20 text-text-primary'
+                              : msg.role === 'action'
+                                ? 'bg-accent-amber/5 border-accent-amber/20 text-text-muted'
+                                : 'bg-bg-elevated border-border-dim text-text-primary'
+                          )}
+                        >
+                          {msg.content}
+                        </div>
                         <button
                           onClick={() => {
                             navigator.clipboard.writeText(msg.content);
@@ -398,18 +414,22 @@ export function SessionsPage() {
                             setTimeout(() => setCopiedMessageId(null), 2000);
                           }}
                           className={cn(
-                            "absolute top-2 right-2 p-1.5 md:p-1 rounded-none bg-bg-surface border transition-all flex items-center gap-1.5",
+                            "md:absolute md:top-2 md:right-2 mt-1 md:mt-0 p-1.5 md:p-1 rounded-none bg-bg-surface border transition-all flex items-center gap-1.5",
+                            msg.role === 'user' || msg.role === 'action' ? 'ml-auto' : 'mr-auto',
                             copiedMessageId === `${selectedSession.id}-${i}`
                               ? "border-accent-green text-accent-green opacity-100"
                               : "border-border-dim text-text-muted md:opacity-0 group-hover:opacity-100 hover:text-accent-cyan hover:border-accent-cyan"
                           )}
                           title="Copy message"
                         >
+                          <span className={cn(
+                            "text-[9px] font-mono font-bold uppercase tracking-tighter",
+                            copiedMessageId === `${selectedSession.id}-${i}` ? "block" : "block md:hidden"
+                          )}>
+                            {copiedMessageId === `${selectedSession.id}-${i}` ? 'Copied' : 'Copy'}
+                          </span>
                           {copiedMessageId === `${selectedSession.id}-${i}` ? (
-                            <>
-                              <span className="text-[9px] font-mono font-bold uppercase tracking-tighter">Copied!</span>
-                              <Check className="w-3 h-3 md:w-3.5 md:h-3.5" />
-                            </>
+                            <Check className="w-3 h-3 md:w-3.5 md:h-3.5" />
                           ) : (
                             <Copy className="w-3 h-3 md:w-3.5 md:h-3.5" />
                           )}
@@ -477,7 +497,11 @@ export function SessionsPage() {
                         <span className="w-1.5 h-1.5 rounded-none bg-accent-cyan animate-pulse [animation-delay:0.4s]" />
                       </div>
                       <span className="text-[9px] font-mono font-bold text-text-muted uppercase tracking-widest">
-                        {selectedSession.status === 'pending_context' ? 'INJECTING_CONTEXT...' : 'THINKING...'}
+                        {selectedSession.status === 'pending_context'
+                          ? 'INJECTING_CONTEXT...'
+                          : selectedSession.status === 'agent_processing'
+                            ? 'PROCESSING...'
+                            : 'THINKING...'}
                       </span>
                     </div>
                   </div>

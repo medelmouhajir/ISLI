@@ -107,7 +107,37 @@ Agent: ...
 
 The agent then injects this block into its system prompt prefix. **This is a zero-LLM-call operation for the Keeper, ensuring agents start reasoning instantly.**
 
-### 3. Model Routing (Added 2026-05-31)
+### 3. Skill Intent Classification (Added 2026-06-11)
+
+Before each agent turn, the Keeper classifies which of the agent's assigned skills are likely relevant to the user's message. This prevents sending the full skill metadata (hundreds of tokens) to the LLM on every turn, dramatically reducing token consumption and improving latency.
+
+**Input to Keeper:**
+- The user's raw message (or task input)
+- A compressed list of the agent's available skills (name + 8-word hint derived from description or explicit `hint` field)
+
+**Keeper Logic:**
+The unified `POST /session-prep` endpoint includes a third job (`SKILL INTENT`) in its prompt. The Keeper returns a JSON `relevant_skills` array alongside `context_summary` and `entities`:
+
+```json
+{
+  "context_summary": "Concise agent context...",
+  "entities": [...],
+  "relevant_skills": ["memory-save", "web-search", "file-read"]
+}
+```
+
+For legacy agents that do not use the unified `/session-prep` path, Core falls back to a standalone `POST /intent/classify` call.
+
+**Filtering at the Agent:**
+Core forwards `relevant_skills` to the agent runner via WebSocket event payload. The `AgentRunner`:
+1. Starts each turn with **only** the relevant tool definitions + `x_isli_always_active` tools (`get_current_datetime`, `discover_skills`)
+2. If the agent calls `discover_skills`, the runner expands the full tool set for the **next** turn only
+3. After that turn, filtering resets to the Keeper's recommendation
+
+**Caching:**
+Intent classification results are cached in the Keeper with an LRU cache (500 entries, 60s TTL). The cache key is `hash(agent_id + message[:120] + sorted(skill_names))`, so identical messages within a minute reuse the result without hitting Ollama.
+
+### 4. Model Routing (Added 2026-05-31)
 
 When an agent has `model_routing_enabled: true`, the Keeper is called to choose the best secondary model for each task or session before the agent begins reasoning.
 
@@ -137,7 +167,7 @@ The Keeper reads the task description, compares it against the complexity tier a
 - On slow CPU-only hardware where the Keeper takes 150s+ per inference, the Core scorer's heuristic result is still usable immediately; the LLM decision simply refines it.
 - Session-lifetime lock means routing is invoked **once per session**, not on every message.
 
-### 4. Journal Maintenance (Incremental Compacting)
+### 5. Journal Maintenance (Incremental Compacting)
 
 Instead of generic summarization, the Keeper maintains an incremental **Structured Session Journal**. This happens in the background via the `JournalWorker` whenever:
 - A task is completed (`status == "done"`), OR
@@ -158,7 +188,7 @@ The updated structured journal string, which is then persisted to the `sessions`
 
 ---
 
-### 5. Agent Heartbeats
+### 6. Agent Heartbeats
 
 Each registered agent sends a heartbeat signal to the Core API every 180 seconds. Instead of a simple `200 OK` ping, ISLI uses **intelligent heartbeats**:
 
@@ -188,7 +218,7 @@ The Keeper checks for anomalies:
 
 If an anomaly is detected, the Core API flags the agent card on the Kanban board and optionally pauses the agent.
 
-### 6. Memory Compaction
+### 7. Memory Compaction
 
 Periodically (or when a session context grows beyond a threshold), the Keeper runs **compaction**:
 - Reads raw session messages
@@ -198,7 +228,7 @@ Periodically (or when a session context grows beyond a threshold), the Keeper ru
 
 This mirrors Claude Code's compaction concept but happens locally, for free.
 
-### 7. Skill Result Summarization
+### 8. Skill Result Summarization
 
 When a skill returns a large payload (e.g., a 10,000-word web scrape), the Keeper summarizes it to a compact form before it enters the agent's context window. This is the **"RAG gate"** — the Keeper acts as a retrieval pre-processor.
 
@@ -210,12 +240,12 @@ In environments without a GPU, the following optimizations are applied:
 
 1. **Permanent Model Loading**: `OLLAMA_KEEP_ALIVE=-1` ensures the model stays in RAM.
 2. **Thread Pinning**: `OLLAMA_NUM_THREADS=8` pins Ollama to half of the available 16 cores to prevent context switching overhead and leave room for other services.
-3. **API Context Cap**: The Keeper client enforces `num_ctx: 4096` and `num_batch: 512` to maintain sub-second ingestion and steady throughput on CPU.
+3. **API Context Cap**: The Keeper defaults to `num_ctx: 4096` and `num_batch: 512`, but both values are now **runtime-configurable** via the Board UI (`/settings/keeper`) or `PUT /v1/model-management/config`. Operators can raise `num_ctx` to accommodate larger journals (e.g. 8192–32768) at the cost of increased RAM usage; the next inference call picks up the new value without a restart.
 4. **Model Tiering**: Using `1.5B` parameter models allows for high-speed local inference that competes with cloud speeds for small background tasks.
 
 ---
 
-## Model Management (Implemented 2026-05-22)
+## Model Management (Implemented 2026-05-22; Dynamic List 2026-06-10)
 
 The Keeper supports dynamic model switching via a runtime `ModelManager` that reads from `/app/data/model_config.json`. This allows operators to switch gen/embed models without restarting the service.
 
@@ -226,16 +256,32 @@ The Keeper supports dynamic model switching via a runtime `ModelManager` that re
 | `gen` | Generation (summarize, journal, heartbeat, PII) | `qwen3:1.7b` (env override via `OLLAMA_GEN_MODEL`) | `qwen3:1.7b`, `qwen3:4b`, `mistral:7b`, `qwen2.5-coder:1.5b` |
 | `embed` | Embeddings (semantic search, memory) | `nomic-embed-text` (env override via `OLLAMA_EMBED_MODEL`) | `nomic-embed-text`, `mxbai-embed-large` |
 
+> **Dynamic permitted list (2026-06-10):** The hardcoded `PERMITTED_MODELS` dict has been replaced by a `SystemSetting` row (`key="local_permitted_models"`, `scope="system"`) stored in PostgreSQL. Administrators can add or remove arbitrary model names (e.g. `gemma3:1b`, `phi4-mini`) directly from the Board UI without code changes or container restarts. The default values are seeded on Core startup and merged with any DB overrides.
+
 ### Admin Endpoints (Internal Auth Required)
 
 All admin endpoints require a valid `X-Internal-Auth` JWT signed with `JWT_SECRET`.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/admin/config` | GET | Return current `{gen, embed}` model config |
+| `/admin/config` | GET | Return current `{gen, embed, num_ctx, num_batch}` config |
+| `/admin/config` | POST | Update `num_ctx` and/or `num_batch` generation options |
 | `/admin/activate` | POST | Activate a pulled model for a slot |
 | `/admin/remove` | POST | Remove a model from Ollama (with active-model guard) |
 | `/admin/pull` | POST | Trigger async Ollama pull for a slot/model |
+
+### Core Model-Management Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `GET /v1/model-management/status` | GET | Current active models, permitted list (from DB), available list |
+| `GET /v1/model-management/config` | GET | **(New 2026-06-14)** Return current Keeper config (`gen`, `embed`, `num_ctx`, `num_batch`) |
+| `PUT /v1/model-management/config` | PUT | **(New 2026-06-14)** Update Keeper `num_ctx` and/or `num_batch` generation options |
+| `POST /v1/model-management/pull` | POST | Download and activate a model (blocked if active sessions) |
+| `POST /v1/model-management/activate` | POST | Switch active model without re-downloading (blocked if active sessions) |
+| `POST /v1/model-management/remove` | POST | Delete model weights from disk (blocked if active sessions) |
+| `POST /v1/model-management/permitted` | POST | **(New 2026-06-10)** Add a model name to a slot's permitted list |
+| `DELETE /v1/model-management/permitted/{slot}/{model_name}` | DELETE | **(New 2026-06-10)** Remove a model name from a slot's permitted list |
 
 ### Model Management Flow
 
@@ -250,18 +296,23 @@ Board UI → Core API (/v1/model-management/*)
 - **Pull** — Downloads a missing model into Ollama and sets it as the active model for the slot.
 - **Activate** — Switches the active model for a slot to an already-downloaded model.
 - **Remove** — Deletes a model from Ollama. If the model is currently active, the slot is reset to the default fallback model (verified to exist first).
+- **Add to Permitted List** — Appends an arbitrary model tag (e.g. `gemma3:1b`) to the slot's wishlist. No Ollama-side validation; the pull step validates feasibility later.
+- **Remove from Permitted List** — Removes a model name from the slot's wishlist. Does not delete weights; use the trash icon for that.
 
 **Constraints:**
-- Pull and Activate are blocked when any active sessions exist (to prevent mid-inference model swaps).
-- Only models in the `PERMITTED_MODELS` list are accepted.
+- Pull, Activate, and Remove are blocked when any active sessions exist (to prevent mid-inference model swaps).
+- Only models in the dynamic permitted list are accepted for Pull/Activate/Remove.
 - Remove refuses to delete the last available model for a slot unless the fallback exists.
 
 ### Keeper Settings UI
 
 The React board exposes a **"Local Model Management"** page at `/settings/keeper` that shows:
-- Current active models for `gen` and `embed` slots (green checkmark)
-- Available models that are pulled but not active (Activate + Remove buttons)
-- Missing models (Download button)
+- Current active models for `gen`, `embed`, `stt`, and `tts` slots (green checkmark)
+- Available models that are pulled but not active (Activate + Remove-from-system buttons)
+- Missing models (Pull button)
+- **Add Model input** at the bottom of each slot — type an Ollama tag and click "Add Model" to extend the permitted list
+- **X icon** on each non-active model card to remove it from the permitted list
+- **Generation Options** card — editable numeric inputs for `num_ctx` (context length, 512–524288) and `num_batch` (batch size, 1–4096) with an Apply button; saved values persist to `/app/data/model_config.json` and take effect on the next inference call without requiring a restart
 - Global "Pull in progress..." state that disables actions during pulls
 
 ---
@@ -282,7 +333,8 @@ The Keeper exposes a minimal internal HTTP API on `localhost:8001`:
 | `/model/route` | POST | Choose best secondary model for a task/session. Receives `{task_description, complexity_score, complexity_tier, secondary_models, default_model}`. Returns `{provider, model_id, reason}`. |
 | `/heartbeat` | POST | Validate an agent heartbeat |
 | `/heartbeat/validate` | POST | Deep heartbeat validation with LLM judge. Timeout: **180s** (was 30s). Records inference telemetry on failure. |
-| `/session-prep` | POST | Unified context + PII detection. Returns `{context_summary, entities}`. Mode: `full` or `pii_only`. |
+| `/session-prep` | POST | Unified context + PII detection + skill intent. Returns `{context_summary, entities, relevant_skills}`. Mode: `full` or `pii_only`. |
+| `/intent/classify` | POST | Standalone skill intent classification. Receives `{user_message, available_skills, agent_id}`. Returns `{relevant_skills}`. LRU cache: 500 entries, 60s TTL. |
 | `/session-prep/rehydrate` | POST | Replace `{{PII:...}}` tokens with original values from the vault. |
 | `/pii/scrub` | POST | Legacy regex + LLM PII masking (kept for backward compatibility) |
 | `/pii/unscrub` | POST | Legacy restore masked PII placeholders (kept for backward compatibility) |
@@ -298,7 +350,8 @@ The Keeper exposes a minimal internal HTTP API on `localhost:8001`:
 
 - **`/admin/activate`** — Receives `{slot, model_name}`. Validates the model exists in Ollama, then calls `ModelManager.set_model(slot, model_name)` and persists to `/app/data/model_config.json`. Returns `{status: "ok", slot, model}`.
 - **`/admin/remove`** — Receives `{model_name}`. Verifies the model exists in Ollama. If the model is currently active for any slot, looks up the fallback default from settings and validates it exists in Ollama before proceeding. If the fallback is missing, returns `409 Cannot remove active model: fallback default not available`. Otherwise deletes the model via Ollama `/api/delete` and resets the active slot to the fallback if needed. Returns `{status: "ok", removed, was_active}`.
-- **`/admin/config`** — Returns the current runtime config directly from `ModelManager.config`: `{config: {gen: "...", embed: "..."}}`.
+- **`GET /admin/config`** — Returns the current runtime config directly from `ModelManager.config`: `{config: {gen: "...", embed: "...", num_ctx: 4096, num_batch: 512}}`.
+- **`POST /admin/config`** — Receives `{num_ctx?: int, num_batch?: int}`. Validates bounds (`num_ctx` ≥ 512, `num_batch` ≥ 1), updates `ModelManager.config`, persists to `/app/data/model_config.json`, and returns the updated config. No active-session guard required; changes apply on the next `/api/generate` call.
 - **`/admin/pull`** — Receives `{slot, model_name}`. Pulls the model via Ollama `/api/pull`, then sets it as the active model for the slot.
 
 > **Important:** Every endpoint except `/health` and `/ready` requires the `X-Internal-Auth` header containing a valid JWT signed with the shared `JWT_SECRET`. The Core API generates these tokens automatically when proxying requests to the Keeper.

@@ -1,6 +1,6 @@
 # 10 — Phased Development Roadmap
 
-> **Last updated:** 2026-06-01 (all phases complete + post-roadmap additions)
+> **Last updated:** 2026-06-14 (all phases complete + post-roadmap additions)
 
 This roadmap is derived from the comprehensive 12-agent research review documented in `Memory/ISLI-Research-Report.md`. It prioritizes findings by severity × likelihood, grouping them into phased milestones.
 
@@ -682,4 +682,92 @@ This roadmap is derived from the comprehensive 12-agent research review document
 - Agent reading 1MB file receives 16KB + pagination notice + `truncated: true`.
 - Agent querying large DB table receives 50 rows + `has_more: true`.
 - Agent running `git log --patch` on large diff is capped by 12KB char limit.
+- All containers healthy after rebuild.
+
+---
+
+## Post-Roadmap — Dynamic Local Model Permitted List (2026-06-10) ✅
+
+**Goal:** Allow administrators to add arbitrary small local Ollama models (e.g. `gemma3:1b`, `phi4-mini`) to the Keeper permitted list directly from the Board UI, eliminating the need for code changes + container restarts to extend the model catalog.
+
+**Architecture decision:** Store the dynamic permitted-model list in the existing `system_settings` table (`key="local_permitted_models"`, `scope="system"`, value=JSON dict `{gen:[...], embed:[...], stt:[...], tts:[...]}`). This reuses the existing `SystemSetting` CRUD infrastructure, 30s TTL cache via `dynamic_config.py`, and `useSettings` hooks — no new table, migration, or router needed. Fallback to hardcoded defaults if the setting row is absent.
+
+| Task | Effort | Deliverable |
+|------|--------|-------------|
+| Backend `_get_permitted_models()` helper | 0.2 day | Read `SystemSetting` row, merge stored values over `DEFAULT_PERMITTED_MODELS`, use `get_setting()` for cache benefit |
+| Backend router updates | 0.2 day | `GET /status`, `POST /activate`, `POST /remove`, `POST /pull` all read from `_get_permitted_models()` instead of hardcoded dict |
+| Backend add/remove endpoints | 0.2 day | `POST /v1/model-management/permitted` — upsert to `SystemSetting`; `DELETE /v1/model-management/permitted/{slot}/{model}` — remove from slot list; both call `invalidate_cache()` |
+| Seeder entry | 0.1 day | Add `local_permitted_models` to `DEFAULT_SETTINGS` in `settings_seed.py` with existing defaults; `ON CONFLICT DO NOTHING` |
+| Frontend state + handlers | 0.2 day | `newModelInputs` per-slot state; `handleAddPermitted` / `handleRemovePermitted` mutations with busy spinners |
+| Frontend UI additions | 0.3 day | "Add Model" input row at bottom of `ModelModule` and `AudioModule`; `X` remove-from-list button on every non-active model card; `Plus` / `X` icons from `lucide-react` |
+| Type-check + build | 0.1 day | `tsc --noEmit` clean; `npm run build` passes |
+| Docker rebuild + restart | 0.2 day | `docker compose build --no-cache board`; `docker compose up -d --force-recreate core board`; verify healthy |
+| Docs update | 0.1 day | Update `Docs/02-keeper.md`, `Docs/09-tech-stack.md`, `Docs/10-roadmap.md` |
+
+**Exit criteria:**
+- Admin types `gemma3:1b` into the gen slot input on `/settings/keeper` and clicks "Add Model"; the card appears immediately with a "Pull" button.
+- `POST /v1/model-management/pull` for the newly added model succeeds and downloads weights via Ollama.
+- `DELETE /v1/model-management/permitted/gen/gemma3:1b` removes the card from the UI.
+- Existing activate/remove/pull workflows continue to work unchanged.
+- Active model does not show a "Remove from list" button.
+- All containers healthy after rebuild.
+
+---
+
+## Post-Roadmap — Skill Store One-Click Installer (2026-06-12) ✅
+
+**Goal:** Close the final gap in the Universal Skill Runtime so that installing a skill from the Board UI or CLI is truly one-click: clone, build, run, health-check, and notify all running agents automatically.
+
+**Architecture decision:** Add a combined `POST /v1/skills/install-and-enable` endpoint that chains the existing `SkillContainerManager` methods. Add `last_probe_status`/`last_probe_result`/`last_probe_at` columns to `skill_registry` for real-time observability. Broadcast `skill:enabled` Redis events so the SDK re-syncs tools without restart. Add a startup resurrection hook so active skills survive `docker compose down/up`.
+
+| Task | Effort | Deliverable |
+|------|--------|-------------|
+| DB schema + migration | 0.2 day | Add `last_probe_status`, `last_probe_result`, `last_probe_at` to `SkillRegistry`; Alembic migration `20260612_9ab2c3d4e5f7` |
+| Backend combined endpoint | 0.3 day | `POST /v1/skills/install-and-enable` — chains `install_from_git` → `enable` → `probe` retry loop → `EventManager.emit("skill:enabled")`; returns `build_time_ms` and `probe_ok` |
+| Backend standalone enable broadcast | 0.1 day | Update `POST /v1/skills/{id}/enable` to also emit `skill:enabled` after success |
+| Backend enriched list endpoint | 0.1 day | `SkillMetadataOut` adds `status`, `last_probe_status`, `last_probe_at`, `version`, `author`, `tools`; populated from DB rows |
+| Backend startup resurrection | 0.2 day | `startup/skills.py` — `initialize_skills()` re-enables `status='active'` rows on boot; wired into `startup/__init__.py` lifespan |
+| WebSocket dispatch | 0.1 day | `ws.py redis_listener` broadcasts `skill:enabled` to all connected agent sockets + Board sockets |
+| SDK re-sync handler | 0.1 day | `runner.py _ws_loop` handles `skill:enabled` → triggers `_sync_config()` |
+| Board UI polling + status | 0.5 day | `SkillsStorePage.tsx` calls `install-and-enable`, polls `GET /v1/skills/{id}` every 3s, shows status badges (Running/Building/Build Failed/Unhealthy/Stopped), adds **Start**/**Stop** toggle, **Retry Enable**, and **Uninstall** buttons |
+| Board UI type updates | 0.1 day | `SkillMetadata` interface extended with new fields; `tsc --noEmit` clean |
+| Admin CLI skill commands | 0.3 day | `scripts/isli.py` — `skill` Typer sub-app with `install`, `enable`, `disable`, `uninstall`, `list` commands; stdlib `urllib.request` + `X-Admin-Key` |
+| Docker rebuild + restart | 0.3 day | `docker compose build core`; run `alembic upgrade head`; `docker compose build --no-cache board`; `docker compose up -d --force-recreate core board`; verify healthy |
+| Docs update | 0.2 day | Update `Docs/06-skills.md`, `Docs/14-management-cli.md`, `Docs/10-roadmap.md`, `Docs/README.md` |
+
+**Exit criteria:**
+- Admin clicks "Install Skill" on Board UI for a skill from the registry; spinner shows "Building…", then green "Running" badge appears within 60s.
+- If Docker build fails, the card shows red "Build Failed" with a "Retry Enable" button.
+- Stopped skills (`status='disabled'`) show a green **Start** button; running healthy skills show an amber **Stop** button.
+- `isli skill install https://github.com/user/my-skill` from terminal returns `active` status, build time, and probe result.
+- `isli skill list` prints a table showing all installed skills with status and probe health.
+- A running agent receives the `skill:enabled` WebSocket event and its next turn includes the new skill's tools (verified via `discover_skills` or tool call).
+- After `docker compose down && docker compose up`, previously active skills are automatically resurrected and healthy.
+- `GET /v1/skills` returns `last_probe_status` for all DB-backed skills.
+- All containers healthy after rebuild.
+
+---
+
+## Post-Roadmap — Configurable Keeper Context Length (2026-06-14) ✅
+
+**Goal:** Expose the Keeper's Ollama `num_ctx` and `num_batch` generation options as editable settings in the Board UI (`/settings/keeper`), so administrators can tune the local inference context window without rebuilding containers.
+
+**Architecture decision:** Extend the existing `ModelManager` JSON persistence (`/app/data/model_config.json`) to store `num_ctx` and `num_batch`. The `OllamaClient.generate()` method reads these values at call time via a lazy import of `model_manager`, ensuring no restart is required. Core proxies the config read/write via `GET/PUT /v1/model-management/config` to Keeper's `GET/POST /admin/config`.
+
+| Task | Effort | Deliverable |
+|------|--------|-------------|
+| Keeper `ModelManager` extension | 0.2 day | Seed `num_ctx`/`num_batch` defaults; add `set_generation_options()` method; persist to `/app/data/model_config.json` |
+| Keeper `OllamaClient` wiring | 0.1 day | Lazy import `model_manager` in `generate()`; replace hardcoded `4096`/`512` with `model_manager.config.get(...)` |
+| Keeper admin endpoints | 0.2 day | `GET /admin/config` returns `num_ctx`/`num_batch`; new `POST /admin/config` with validation and persistence |
+| Keeper dashboard update | 0.1 day | `/dashboard` `config` block returns live values instead of hardcoded literals |
+| Core proxy endpoints | 0.2 day | `GET /v1/model-management/config` and `PUT /v1/model-management/config` in `model_management.py`; forward to Keeper with `X-Internal-Auth` |
+| Board UI Generation Options card | 0.3 day | New card below model grid in `LocalModelSettings.tsx`: numeric inputs for `num_ctx` (512–524288) and `num_batch` (1–4096), Apply button, green "Saved" confirmation |
+| Docker rebuild + restart | 0.3 day | `docker compose build --no-cache keeper core board`; `docker compose up -d --force-recreate keeper core board`; verify healthy |
+| Docs update | 0.1 day | Update `Docs/02-keeper.md` (CPU optimizations, endpoint tables, UI description, admin details); add section to `Docs/10-roadmap.md` |
+
+**Exit criteria:**
+- Admin navigates to Board → Settings → Keeper, sees the **Generation Options** card, changes `num_ctx` to `8192`, clicks Apply, and sees a green "Saved" confirmation.
+- `GET /v1/model-management/config` returns `{"config": {"gen": "...", "embed": "...", "num_ctx": 8192, "num_batch": 512}}`.
+- The next Keeper summarization/journal/heartbeat inference call uses the new `num_ctx` value (observable in Ollama logs).
+- Values survive Keeper container restart because they are persisted to `/app/data/model_config.json`.
 - All containers healthy after rebuild.

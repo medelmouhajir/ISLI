@@ -87,6 +87,7 @@ services:
       start_period: 60s
     networks:
     - isli-data
+    - isli-mesh
     restart: unless-stopped
   ollama-init:
     image: ollama/ollama:latest
@@ -163,6 +164,7 @@ services:
       ANONYMIZED_TELEMETRY: 'FALSE'
       AGENT_SDK_PATH: /opt/isli/isli-agent-sdk
       AGENT_NETWORK: ${COMPOSE_PROJECT_NAME:-isli}_isli-mesh
+      SKILL_NETWORK: ${COMPOSE_PROJECT_NAME:-isli}_isli-mesh
       AGENT_RUNNER_IMAGE: ${AGENT_RUNNER_IMAGE:-isli-agent-runner:latest}
       WORKSPACE_BASE_PATH: /workspaces
       WEBHOOK_SECRET: ${WEBHOOK_SECRET}

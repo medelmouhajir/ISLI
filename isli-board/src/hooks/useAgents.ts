@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getJSON, putJSON, deleteJSON } from '@/lib/api'
+import { getJSON, putJSON, postJSON, deleteJSON } from '@/lib/api'
 import type { Agent } from '@/types'
 
 export function useAgents() {
@@ -23,6 +23,19 @@ export function useDeleteAgent() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => deleteJSON(`/v1/agents/${id}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['agents'] }),
+  })
+}
+
+interface CleanupPeerRefsResponse {
+  cleaned: number
+  affected_agent_ids: string[]
+}
+
+export function useCleanupPeerRefs() {
+  const queryClient = useQueryClient()
+  return useMutation<CleanupPeerRefsResponse, Error, void>({
+    mutationFn: () => postJSON<CleanupPeerRefsResponse>('/v1/agents/cleanup-peer-refs', {}),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['agents'] }),
   })
 }

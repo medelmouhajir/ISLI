@@ -120,6 +120,8 @@ class AgentProcessManager:
         need to know every provider's convention.
         """
         from sqlalchemy import select
+
+        from isli_core.config import get_settings
         from isli_core.db import get_db_session_manual
         from isli_core.models import Agent, LlmProvider
 
@@ -155,6 +157,8 @@ class AgentProcessManager:
                     "openai": "OPENAI_API_KEY",
                     "anthropic": "ANTHROPIC_API_KEY",
                     "google": "GEMINI_API_KEY",
+                    "nvidia": "NVIDIA_NIM_API_KEY",
+                    "nvidia_nim": "NVIDIA_NIM_API_KEY",
                     "deepseek": "DEEPSEEK_API_KEY",
                     "azure": "AZURE_API_KEY",
                     "vertex": "VERTEXAI_API_KEY",
@@ -170,6 +174,8 @@ class AgentProcessManager:
                     "openai": "OPENAI_API_BASE",
                     "anthropic": "ANTHROPIC_API_BASE",
                     "google": "GEMINI_API_BASE",
+                    "nvidia": "NVIDIA_NIM_API_BASE",
+                    "nvidia_nim": "NVIDIA_NIM_API_BASE",
                     "deepseek": "DEEPSEEK_API_BASE",
                     "azure": "AZURE_API_BASE",
                     "vertex": "VERTEXAI_LOCATION",

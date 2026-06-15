@@ -18,6 +18,7 @@ from .notifications import register_notification_handlers
 from .outbox import register_handlers as register_outbox_handlers
 from .workers import WorkerManager
 from .settings_seed import seed_default_settings
+from .skills import initialize_skills
 from isli_core.redis_streams import ensure_stream_group
 from isli_core.redis_client import get_redis
 from isli_core.estop import EStopManager
@@ -46,6 +47,7 @@ async def lifespan(app: FastAPI):
     register_notification_handlers()
     register_outbox_handlers()
     await initialize_process_manager(app)
+    await initialize_skills(app)
 
     # Ensure Redis Stream consumer group exists before any worker starts.
     # This prevents messages written by routers during startup from being

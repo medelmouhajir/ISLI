@@ -385,7 +385,7 @@ async def promote_to_shared(
                     else workspace.quota_bytes
                 )
             },
-            headers={"X-Internal-Auth": f"Bearer {token}"}
+            headers={"X-Internal-Auth": token}
         )
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)

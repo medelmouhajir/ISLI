@@ -18,6 +18,7 @@ The **MAST (Multi-Agent System Failure Taxonomy)** from UC Berkeley (NeurIPS 202
 - Core API rejects task assignments that don't match an agent's declared `task_types`
 - Agent persona is tightly scoped, not general-purpose
 - Tasks have typed schemas, not free-text instructions
+- **Task-Mode Execution Block (2026-06-14)**: When executing a Kanban task, the SDK injects a hard rule block into the system prompt that forbids greeting/status-card shortcuts and requires the agent to call skills and write file deliverables before marking `done`
 
 ---
 

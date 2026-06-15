@@ -46,7 +46,23 @@ class TestAgentRunnerSync:
             ])
         )
         
-        # 3. Mock heartbeat and websocket (to avoid hanging)
+        # 3. Mock config fetch (register() pulls full config after POST /v1/agents)
+        respx.get("http://localhost:8000/v1/agents/test-agent/config").mock(
+            return_value=Response(200, json={
+                "id": "test-agent",
+                "name": "Database Name",
+                "description": "Database Description",
+                "persona": "Database Persona",
+                "skills": ["file-read", "web-fetch"],
+                "status": "online",
+                "model_provider": "ollama",
+                "model_id": "qwen2.5:7b",
+                "channels": [],
+                "config": {"debug": True},
+            })
+        )
+
+        # 4. Mock heartbeat and websocket (to avoid hanging)
         respx.post("http://localhost:8000/v1/agents/test-agent/heartbeat").mock(
             return_value=Response(200, json={"token": "new-token"})
         )
@@ -74,7 +90,7 @@ class TestAgentRunnerSync:
 
     def test_assemble_system_prompt_includes_tools(self, agent_config):
         runner = AgentRunner(agent_config, "http://localhost:8000")
-        
+
         # Manually register a tool
         runner.add_tool("test_tool", lambda: "ok", {
             "type": "function",
@@ -83,12 +99,31 @@ class TestAgentRunnerSync:
                 "description": "A test tool description"
             }
         })
-        
+
         prompt = runner._assemble_system_prompt("Context Summary")
-        
+
         assert "=== IDENTITY ===" in prompt
         assert "Local Name" in prompt
         assert "=== AVAILABLE TOOLS ===" in prompt
         assert "- test_tool: A test tool description" in prompt
         assert "Context Summary" in prompt
         assert "Call them when appropriate" in prompt
+
+    def test_assemble_system_prompt_includes_task_block_in_task_mode(self, agent_config):
+        runner = AgentRunner(agent_config, "http://localhost:8000")
+
+        prompt = runner._assemble_system_prompt("Task context", task_mode=True)
+
+        assert "## Kanban Task Execution Rules" in prompt
+        assert "You are currently executing an assigned Kanban task" in prompt
+        assert "NEVER render a greeting card" in prompt
+        assert "MUST call file-write" in prompt
+        assert "=== IDENTITY ===" in prompt  # base template still present
+
+    def test_assemble_system_prompt_omits_task_block_in_chat_mode(self, agent_config):
+        runner = AgentRunner(agent_config, "http://localhost:8000")
+
+        prompt = runner._assemble_system_prompt("Chat context", task_mode=False)
+
+        assert "## Kanban Task Execution Rules" not in prompt
+        assert "You are currently executing an assigned Kanban task" not in prompt

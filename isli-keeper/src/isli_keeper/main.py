@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import time
 from contextlib import asynccontextmanager
@@ -30,6 +31,11 @@ DEFAULT_GEN_MODEL = settings.ollama_gen_model
 
 model_manager = ModelManager()
 priority_manager = get_priority_manager()
+
+# In-memory LRU cache for /intent/classify
+_INTENT_CLASSIFY_CACHE: dict[str, tuple[dict, float, float]] = {}
+_INTENT_CACHE_MAX_SIZE = 500
+_INTENT_CACHE_TTL_SECONDS = 60.0
 
 def get_gen_model() -> str:
     return model_manager.get_model("gen")
@@ -238,6 +244,18 @@ class ContextInjectRequest(BaseModel):
     agent_description: str | None = None
     memory_similarity_threshold: float = 0.4
     known_agent_ids: list[str] | None = None
+
+
+class IntentClassifyRequest(BaseModel):
+    user_message: str
+    available_skills: list[dict[str, str]]  # [{"name": "...", "hint": "..."}]
+    agent_id: str | None = None
+
+
+class IntentClassifyResponse(BaseModel):
+    relevant_skills: list[str]
+    reason: str = ""
+    confidence: float = 0.0
 
 
 class ModelRouteRequest(BaseModel):
@@ -553,6 +571,151 @@ async def context_inject(req: ContextInjectRequest, auth: dict = Depends(require
         raise HTTPException(status_code=503, detail=str(exc))
 
 
+# ── Intent classifier cache helpers ──────────────────────────────────────────
+
+def _intent_cache_key(agent_id: str | None, message: str, skill_names: list[str]) -> str:
+    payload = {
+        "agent_id": agent_id or "",
+        "message_prefix": message[:120],
+        "skills": sorted(skill_names),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _intent_cache_get(key: str) -> dict | None:
+    now = time.monotonic()
+    entry = _INTENT_CLASSIFY_CACHE.get(key)
+    if entry:
+        result, expires_at, last_accessed = entry
+        if expires_at > now:
+            # Update LRU timestamp
+            _INTENT_CLASSIFY_CACHE[key] = (result, expires_at, now)
+            return result
+    return None
+
+
+def _intent_cache_set(key: str, result: dict) -> None:
+    now = time.monotonic()
+    # Evict oldest 10% if at capacity
+    if len(_INTENT_CLASSIFY_CACHE) >= _INTENT_CACHE_MAX_SIZE:
+        sorted_items = sorted(
+            _INTENT_CLASSIFY_CACHE.items(),
+            key=lambda kv: kv[1][2],  # last_accessed
+        )
+        evict_count = max(1, _INTENT_CACHE_MAX_SIZE // 10)
+        for evict_key, _ in sorted_items[:evict_count]:
+            del _INTENT_CLASSIFY_CACHE[evict_key]
+    _INTENT_CLASSIFY_CACHE[key] = (
+        result,
+        now + _INTENT_CACHE_TTL_SECONDS,
+        now,
+    )
+
+
+INTENT_CLASSIFY_PROMPT = """You are a lightweight intent classifier for an AI agent's skill toolkit.
+
+Given the user's message and the list of available skills below, select ONLY the skills that are directly relevant to answering the user's request.
+
+Rules:
+- Return ONLY a JSON object with keys "relevant_skills" (array of strings), "reason" (one sentence), and "confidence" (float 0.0–1.0).
+- If the intent is unclear, broad, or conversational, return an empty array and confidence 0.0.
+- Do NOT include skills just because they sound related; only include skills that the agent would actually CALL.
+
+Available skills:
+{available_skills}
+
+User message:
+---
+{user_message}
+---
+
+Respond ONLY with JSON:
+{{"relevant_skills": ["skill-name-1", ...], "reason": "...", "confidence": 0.85}}
+"""
+
+
+@app.post("/intent/classify")
+async def intent_classify(req: IntentClassifyRequest, auth: dict = Depends(require_internal_auth)):
+    """Lightweight skill-intent classifier. Returns relevant skill names for a user message."""
+    metrics = get_metrics()
+    start = time.monotonic()
+    agent_id = req.agent_id
+
+    skill_names = [s["name"] for s in req.available_skills]
+    cache_key = _intent_cache_key(agent_id, req.user_message, skill_names)
+    cached = _intent_cache_get(cache_key)
+    if cached:
+        logger.info("keeper.intent_classify.cache_hit", agent_id=agent_id)
+        return cached
+
+    skills_block = "\n".join(
+        f"- {s['name']}: {s.get('hint', '')}" for s in req.available_skills
+    )
+    prompt = INTENT_CLASSIFY_PROMPT.format(
+        available_skills=skills_block,
+        user_message=req.user_message[:500],
+    )
+
+    try:
+        result = await _generate_with_ollama(
+            prompt,
+            model=get_gen_model(),
+            agent_id=agent_id,
+            endpoint="intent/classify",
+            format="json",
+            priority=P1,
+            timeout=45.0,
+        )
+        raw_output = result.get("response", "").strip()
+        block = _extract_json_block(raw_output)
+        if block:
+            verdict = json.loads(block)
+            relevant_skills = verdict.get("relevant_skills", [])
+            if not isinstance(relevant_skills, list):
+                relevant_skills = []
+            # Validate that returned skills exist in the input set
+            valid_names = set(skill_names)
+            relevant_skills = [s for s in relevant_skills if isinstance(s, str) and s in valid_names]
+            reason = verdict.get("reason", "")
+            confidence = float(verdict.get("confidence", 0.0))
+        else:
+            relevant_skills = []
+            reason = "No JSON block found in SLM output"
+            confidence = 0.0
+    except Exception as exc:
+        logger.error("keeper.intent_classify_failed", error=str(exc), agent_id=agent_id)
+        # Safe fallback: return all skills
+        relevant_skills = skill_names
+        reason = f"Classifier failed ({type(exc).__name__}); returning all skills as fallback"
+        confidence = 0.0
+
+    latency = (time.monotonic() - start) * 1000
+    metrics.record_inference(
+        agent_id=agent_id or "system",
+        endpoint="intent/classify",
+        model=get_gen_model(),
+        latency_ms=latency,
+        prompt=req.user_message[:80],
+        completion=json.dumps(relevant_skills),
+        status="success" if confidence > 0 else "fallback",
+    )
+    logger.info(
+        "keeper.intent_classified",
+        agent_id=agent_id,
+        relevant_skills=relevant_skills,
+        confidence=confidence,
+        latency_ms=latency,
+    )
+
+    response = {
+        "relevant_skills": relevant_skills,
+        "reason": reason,
+        "confidence": confidence,
+    }
+    _intent_cache_set(cache_key, response)
+    return response
+
+
 def _format_model_list(models: list[dict]) -> str:
     """Format secondary models into prose for the Ollama prompt."""
     lines = []
@@ -782,14 +945,46 @@ async def reload_prompts(auth: dict = Depends(require_internal_auth)):
     return {"status": "ok", "reloaded": True}
 
 
+class AdminConfigUpdateRequest(BaseModel):
+    num_ctx: int | None = None
+    num_batch: int | None = None
+
+
 @app.get("/admin/config")
 async def admin_config(auth: dict = Depends(require_internal_auth)):
     return {
         "config": {
             "gen": model_manager.get_model("gen"),
             "embed": model_manager.get_model("embed"),
+            "num_ctx": model_manager.config.get("num_ctx", 4096),
+            "num_batch": model_manager.config.get("num_batch", 512),
         }
     }
+
+
+@app.post("/admin/config")
+async def admin_config_update(
+    req: AdminConfigUpdateRequest,
+    auth: dict = Depends(require_internal_auth),
+):
+    try:
+        updated = model_manager.set_generation_options(
+            num_ctx=req.num_ctx,
+            num_batch=req.num_batch,
+        )
+        return {
+            "status": "ok",
+            "config": {
+                "gen": model_manager.get_model("gen"),
+                "embed": model_manager.get_model("embed"),
+                **updated,
+            },
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("keeper.admin_config_update_failed", error=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 @app.post("/admin/pull")
@@ -1177,8 +1372,8 @@ async def dashboard(auth: dict = Depends(require_internal_auth)):
         },
         "recent_inferences": snapshot["recent_inferences"],
         "config": {
-            "num_ctx": 4096,
-            "num_batch": 512,
+            "num_ctx": model_manager.config.get("num_ctx", 4096),
+            "num_batch": model_manager.config.get("num_batch", 512),
             "ollama_gen_model": model_manager.get_model("gen"),
             "ollama_embed_model": model_manager.get_model("embed"),
         },

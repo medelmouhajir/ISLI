@@ -16,6 +16,10 @@ def _make_runner_with_tools():
         "type": "function",
         "function": {"name": "file_read", "description": "Read file"},
     })
+    runner.add_tool("file_write", lambda **kw: kw, {
+        "type": "function",
+        "function": {"name": "file_write", "description": "Write file"},
+    })
     return runner
 
 
@@ -311,3 +315,189 @@ class TestJsonToolCallParsing:
         content = '{"name":"ui_components","arguments":{broken}'
         result = runner._extract_json_tool_calls(content)
         assert result == []
+
+
+class TestLegacyToolCallParsing:
+    """Test the <tool_call> fallback parser in AgentRunner."""
+
+    def test_no_legacy_returns_empty(self):
+        runner = _make_runner_with_tools()
+        result = runner._extract_legacy_tool_calls("Just some plain text.")
+        assert result == []
+
+    def test_well_formed_single_tool_call(self):
+        runner = _make_runner_with_tools()
+        content = """
+        Certainly. Here is your card.
+        <tool_call>
+        <function=ui_components>
+        <parameter=component_type>card</parameter>
+        <parameter=action_id>demo_001</parameter>
+        </function>
+        </tool_call>
+        """
+        result = runner._extract_legacy_tool_calls(content)
+
+        assert len(result) == 1
+        assert result[0].id == "legacy_call_0"
+        assert result[0].type == "function"
+        assert result[0].function.name == "ui_components"
+
+        args = json.loads(result[0].function.arguments)
+        assert args["component_type"] == "card"
+        assert args["action_id"] == "demo_001"
+
+    def test_parameter_name_attribute_variant(self):
+        runner = _make_runner_with_tools()
+        content = """
+        <tool_call>
+        <function name="ui_components">
+        <parameter name="component_type">card</parameter>
+        <parameter name="action_id">demo_002</parameter>
+        </function>
+        </tool_call>
+        """
+        result = runner._extract_legacy_tool_calls(content)
+
+        assert len(result) == 1
+        assert result[0].function.name == "ui_components"
+
+        args = json.loads(result[0].function.arguments)
+        assert args["component_type"] == "card"
+        assert args["action_id"] == "demo_002"
+
+    def test_multiple_tool_calls(self):
+        runner = _make_runner_with_tools()
+        content = """
+        <tool_call>
+        <function=file_read>
+        <parameter=path>/tmp/a.txt</parameter>
+        </function>
+        </tool_call>
+        Some text.
+        <tool_call>
+        <function=file_write>
+        <parameter=path>/tmp/b.txt</parameter>
+        <parameter=content>hello</parameter>
+        </function>
+        </tool_call>
+        """
+        result = runner._extract_legacy_tool_calls(content)
+
+        assert len(result) == 2
+        assert result[0].id == "legacy_call_0"
+        assert result[0].function.name == "file_read"
+        assert result[1].id == "legacy_call_1"
+        assert result[1].function.name == "file_write"
+
+        args0 = json.loads(result[0].function.arguments)
+        assert args0["path"] == "/tmp/a.txt"
+
+        args1 = json.loads(result[1].function.arguments)
+        assert args1["path"] == "/tmp/b.txt"
+        assert args1["content"] == "hello"
+
+    def test_multiline_parameter_value(self):
+        runner = _make_runner_with_tools()
+        content = """
+        <tool_call>
+        <function=file_write>
+        <parameter=path>/tmp/multiline.txt</parameter>
+        <parameter=content>Line one
+Line two
+Line three</parameter>
+        </function>
+        </tool_call>
+        """
+        result = runner._extract_legacy_tool_calls(content)
+
+        assert len(result) == 1
+        args = json.loads(result[0].function.arguments)
+        assert args["path"] == "/tmp/multiline.txt"
+        assert args["content"] == "Line one\nLine two\nLine three"
+
+    def test_json_inside_parameter(self):
+        runner = _make_runner_with_tools()
+        content = """
+        <tool_call>
+        <function=ui_components>
+        <parameter=component_type>card</parameter>
+        <parameter=props>{"title":"Demo","fields":[]}</parameter>
+        </function>
+        </tool_call>
+        """
+        result = runner._extract_legacy_tool_calls(content)
+
+        assert len(result) == 1
+        args = json.loads(result[0].function.arguments)
+        assert args["component_type"] == "card"
+        assert args["props"] == {"title": "Demo", "fields": []}
+
+    def test_unregistered_tool_ignored(self):
+        runner = _make_runner_with_tools()
+        content = """
+        <tool_call>
+        <function=unknown_tool>
+        <parameter=x>1</parameter>
+        </function>
+        </tool_call>
+        """
+        result = runner._extract_legacy_tool_calls(content)
+        assert result == []
+
+    def test_malformed_legacy_returns_empty(self):
+        runner = _make_runner_with_tools()
+        content = '<tool_call><function><parameter>broken</parameter></tool_call>'
+        result = runner._extract_legacy_tool_calls(content)
+        assert result == []
+
+    def test_extract_tool_calls_prefers_legacy_last(self):
+        """Verify the fallback chain: OpenAI > XML > JSON > Legacy."""
+        runner = _make_runner_with_tools()
+        # None of the earlier formats match this content
+        content = (
+            '<tool_call><function name="ui_components">'
+            '<parameter name="component_type">card</parameter></function></tool_call>'
+        )
+        msg = MockMessage(content=content, tool_calls=None)
+        result = runner._extract_tool_calls(msg)
+
+        assert len(result) == 1
+        assert result[0].function.name == "ui_components"
+
+    def test_strip_legacy_tool_calls(self):
+        content = (
+            "Here is a card for you.\n"
+            '<tool_call>\n'
+            '  <function=ui_components>\n'
+            '    <parameter=component_type>card</parameter>\n'
+            '  </function>\n'
+            '</tool_call>\n'
+            "Let me know if you need more."
+        )
+        stripped = AgentRunner._strip_legacy_tool_calls(content)
+        assert "<tool_call>" not in stripped
+        assert "</function>" not in stripped
+        assert "Here is a card for you." in stripped
+        assert "Let me know if you need more." in stripped
+
+    def test_strip_legacy_no_match_returns_unchanged(self):
+        content = "No legacy markup here at all."
+        stripped = AgentRunner._strip_legacy_tool_calls(content)
+        assert stripped == "No legacy markup here at all."
+
+    def test_strip_tool_calls_unified_with_legacy(self):
+        runner = _make_runner_with_tools()
+        content = (
+            "Before. "
+            '<function_calls><invoke name="ui_components">'
+            '<arg name="component_type">card</arg></invoke></function_calls>'
+            " Middle. "
+            '{"name":"file_read","arguments":{"path":"/x"}}'
+            " Middle2. "
+            '<tool_call><function=ui_components>'
+            '<parameter=component_type>card</parameter></function></tool_call>'
+            " After."
+        )
+        stripped = runner._strip_tool_calls(content)
+        assert stripped == "Before.  Middle.  Middle2.  After."

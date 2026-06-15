@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     workspace_base_path: str = "./workspaces" if IS_DEV else "/workspaces"
     agent_runner_image: str = "isli-agent-runner:latest"
     agent_network: str = "isli_isli"
+    skill_network: str = "isli_isli-mesh"
     agent_sdk_host_path: str | None = None
     agent_runner_build_context: str | None = None
     default_local_model: str = "qwen3:1.7b"

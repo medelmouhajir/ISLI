@@ -13,6 +13,7 @@ class SessionPrepRequest(BaseModel):
     use_slm: bool = True
     memory_similarity_threshold: float = 0.4
     agent_config: dict[str, Any] | None = None
+    available_skills: list[dict[str, str]] = []  # [{"name": "...", "hint": "..."}]
 
 
 class SessionPrepResponse(BaseModel):
@@ -22,6 +23,7 @@ class SessionPrepResponse(BaseModel):
     token_map: dict[str, str] = {}
     categories_found: list[str] = []
     cache_hit: bool = False
+    relevant_skills: list[str] = []
 
 
 class RehydrateRequest(BaseModel):

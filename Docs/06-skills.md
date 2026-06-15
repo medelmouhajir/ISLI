@@ -74,6 +74,7 @@ skill:
 | `send-message` | Send message via channel | Routes to channel gateway |
 | `image-describe` | Get text description of image | Calls local vision model |
 | `datetime` | Current date/time in formats | Pure local SDK tool |
+| `discover-skills` | List all available skills for this agent | Pure local SDK tool; triggers per-turn tool expansion |
 | `json-parse` | Parse and validate JSON | Schema validation support |
 | `summarize-text` | Long text → short summary | Proxies to Keeper via isli-skills |
 | `embed-text` | Text → embedding vector | Proxies to Keeper via isli-skills |
@@ -88,7 +89,11 @@ skill:
 | `shared-file-write` | Write file to a shared workspace | Member-scoped; enforces quota |
 | `shared-file-list` | List files in a shared workspace | Member-scoped |
 | `shared-file-delete` | Delete file from a shared workspace | Member-scoped |
-| `promote-output` | Copy/move file into a shared workspace | Agent → shared scope promotion |
+| `shared-file-move` | Move/rename a file within or between shared workspaces | Member-scoped; enforces target quota |
+| `shared-workspace-info` | Return shared workspace metadata | Member-scoped; name, members, root path, quota |
+| `shared-workspace-search` | Search file names and/or contents across a shared workspace | Member-scoped; skip binary files |
+| `shared-promote-file-workspace` | Promote a file from the agent's own workspace into a shared workspace | Member-scoped; agent → shared |
+| `promote-output` | Copy/move a file from a task attachment into a shared workspace | Task → shared scope promotion |
 | `speech-to-text` | Transcribe audio → text | Proxies to `isli-audio` via Core skill proxy |
 | `text-to-speech` | Synthesize text → audio (URL or base64) | Proxies to `isli-audio` via Core skill proxy; language-aware voice selection; can deliver to Telegram/WhatsApp/Board via `send_voice_message` SDK wrapper |
 | `test-skill` | Dry-run dynamic skill code | Transient sandbox; AST validated |
@@ -117,6 +122,27 @@ skill:
 | `web-browse-console` | Return browser console logs | Delta since last call; cursor-based pagination; resets on navigate |
 | `web-browse-vision` | Screenshot as base64 PNG | Returns `screenshot_b64`; flagged as `HEAVY_SKILL` |
 | `web-browse-images` | List images with src/alt/dimensions | `eval_on_selector_all` over `<img>` tags |
+
+### Shared Workspace Skills — Added 2026-06-15
+
+Agents can manage **shared workspaces** via dedicated skills. Shared workspaces are collaborative filesystem scopes with an explicit owner and member list. All shared workspace skills are member-scoped: Core validates that the calling agent is the workspace owner or a member before proxying the call to the workspace service.
+
+| Skill | Action | Routed to | Notes |
+|-------|--------|-----------|-------|
+| `shared-file-read` | `read` | `isli-workspace` `/read` (`scope=shared`) | Supports `max_chars`, `line_start`, `line_end` |
+| `shared-file-write` | `write` | `isli-workspace` `/write` (`scope=shared`) | Atomic write; creates parent directories; enforces `quota_bytes` |
+| `shared-file-list` | `list` | `isli-workspace` `/list` (`scope=shared`) | List files and directories under a path |
+| `shared-file-delete` | `delete` | `isli-workspace` `/delete` (`scope=shared`) | Directories are deleted recursively (use with care) |
+| `shared-file-move` | `move` | `isli-workspace` `/shared/move` | Move/rename within one workspace or across two shared workspaces |
+| `shared-promote-file-workspace` | `promote` | Core inline → `isli-workspace` `/shared/promote` | Copy a file from the agent's own workspace into a shared workspace |
+| `shared-workspace-info` | `info` | Core inline (DB lookup) | Returns `name`, `description`, `owner_id`, `members`, `quota_bytes`, `root_path` |
+| `shared-workspace-search` | `search` | `isli-workspace` `/shared/search` | Search file names and/or contents; skips binary files and files > 10 MB |
+
+**SDK wrappers:** `isli_agent.tools.workspace` exposes `shared_file_read`, `shared_file_write`, `shared_file_list`, `shared_file_delete`, `shared_file_move`, `shared_promote_file_workspace`, `shared_workspace_info`, `shared_workspace_search`. The `AgentRunner` convenience method `add_shared_workspace_tools()` registers all eight tools at once.
+
+**Promotion paths:**
+- **Agent workspace → shared workspace:** use `shared-promote-file-workspace` (or `shared_promote_file_workspace` in the SDK).
+- **Task attachment → shared workspace:** use `promote-output` (or `promote_output` in the SDK). This is useful when a delegated Kanban task produces a deliverable that should become a permanent project asset.
 
 ### Browser Automation (Beta) — Added 2026-06-01
 
@@ -313,26 +339,264 @@ ISLI provides **first-class Git version control** for agents via the `isli-works
 
 ---
 
-## Skills Store (Added 2026-06-01)
+## Skills Store — Universal Skill Runtime (USR) (Added 2026-06-11)
 
-The Skills Store is an independent, Git-backed marketplace for discovering and installing new capabilities. It allows the system to grow dynamically without rebuilding the core engine.
+ISLI now supports a **Universal Skill Runtime** where any skill published as a standalone Dockerized HTTP service can be installed dynamically with **zero code changes** to Core or the SDK.
 
-### Architecture: Git-Backed Registry
-- **Registry Project**: `isli-skills-registry` (GitHub)
-- **Central Index**: `index.json` acts as the yellow-pages for skills.
-- **Payload**: Skills are hosted in their own independent Git repositories.
-- **Installation**: `isli-core` performs a `git clone` into `data/installed_skills/`.
+### Architecture
 
-### Dynamic Loading Workflow
-1. **Discovery**: `isli-board` fetches `index.json` directly from GitHub.
-2. **Installation**: `POST /api/skills/install` triggers a clone to the local filesystem.
-3. **Manager**: `DynamicSkillManager` scans the directory and registers new skills in-memory.
-4. **Proxy**: Calls to dynamic skills are intercepted by `skill_proxy`, which dynamically imports the skill's `main.py` and executes its `handle()` function.
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────────────┐
+│   Agent     │────▶│  Core API   │────▶│   Skill Container   │
+│   SDK       │     │  /v1/skills │     │   (Docker per skill)│
+└─────────────┘     └─────────────┘     └─────────────────────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │ skill_registry │ (PostgreSQL)
+                    │ skill_runs   │ (PostgreSQL)
+                    └──────────────┘
+```
 
-### Skill Package Structure
-A dynamic skill repository must contain:
-- `skill.json`: Metadata (name, description, author, category).
-- `main.py`: Entry point containing a `handle(action, payload, db)` function.
+### Skill Manifest (`isli-skill.yaml`)
+
+Every installable skill must provide an `isli-skill.yaml` manifest at its repository root:
+
+```yaml
+isli_version: "2.0"
+id: "autocar-api"                      # Globally unique, kebab-case
+name: "AutoCar API"
+description: "Manage invoices, customers, work orders"
+version: "1.2.0"
+author: "medelmouhajir"
+category: "web"                        # web, content, workspace, communication, memory, kanban, engineering, audio, database, git, system, custom
+
+runtime:
+  port: 8500
+  build:
+    context: "."
+    dockerfile: "Dockerfile"
+
+auth:
+  type: "internal_jwt"               # Verifies X-Internal-Auth header
+
+tools:
+  - name: "autocar_login"
+    description: "Authenticate with AutoCar ERP"
+    endpoint: "login"
+    method: "POST"
+    parameters:
+      type: "object"
+      properties:
+        email: { type: "string" }
+        password: { type: "string" }
+      required: ["email", "password"]
+
+  - name: "autocar_call"
+    description: "Call any AutoCar endpoint"
+    endpoint: "call"
+    method: "POST"
+    parameters:
+      type: "object"
+      properties:
+        method: { type: "string", enum: ["GET", "POST", "PUT", "DELETE"] }
+        endpoint: { type: "string" }
+        data: { type: "object" }
+      required: ["method", "endpoint"]
+```
+
+### Container Contract
+
+Any language/framework is acceptable as long as the container exposes:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/health` | `GET` | Docker Compose healthcheck. Return `{"status": "ok"}` |
+| `/.well-known/isli-manifest` | `GET` | Returns the manifest as JSON |
+| `/{endpoint}` | `POST` | One per tool. Accepts JSON, returns JSON. Must verify `X-Internal-Auth` JWT. |
+
+### Admin Lifecycle API
+
+All endpoints require `Authorization: Bearer {ADMIN_API_KEY}`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/v1/skills/install` | Clone repo, validate manifest, insert into DB (status `pending`) |
+| `POST` | `/v1/skills/install-and-enable` | **One-click install** — clones, builds, runs, and probes in a single call |
+| `POST` | `/v1/skills/{id}/enable` | Build Docker image and start container |
+| `POST` | `/v1/skills/{id}/disable` | Stop container |
+| `DELETE` | `/v1/skills/{id}` | Uninstall (stop, remove image, delete DB row) |
+| `GET` | `/v1/skills/{id}/probe` | Health-check the skill's `/health` endpoint |
+| `POST` | `/v1/skills/{id}/check-update` | Check remote git for newer version |
+| `POST` | `/v1/skills/{id}/update` | Pull new source, blue/green container swap |
+| `POST` | `/v1/skills/{id}/rollback` | Rollback to previous version |
+| `GET` | `/v1/skills/{id}/versions` | List available git tags |
+| `PATCH` | `/v1/skills/{id}` | Update `update_policy` or `source_ref` |
+| `GET` | `/v1/skills/{id}/logs` | **Optional** — stream last N lines of container logs |
+
+### One-Click Installation Flow (Added 2026-06-12)
+
+**`POST /v1/skills/install-and-enable`** is the primary endpoint for the Board UI and CLI. It performs the full lifecycle in one call:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_API_KEY" \
+     -X POST http://core:8000/v1/skills/install-and-enable \
+     -d '{"skill_id":"autocar-api","git_url":"https://github.com/medelmouhajir/autocar-api-skill"}'
+```
+
+Response:
+```json
+{
+  "status": "active",
+  "skill_id": "autocar-api",
+  "name": "AutoCar API",
+  "version": "1.2.0",
+  "category": "web",
+  "build_time_ms": 12450,
+  "probe_ok": true
+}
+```
+
+What happens internally:
+1. **Clone** — `git clone` into `data/installed_skills/{skill_id}`
+2. **Validate** — Parse `isli-skill.yaml` against `SkillManifest` schema
+3. **Build** — Docker builds `isli/skill-{id}:{version}` with `rm=True`
+4. **Run** — Container starts on `isli_default` network with `JWT_SECRET` injected
+5. **Probe** — Retry loop calls `/health` every 3s for up to 60s
+6. **Broadcast** — `skill:enabled` Redis event emitted; all connected agents re-sync config
+7. **DB update** — `status` → `active`, `last_probe_status` → `healthy`
+
+If any step fails, the skill row stays in `error` status with `last_probe_result` containing the failure details.
+
+### Startup Resilience (Added 2026-06-12)
+
+Core's startup lifespan (`startup/skills.py`) automatically re-enables any `skill_registry` rows with `status='active'` on boot. This means skill containers survive `docker compose down && docker compose up` cycles without manual intervention.
+
+### Agent Push Notification (Added 2026-06-12)
+
+When a skill is enabled (via either `install-and-enable` or standalone `enable`), Core emits a `skill:enabled` Redis Pub/Sub event:
+
+```json
+{
+  "type": "skill:enabled",
+  "payload": {
+    "skill_id": "autocar-api",
+    "skill_name": "AutoCar API",
+    "category": "web",
+    "tools": [...]
+  }
+}
+```
+
+- **Board UI** receives it via WebSocket and refreshes the Skills Store page without reload.
+- **Agent SDK** receives it via the existing agent→Core WebSocket and triggers `_sync_config()`, which fetches `GET /v1/skills` and registers the new tools immediately.
+
+This means running agents discover new skills **within seconds** of installation, without requiring a restart.
+
+### Probe Status Observability (Added 2026-06-12)
+
+The `skill_registry` table now tracks per-skill health:
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `last_probe_status` | `string` | `building`, `healthy`, `unhealthy`, `error` |
+| `last_probe_result` | `JSON` | Raw `/health` response or `{"error": "..."}` |
+| `last_probe_at` | `datetime` | Timestamp of last probe attempt |
+
+`GET /v1/skills` returns these fields for every DB-backed skill, enabling the Board UI to show real-time status badges: green "Running", amber "Building", red "Build Failed", gray "Stopped". Installed cards also expose **Start**/**Stop** toggle buttons (calling `POST /v1/skills/{id}/enable` and `POST /v1/skills/{id}/disable`), **Retry Enable** for failed builds, and **Uninstall**.
+
+### Skill Versioning & Updates (Added 2026-06-13)
+
+Skills installed from Git repositories now support full semantic-versioning lifecycle: version detection, safe update with blue/green container swap, automatic updates, and rollback.
+
+#### Versioning DB Columns
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `source_url` | `Text` | Git clone URL |
+| `source_ref` | `String(64)` | Tracked branch or tag (default: `main`) |
+| `installed_commit_sha` | `String(40)` | Exact commit currently on disk |
+| `latest_commit_sha` | `String(40)` | Latest remote commit from `git ls-remote` |
+| `latest_version` | `String(32)` | Version parsed from remote manifest |
+| `update_policy` | `String(16)` | `manual` (default), `auto`, or `pinned` |
+| `previous_version` | `String(32)` | Version before last update (for rollback) |
+| `previous_commit_sha` | `String(40)` | Commit SHA before last update |
+| `previous_image_tag` | `String(128)` | Docker image tag of previous build |
+| `changelog` | `JSON` | Parsed `CHANGELOG.md` entries |
+| `last_checked_at` | `DateTime` | When `check_update` last ran |
+
+#### Update Policies
+
+| Policy | Behavior |
+|--------|----------|
+| `manual` (default) | Board UI shows "Update Available" badge; admin must click to apply |
+| `auto` | `SkillUpdateWorker` checks every hour and applies updates automatically |
+| `pinned` | Update endpoint is rejected unless `force=true` is passed |
+
+#### Blue/Green Update Flow
+
+When `POST /v1/skills/{id}/update` is called:
+
+1. **Acquire Redis lock** `skill:update:{id}` — rejects concurrent updates with `409 Conflict`
+2. **Save rollback state** — current version, commit SHA, and image tag are preserved
+3. **Pull/checkout new source** — `git fetch && git checkout {target_ref}` (or fresh clone)
+4. **Validate manifest** — `id` must still match
+5. **Stop old container** — `disable()` frees the container name
+6. **Build new image** — `isli/skill-{id}:{new_version}`; old image tagged with `rollback-{timestamp}`
+7. **Start next container** — ephemeral port, name `skill-{id}-next`
+8. **Probe with retry** — `GET /health` × 12 retries × 2.5s = 30s max; also validates `skill_id` in response
+9. **On success**: rename next container to `skill-{id}`, update DB status `active`, emit `skill:updated`
+10. **On failure**: remove next container, restart old container, set status `error`
+11. **Release Redis lock**
+
+This guarantees the old container stays alive until the new one passes health checks. If the build or probe fails, the skill never goes offline.
+
+#### Rollback Flow
+
+`POST /v1/skills/{id}/rollback` reverses the last update:
+1. Check out `previous_commit_sha` in the skill dir
+2. Restart the previous image tag container (same blue/green probe)
+3. On success: clear rollback fields, set status `active`
+4. On failure: leave in error state
+
+#### Auto-Update Worker
+
+`SkillUpdateWorker` runs every hour with two safety gates:
+- `last_checked_at` must be older than 30 minutes (`MIN_RECHECK = 1800s`)
+- Acquires Redis lock before updating; skips locked skills
+
+Only skills with `update_policy = 'auto'` are processed.
+
+#### Agent SDK — Drain-and-Swap
+
+When a skill is updated, Core emits `skill:updated` via Redis Pub/Sub. The Agent SDK receives this over its WebSocket and sets `_pending_tool_reload = true`. The tool registry is **not** mutated mid-turn. Instead, `_auto_register_tools_from_skills()` runs only after the current ReAct turn completes, preventing schema mismatch errors during tool execution.
+
+#### Board UI Enhancements
+
+The Skills Store page now shows:
+- **Version badge** — inline version display; shows "Update Available" (cyan) when `latest_version != version`
+- **Update detail modal** — version diff, changelog preview, update policy dropdown, Update Now / Rollback buttons
+- **"Check All for Updates"** button — batch refresh of all installed skills
+
+### Legacy Installation Flow (Two-Step)
+
+For programmatic or troubleshooting use, the two-step flow still works:
+
+1. **Install** (`POST /v1/skills/install`) → status `pending`
+2. **Enable** (`POST /v1/skills/{id}/enable`) → status `active`
+
+3. **Discovery** (`GET /v1/skills`)
+   - Returns static skills + legacy dynamic skills + DB-backed external skills.
+   - Agents fetch this at startup for dynamic tool registration.
+
+4. **Auto-Registration**
+   - The SDK's `fetch_dynamic_tools()` reads the manifest from Core.
+   - For each tool in the manifest, it generates an async invoker that POSTs to `/v1/skills/{id}/{endpoint}`.
+   - Tools are registered with LiteLLM automatically.
+
+### Legacy Dynamic Skills (File-System Based)
+
+The previous file-system-based dynamic skill system (code stored in `data/installed_skills/` and `exec()`'d by `isli-skills`) is still supported for backward compatibility. It is managed by `DynamicSkillManager` and listed alongside DB-backed skills in `GET /v1/skills`.
 
 ---
 
@@ -357,6 +621,27 @@ await agent.git_status(path="repo")
 await agent.git_commit(path="repo", message="fix bug")
 await agent.git_push(path="repo")
 ```
+
+---
+
+## Pre-Turn Skill Filtering (Added 2026-06-11)
+
+To minimize token consumption, ISLI does **not** send every assigned skill's metadata to the LLM on every turn. Instead, a lightweight intent classifier decides which skills are relevant.
+
+**Pipeline:**
+1. **Compression**: Core builds a compressed skill list for the agent. Each skill is represented by its name + an 8-word hint (from the explicit `hint` field in `skill.yaml`, or truncated from the `description`).
+2. **Classification**: The Keeper runs intent classification (same `/session-prep` call for mesh agents; standalone `POST /intent/classify` for legacy agents).
+3. **Filtering**: Core forwards `relevant_skills` to the agent runner. The `AgentRunner` sends only the matching tool definitions to the LLM.
+4. **Expansion**: If the agent needs a skill not in the filtered set, it calls `discover_skills`. The runner expands the full toolbox for the **next** turn only, then resets.
+
+**Always-visible skills:**
+Tools marked with `"x_isli_always_active": true` in their definition bypass filtering. This ensures critical tools like `get_current_datetime` and `discover_skills` are always available.
+
+**Cache:**
+The Keeper caches intent classification results in-memory with an LRU (500 entries, 60s TTL). The cache key includes `agent_id + message[:120] + sorted(skill_names)`, so repeated similar queries within a minute skip Ollama inference entirely.
+
+**Fallback:**
+If the Keeper returns an empty `relevant_skills` list, or if the classification call fails, the runner falls back to sending the **full** tool set for that turn. This ensures the agent is never left tool-less due to a classifier error.
 
 ---
 
@@ -424,37 +709,45 @@ On Keeper failure:
 
 ## Agent SDK Tool Registry
 
-The `isli-agent-sdk` maintains a central `SKILL_TOOL_REGISTRY` in `isli_agent/tools/__init__.py` that maps normalized skill names to their `(function, definition)` tuples:
+The `isli-agent-sdk` maintains a central `SKILL_TOOL_REGISTRY` in `isli_agent/tools/__init__.py` that maps normalized skill names to their `(function, definition)` tuples. This registry covers all **built-in** skills:
 
 ```python
 from isli_agent.tools import SKILL_TOOL_REGISTRY, normalize_skill_name
 
-# SKILL_TOOL_REGISTRY includes:
-#   "send_message", "send_voice_message", "shell_exec", "web_fetch", "web_search",
-#   "browser_navigate", "browser_snapshot", "browser_click",
-#   "browser_type", "browser_press", "browser_scroll",
-#   "browser_back", "browser_console", "browser_vision", "browser_get_images",
-#   "summarize_text", "embed_text", "summarize", "translate",
-#   "file_read", "file_write", "file_list", "file_delete",
-#   "memory_save", "memory_delete", "memory_search",
-#   "create_kanban_task", "list_kanban_tasks", "update_kanban_task",
-#   "speech_to_text", "text_to_speech",
-#   "interactive_debugger",
-#   "update_skill",
-#   "get_secret"
+# Built-in registry includes:
+#   "send_message", "shell_exec", "web_fetch", "web_search", ...
 ```
 
-Skill names from Core (kebab-case like `"send-message"`) are normalized to Python identifiers (`"send_message"`) via `normalize_skill_name()`. The `AgentRunner` uses this registry to auto-populate its toolbox from the synced `config.skills` list.
+### Dynamic Tool Loading (Added 2026-06-11)
 
-### Auto-Registration
+For **DB-backed external skills** installed via the Universal Skill Runtime, the SDK does not require a code change. At startup, `AgentRunner` calls `fetch_dynamic_tools(core_client)`:
+
+1. Fetches `GET /v1/skills` from Core.
+2. For any skill with a manifest containing `tools`, generates an async invoker.
+3. The invoker POSTs to `/v1/skills/{skill_id}/{tool_endpoint}` with `agent_id` and the LLM-provided arguments.
+4. Registers the tool definition with LiteLLM automatically.
 
 ```python
 # Inside AgentRunner.start() — runs automatically
+await self._auto_register_tools_from_skills()
+```
+
+This means agents automatically gain access to newly installed skills on the next heartbeat or config sync event.
+
+### Auto-Registration (Built-In + Dynamic)
+
+```python
+# Built-in tools
 for skill_name in self.config.skills:
     normalized = normalize_skill_name(skill_name)  # "send-message" -> "send_message"
     if normalized in SKILL_TOOL_REGISTRY:
         func, definition = SKILL_TOOL_REGISTRY[normalized]
         self.add_tool(normalized, func, definition)
+
+# Dynamic tools from installed skills
+dynamic_tools = await fetch_dynamic_tools(self.client)
+for tool_name, (func, definition) in dynamic_tools.items():
+    self.add_dynamic_tool(tool_name, func, definition)
 ```
 
 ### Convenience Methods
@@ -463,6 +756,7 @@ for skill_name in self.config.skills:
 runner.add_workspace_tools()  # file_read, file_write, file_list, file_delete
 runner.add_channel_tools()    # send_message
 runner.add_system_tools()     # get_current_datetime (always auto-registered)
+# discover_skills is auto-registered automatically and marked x_isli_always_active
 ```
 
 ### LiteLLM Tool Definitions
@@ -653,37 +947,71 @@ All tool definitions (`FILE_READ_DEF`, `SUMMARIZE_TEXT_DEF`, `MEMORY_SAVE_DEF`, 
 
 ## Adding a Custom Skill
 
-1. Create a Python FastAPI microservice:
+### Option A: External Microservice (Recommended for Production)
+
+1. Create a Python FastAPI microservice (or Node.js/Go/Rust — any HTTP server):
 
 ```python
-# my-skill/main.py
-from fastapi import FastAPI
-from pydantic import BaseModel
+# my-skill/src/main.py
+import os
+import httpx
+from fastapi import FastAPI, Header, HTTPException, Depends
+import jwt
 
 app = FastAPI()
+JWT_SECRET = os.getenv("JWT_SECRET")
 
-class InvokeInput(BaseModel):
-    query: str
-    max_results: int = 5
-
-@app.post("/invoke")
-async def invoke(input: InvokeInput):
-    # Your skill logic here — no LLM, no magic
-    results = do_the_thing(input.query, input.max_results)
-    return {"success": True, "data": results}
+def verify_auth(x_internal_auth: str = Header(...)):
+    try:
+        payload = jwt.decode(x_internal_auth, JWT_SECRET, algorithms=["HS256"])
+        if "skill:proxy" not in payload.get("scopes", []):
+            raise HTTPException(status_code=403)
+    except Exception:
+        raise HTTPException(status_code=401)
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.post("/echo")
+async def echo(body: dict, _=Depends(verify_auth)):
+    return {"success": True, "echo": body}
 ```
 
-2. Create `skill.yaml` manifest
-3. Register via:
-```bash
-POST /api/skills/register
-{ "manifest_url": "http://my-skill:8102/skill.yaml" }
-```
-4. Skill is immediately available to all permitted agents
+2. Add `isli-skill.yaml` at repo root (see manifest schema above).
+3. Add `Dockerfile` and `requirements.txt`.
+4. Publish to a public Git repository.
+5. Install via Board UI or admin API:
+   ```bash
+   curl -H "Authorization: Bearer $ADMIN_API_KEY" \
+        -X POST http://core:8000/v1/skills/install \
+        -d '{"skill_id":"my-skill","git_url":"https://github.com/user/my-skill"}'
+   ```
+6. Enable:
+   ```bash
+   curl -H "Authorization: Bearer $ADMIN_API_KEY" \
+        -X POST http://core:8000/v1/skills/my-skill/enable
+   ```
+7. Skill is immediately available to all permitted agents. No Core or SDK rebuild required.
+
+### Option B: Inline Handler (Core-Native)
+
+For skills that need direct DB access or don't warrant a separate container:
+
+1. Add a handler block in `isli-core/src/isli_core/routers/skills.py` under the inline section.
+2. Add metadata to `SKILL_METADATA`.
+3. Requires a Core restart (source mounted in dev, image rebuild in production).
+
+### Option C: Legacy Dynamic Skill (Sandboxed Code)
+
+For user-uploaded custom code:
+
+1. Agent generates Python code with `async def run(payload: dict) -> dict:`.
+2. Agent calls `test-skill` → AST validation → sandbox execution.
+3. On success, agent calls `register-skill` → code saved to workspace.
+4. Core's `DynamicSkillManager` loads the code via `exec()` on demand.
+
+**This pattern is deprecated for third-party skills.** Use Option A (External Microservice) for all new skill development.
 
 ---
 

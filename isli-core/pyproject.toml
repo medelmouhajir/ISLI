@@ -37,6 +37,7 @@ dependencies = [
     "docker>=7.0",
     "croniter==6.0.0",
     "tiktoken>=0.7",
+    "packaging>=24.0",
 ]
 
 [project.optional-dependencies]

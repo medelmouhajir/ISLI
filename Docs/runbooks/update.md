@@ -37,6 +37,13 @@ curl http://localhost:8001/health
 
 > **Note:** The ISLI project follows a **rebuild-from-source** pattern for local development. Do not use `docker cp` to copy files into running containers — always rebuild the image and recreate the container. This ensures the container filesystem matches the source code and prevents drift between the image and the running state.
 
+> **Agent-Runner Rebuild:** If `isli-agent-sdk` source changes, you **must** rebuild the `agent-runner` image so that newly spawned agents receive the updated SDK. In production (Docker Compose without source mounts), existing running agents must also be restarted to pick up the new image:
+> ```bash
+> docker compose build --no-cache agent-runner
+> docker compose restart core   # Core mounts the SDK for spawn logic
+> docker restart $(docker ps -q -f "name=isli-agent-")  # Restart active agents
+> ```
+
 ### Offline (Release Tarball)
 
 ```bash

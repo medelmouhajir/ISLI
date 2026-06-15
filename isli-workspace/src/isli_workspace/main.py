@@ -19,8 +19,10 @@ from .sandbox import (
     create_dir,
     delete_file,
     list_dir,
+    move_file,
     read_file,
     resolve_path,
+    search_workspace,
     write_file,
     write_file_bytes,
 )
@@ -112,6 +114,25 @@ class PromoteRequest(BaseModel):
     quota_bytes: int | None = None
 
 
+class MoveRequest(BaseModel):
+    agent_id: str
+    source_workspace_id: str
+    source_path: str
+    target_workspace_id: str | None = None
+    target_path: str
+
+
+class SearchRequest(BaseModel):
+    agent_id: str
+    workspace_id: str
+    query: str
+    path: str = ""
+    search_names: bool = True
+    search_content: bool = False
+    case_sensitive: bool = False
+    max_results: int = 50
+
+
 class GitCloneRequest(BaseWorkspaceRequest):
     path: str
     url: str
@@ -186,7 +207,7 @@ async def check_access(agent_id: str, scope: ScopeType, scope_id: str):
     try:
         from .auth import create_internal_token
         token = create_internal_token("isli-workspace", scopes=["core"], expires_minutes=1)
-        headers = {"X-Internal-Auth": f"Bearer {token}"}
+        headers = {"Authorization": f"Bearer {token}"}
 
         core_url = os.getenv("CORE_API_INTERNAL_URL", "http://core:8000")
 
@@ -455,6 +476,60 @@ async def promote(body: PromoteRequest, auth: dict = Depends(require_internal_au
     except Exception as exc:
         logger.error("workspace.promote_failed", error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/shared/move")
+async def shared_move(body: MoveRequest, auth: dict = Depends(require_internal_auth)):
+    """Move or rename a file within (or between) shared workspaces."""
+    target_workspace_id = body.target_workspace_id or body.source_workspace_id
+    await check_access(body.agent_id, "shared", body.source_workspace_id)
+    await check_access(body.agent_id, "shared", target_workspace_id)
+
+    try:
+        result = move_file(
+            "shared", body.source_workspace_id, settings.workspace_base_path, body.source_path,
+            "shared", target_workspace_id, settings.workspace_base_path, body.target_path,
+        )
+        return {
+            "status": "moved",
+            "source_path": body.source_path,
+            "source_workspace_id": body.source_workspace_id,
+            "target_path": result["path"],
+            "target_workspace_id": target_workspace_id,
+            **{k: v for k, v in result.items() if k not in {"status", "path"}},
+        }
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        logger.error("workspace.permission_denied", agent_id=body.agent_id, source_path=body.source_path, error=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except (OSError,) as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/shared/search")
+async def shared_search(body: SearchRequest, auth: dict = Depends(require_internal_auth)):
+    """Search file names and/or contents across a shared workspace."""
+    await check_access(body.agent_id, "shared", body.workspace_id)
+    try:
+        result = search_workspace(
+            "shared", body.workspace_id, settings.workspace_base_path, body.query,
+            relative_path=body.path,
+            search_names=body.search_names,
+            search_content=body.search_content,
+            case_sensitive=body.case_sensitive,
+            max_results=body.max_results,
+        )
+        return {"status": "ok", **result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        logger.error("workspace.permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ─── Git endpoints ────────────────────────────────────────────────

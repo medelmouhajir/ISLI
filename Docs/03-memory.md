@@ -178,18 +178,28 @@ CREATE TABLE message_archive (
 
 To mitigate **Context Drift (F4)** and **History Loss (F8)**, ISLI provides real-time and historical visibility into the memory lifecycle via the Kanban Board UI. Memory events are persisted in a bounded Redis List (last 50 events) to ensure state survives UI reloads.
 
-### 1. Structured Journal Diffs
+### 1. Journal Management & Overrides
+Operators can manually inspect and override the compressed episodic journals for any session via the Board UI.
+- **Location**: Agent Detail → Episodic → Journals
+- **Capabilities**:
+  - **Manual Edit**: Directly update the journal text to correct summarization errors or inject specific context.
+  - **Force Regeneration**: Manually trigger the Keeper to re-summarize the session history (e.g., after important messages were added).
+  - **Clear Journal**: Reset the journal for a session, forcing a fresh start for episodic memory.
+- **Log Event**: `memory:journal_updated`
+
+### 2. Structured Journal Diffs
 Visualizes the compaction process from Tier 1 (Session) to Tier 2 (Episodic).
 - **Log Event**: `memory:journal_updated`
 - **UI View**: Side-by-side line-level diff showing what the Keeper added or removed from the persistent session journal.
 
-### 2. RAG Retrieval Inspector
+### 3. RAG Retrieval Inspector
 Exposes the specific memories retrieved from Tier 2 and Tier 3 during context injection.
 - **Log Event**: `memory:context_injected`
 - **UI View**: Confidence bars showing cosine similarity scores, source tiers, and the raw memory fragments.
 - **Metrics**: Total tokens injected vs. available context window.
+- **Skill Intent (Added 2026-06-11)**: The context payload now includes `relevant_skills` — the subset of assigned skills the Keeper deems relevant to the current turn. This metadata is forwarded to the agent runner for per-turn tool filtering, but is not injected into the agent's memory context.
 
-### 3. Context Truncation Alerts
+### 4. Context Truncation Alerts
 Warns when the agent's memory exceeds the model's `max_injection_tokens`.
 - **Log Event**: `memory:context_truncated`
 - **UI View**: Warning banner showing token counts before and after pruning, ensuring operators know when critical history was discarded to fit the window.

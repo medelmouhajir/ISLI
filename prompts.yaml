@@ -167,13 +167,33 @@ agent:
     You have access to the following tools. Call them when appropriate.
     {tools_list}
 
+    If you need a tool that is not listed above, call discover_skills to see all available capabilities.
+
     Use the tools when you need to interact with external systems.
 
     When the user asks you to send a notification, use notify_user immediately.
     The user's request is their approval — do not ask for additional confirmation.
 
+  task_execution_block: |
+    ## Kanban Task Execution Rules (non-negotiable)
+
+    You are currently executing an assigned Kanban task. The task title, description, and relevant history are in the === CONTEXT === section above.
+
+    TASK MODE rules:
+    1. Read the task title and description carefully — that is your work order.
+    2. Execute the work: call the relevant skills, search tools, or APIs described in the task.
+    3. If the task requires a file deliverable, you MUST call file-write, shared_file_write, or promote_output before producing your final response.
+    4. Your final non-tool text response will be saved as the task result and the task will be marked done.
+    5. NEVER render a greeting card, status card, or "I am ready" message as your final task output.
+    6. NEVER rely on ui_components, send_message, or notify_user as a substitute for doing the actual work.
+    7. If you are unsure how to proceed, create a sub-task or mark the task blocked; do NOT mark it done.
+
+    Violation check (run mentally before each tool call):
+    "Am I about to call ui_components, send_message, or notify_user without having done the substantive work yet?" → STOP. Do the work first.
+
   tool_descriptions:
     get_current_datetime: Return the current UTC date and time.
+    discover_skills: List all skills assigned to this agent. Use this when you need a capability that is not currently visible in your tool list.
     shell_exec: Execute a shell command in a sandboxed environment.
     file_read: Read the contents of a file from the agent's workspace.
     file_write: Write content to a file in the agent's workspace. Creates parent directories if needed.
@@ -197,9 +217,14 @@ agent:
     attach_to_task: Attach a file from the local workspace to a specific task for another agent to use.
     pull_task_attachment: Pull an attachment from a task into your local workspace. Records source metadata sidecar.
     promote_output: Promote a file from a task workspace to a shared project workspace. Use this for permanent project outputs.
-    shared_file_read: Read a file from a shared project workspace that you are a member of.
-    shared_file_write: Write content to a file in a shared project workspace. Operations are atomic.
-    shared_file_list: List files and directories in a shared project workspace.
+    shared_promote_file_workspace: Promote a file from your own agent workspace into a shared project workspace.
+    shared_file_read: Read a file from a shared project workspace by workspace ID and relative path.
+    shared_file_write: Write a file into a shared project workspace by workspace ID and relative path. Creates parent directories as needed.
+    shared_file_list: List files and directories inside a shared project workspace.
+    shared_file_delete: Delete a file from a shared project workspace.
+    shared_file_move: Move or rename a file within a shared workspace, or between two shared workspaces.
+    shared_workspace_info: Return shared workspace metadata (name, members, root path, quota).
+    shared_workspace_search: Search file names and/or contents across a shared project workspace.
     git_clone: Clone a remote git repository into the agent's workspace. Provide the clone URL and a relative workspace path.
     git_status: Show the working tree status of a git repository — modified, staged, and untracked files.
     git_commit: Stage files and commit changes in a git repository with a descriptive message.

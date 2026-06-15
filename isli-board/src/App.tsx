@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, useLocation, useNavigate } from 'react-router-dom'
 import { BoardSocketProvider } from '@/contexts/BoardSocketContext'
 import { Header } from '@/components/Header'
 import { Sidebar } from '@/components/Sidebar'
 import { KanbanBoard } from '@/components/KanbanBoard'
+import { CalendarPage } from '@/components/CalendarPage'
 import { DashboardPage } from '@/components/DashboardPage'
 import { SessionsPage } from '@/components/SessionsPage'
 import { ConversationsPage } from '@/components/ConversationsPage'
@@ -15,8 +16,10 @@ import { AgentChannelsPage } from '@/components/AgentChannelsPage'
 import { CreateAgentPage } from '@/components/CreateAgentPage'
 import { AgentLogsPage } from '@/components/AgentLogsPage'
 import { AgentMemoryPage } from '@/components/AgentMemoryPage'
+import { AgentModelPage } from '@/components/AgentModelPage'
 import { AgentSecretsPage } from '@/components/AgentSecretsPage'
 import { AgentSkillsPage } from '@/components/AgentSkillsPage'
+import { AgentJournalsPage } from '@/components/AgentJournalsPage'
 import { SkillsStorePage } from '@/components/SkillsStorePage'
 import { WorkspacesPage } from '@/components/WorkspacesPage'
 import { WorkspaceDetailPage } from '@/components/WorkspaceDetailPage'
@@ -36,6 +39,7 @@ import { PromptsPage } from '@/components/PromptsPage'
 import { SystemSettingsPage } from '@/components/SystemSettingsPage'
 import { NotificationPreferencesPage } from '@/components/NotificationPreferences'
 import { DigestPage } from '@/components/DigestPage'
+import { ConfirmationModal } from '@/components/ui/ConfirmationModal'
 import PWAReloadPrompt from '@/components/PWAReloadPrompt'
 import { useAgents } from '@/hooks/useAgents'
 import { useTasks } from '@/hooks/useTasks'
@@ -47,11 +51,25 @@ import type { Agent, Task, Session } from '@/types'
 
 function AppContent() {
   const queryClient = useQueryClient()
+  const location = useLocation()
+  const navigate = useNavigate()
   const { isAuthenticated, logout } = useAuth()
   const { data: agents = [] } = useAgents()
   const { data: tasks = [] } = useTasks()
   const { data: cost = null } = useCostDashboard()
   const { lastMessage } = useBoardSocket()
+
+  // Sync selected task with URL param
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const taskId = params.get('task')
+    if (taskId && tasks.length > 0) {
+      const task = tasks.find((t) => t.id === taskId)
+      if (task) {
+        setSelectedTask(task)
+      }
+    }
+  }, [location.search, tasks])
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -71,6 +89,28 @@ function AppContent() {
 
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
+
+  const handleCloseTaskModal = () => {
+    setSelectedTask(null)
+    const params = new URLSearchParams(location.search)
+    if (params.has('task')) {
+      params.delete('task')
+      const search = params.toString()
+      navigate(location.pathname + (search ? `?${search}` : ''), { replace: true })
+    }
+  }
+
+  const [confirmModal, setConfirmModal] = useState<{
+    open: boolean;
+    title: string;
+    description: string;
+    onConfirm: () => void | Promise<void>;
+  }>({
+    open: false,
+    title: '',
+    description: '',
+    onConfirm: () => {},
+  })
 
   // WebSocket real-time updates
   useEffect(() => {
@@ -187,19 +227,24 @@ function AppContent() {
   }
 
   const deleteTask = async (id: string) => {
-
-    if (!confirm('Delete task?')) return
-    const previousTasks = queryClient.getQueryData<Task[]>(['tasks'])
-    queryClient.setQueryData(['tasks'], (old: Task[] | undefined) =>
-      old?.filter((t) => t.id !== id) || []
-    )
-    try {
-      await deleteJSON(`/v1/tasks/${id}`)
-    } catch (err) {
-      queryClient.setQueryData(['tasks'], previousTasks)
-      handleAuthError(err)
-      console.error('Failed to delete task:', err)
-    }
+    setConfirmModal({
+      open: true,
+      title: 'Delete Task',
+      description: 'Are you sure you want to delete this task? This action cannot be undone.',
+      onConfirm: async () => {
+        const previousTasks = queryClient.getQueryData<Task[]>(['tasks'])
+        queryClient.setQueryData(['tasks'], (old: Task[] | undefined) =>
+          old?.filter((t) => t.id !== id) || []
+        )
+        try {
+          await deleteJSON(`/v1/tasks/${id}`)
+        } catch (err) {
+          queryClient.setQueryData(['tasks'], previousTasks)
+          handleAuthError(err)
+          console.error('Failed to delete task:', err)
+        }
+      }
+    })
   }
 
   // Global Auth Barrier
@@ -240,6 +285,8 @@ function AppContent() {
             }
           />
 
+          <Route path="/calendar" element={<CalendarPage />} />
+
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/chats" element={<ConversationsPage />} />
           <Route path="/keeper" element={<KeeperDashboard />} />
@@ -251,7 +298,10 @@ function AppContent() {
           <Route path="/agents/:id/channels" element={<AgentChannelsPage />} />
           <Route path="/agents/:id/logs" element={<AgentLogsPage />} />
           <Route path="/agents/:id/memory" element={<AgentMemoryPage />} />
+          <Route path="/agents/:id/model" element={<AgentModelPage />} />
+          <Route path="/agents/:id/journals" element={<AgentJournalsPage />} />
           <Route path="/agents/:id/secrets" element={<AgentSecretsPage />} />
+
           <Route path="/agents/:id/skills" element={<AgentSkillsPage />} />
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/workspaces/:id" element={<WorkspaceDetailPage />} />
@@ -277,7 +327,15 @@ function AppContent() {
         agents={agents}
         tasks={tasks}
         onUpdateSchedule={(data) => selectedTask && updateTaskSchedule(selectedTask.id, data)}
-        onClose={() => setSelectedTask(null)}
+        onClose={handleCloseTaskModal}
+      />
+      <ConfirmationModal
+        open={confirmModal.open}
+        title={confirmModal.title}
+        description={confirmModal.description}
+        variant="danger"
+        onConfirm={confirmModal.onConfirm}
+        onClose={() => setConfirmModal(prev => ({ ...prev, open: false }))}
       />
       <PWAReloadPrompt />
     </div>

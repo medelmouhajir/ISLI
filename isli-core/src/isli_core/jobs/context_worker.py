@@ -12,29 +12,26 @@ Features:
 """
 
 import asyncio
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from sqlalchemy import select
 
+from isli_core.compliance.pii_keeper_client import PIIKeeperClient
 from isli_core.db import async_session
 from isli_core.event_manager import EventManager
 from isli_core.memory.context_cache import ContextCache
-from isli_core.memory.keeper_client import KeeperClient, KeeperAuthError
+from isli_core.memory.keeper_client import KeeperAuthError, KeeperClient
 from isli_core.models import Agent, Session, Task
 from isli_core.redis_streams import (
     acknowledge,
-    add_to_stream,
     claim_pending,
-    ensure_stream_group,
     read_group,
     write_dlq,
 )
+from isli_core.routers.skills import SKILL_METADATA, _get_skill_hint
 from isli_core.routers.tasks import TaskOut
-
-from isli_core.compliance.pii_keeper_client import PIIKeeperClient
-from isli_core.dynamic_config import get_setting
 
 logger = structlog.get_logger()
 
@@ -185,7 +182,7 @@ class ContextWorker:
         else:
             logger.info("context_worker.cache_miss", type=type_, id=id_)
             try:
-                original_summary, scrubbed_summary, token_map = await self._call_keeper(
+                original_summary, scrubbed_summary, token_map, relevant_skills = await self._call_keeper(
                     agent_id,
                     task_description,
                     session_id,
@@ -200,6 +197,35 @@ class ContextWorker:
                 )
                 await acknowledge(STREAM_NAME, GROUP_NAME, message_id)
                 return
+
+            # Legacy path fallback: if Keeper didn't return relevant_skills, call standalone classifier
+            if not relevant_skills:
+                user_message = task_description
+                if not user_message and session_id:
+                    async with async_session() as db_session:
+                        sess = await db_session.get(Session, session_id)
+                        if sess and sess.messages:
+                            last_msg = sess.messages[-1]
+                            user_message = last_msg.get("content", "") if last_msg.get("role") == "user" else ""
+                if user_message:
+                    # Reuse available_skills built inside _call_keeper by querying agent again
+                    async with async_session() as db_session:
+                        agent = await db_session.get(Agent, agent_id)
+                        agent_skills = agent.skills or [] if agent else []
+                    avail = []
+                    for skill_name in agent_skills:
+                        meta = SKILL_METADATA.get(skill_name, {})
+                        avail.append({
+                            "name": skill_name,
+                            "hint": _get_skill_hint(skill_name, meta),
+                        })
+                    relevant_skills = await KeeperClient.classify_intent(
+                        user_message=user_message,
+                        available_skills=avail,
+                        agent_id=agent_id,
+                    )
+                    logger.info("context_worker.intent_classified_standalone", agent_id=agent_id, relevant_skills=relevant_skills)
+
             if scrubbed_summary:
                 cache_value = scrubbed_summary
                 if token_map:
@@ -220,7 +246,7 @@ class ContextWorker:
         if scrubbed_summary:
             try:
                 await self._on_success(
-                    type_, id_, original_summary, scrubbed_summary, token_map, payload, message_id
+                    type_, id_, original_summary, scrubbed_summary, token_map, payload, message_id, relevant_skills
                 )
                 await acknowledge(STREAM_NAME, GROUP_NAME, message_id)
             except Exception as exc:
@@ -261,18 +287,32 @@ class ContextWorker:
         task_description: str | None,
         session_id: str | None,
         memory_similarity_threshold: float,
-    ) -> tuple[str | None, str | None, dict[str, str]]:
+    ) -> tuple[str | None, str | None, dict[str, str], list[str]]:
         """Fetch context from Keeper.
-        Returns (original_summary, scrubbed_summary, token_map).
+        Returns (original_summary, scrubbed_summary, token_map, relevant_skills).
         May raise ``KeeperAuthError``."""
         # Load agent metadata for Keeper call
         async with async_session() as session:
             agent = await session.get(Agent, agent_id)
             if not agent:
                 logger.warning("context_worker.agent_not_found", agent_id=agent_id)
-                return None, None, {}
+                return None, None, {}, []
+
+            # Build compressed skill hints for intent classification
+            agent_skills = agent.skills or []
+            available_skills = []
+            for skill_name in agent_skills:
+                meta = SKILL_METADATA.get(skill_name, {})
+                available_skills.append({
+                    "name": skill_name,
+                    "hint": _get_skill_hint(skill_name, meta),
+                })
 
             agent_config = agent.config or {}
+            peer_ids = agent.known_agent_ids or []
+            if isinstance(peer_ids, str):
+                peer_ids = json.loads(peer_ids)
+
             if agent_config.get("pii_mesh_enabled", False):
                 # Unified context + PII path
                 sess = await session.get(Session, session_id) if session_id else None
@@ -289,12 +329,16 @@ class ContextWorker:
                         mode="full",
                         use_slm=agent_config.get("pii_use_slm", True),
                         memory_similarity_threshold=memory_similarity_threshold,
-                        agent_config={"persona": agent.persona or "", "known_agent_ids": agent_config.get("known_agent_ids")},
+                        agent_config={"persona": agent.persona or "", "known_agent_ids": peer_ids},
+                        available_skills=available_skills,
                     )
                     original_summary = prep_result.get("original_context_summary", "")
                     scrubbed_summary = prep_result.get("scrubbed_context_summary", "")
                     token_map = prep_result.get("token_map", {})
-                    return original_summary, scrubbed_summary, token_map
+                    relevant_skills = prep_result.get("relevant_skills", [])
+                    if not isinstance(relevant_skills, list):
+                        relevant_skills = []
+                    return original_summary, scrubbed_summary, token_map, relevant_skills
                 except Exception as exc:
                     logger.error("context_worker.pii_mesh_failed", error=str(exc), agent_id=agent_id)
                     # Degrade to legacy path
@@ -308,9 +352,9 @@ class ContextWorker:
                 agent_name=agent.name,
                 agent_description=agent.description,
                 memory_similarity_threshold=memory_similarity_threshold,
-                known_agent_ids=agent_config.get("known_agent_ids") if agent.config else None,
+                known_agent_ids=peer_ids,
             )
-            return summary, summary, {}
+            return summary, summary, {}, []
 
     async def _on_success(
         self,
@@ -321,6 +365,7 @@ class ContextWorker:
         token_map: dict[str, str],
         payload: dict[str, Any],
         message_id: str,
+        relevant_skills: list[str] | None = None,
     ) -> None:
         """Persist result to DB and emit WebSocket event."""
         async with async_session() as session:
@@ -334,7 +379,7 @@ class ContextWorker:
                 task.status = "inbox"
                 task.context_inject_attempts = 0
                 task.context_inject_failed_at = None
-                task.updated_at = datetime.now(timezone.utc)
+                task.updated_at = datetime.now(UTC)
 
                 # Model routing (task-level, no lock)
                 complexity_score = payload.get("complexity_score")
@@ -370,6 +415,7 @@ class ContextWorker:
                         },
                         "task": task_out,
                         "token_map": token_map,
+                        "relevant_skills": relevant_skills or [],
                     },
                 )
                 logger.info("context_worker.task_success", task_id=task.id)
@@ -381,10 +427,10 @@ class ContextWorker:
                     return
 
                 sess.context_summary = original_summary
-                sess.status = "ready"
+                sess.status = "agent_processing"
                 sess.context_inject_attempts = 0
                 sess.context_inject_failed_at = None
-                sess.updated_at = datetime.now(timezone.utc)
+                sess.updated_at = datetime.now(UTC)
 
                 # Complexity delta re-route trigger
                 new_score = payload.get("complexity_score")
@@ -420,6 +466,15 @@ class ContextWorker:
                 await session.commit()
 
                 await EventManager.emit(
+                    "session:updated",
+                    {
+                        "session_id": str(sess.id),
+                        "status": "agent_processing",
+                        "agent_id": str(sess.agent_id),
+                    },
+                )
+
+                await EventManager.emit(
                     "session:message",
                     {
                         "session_id": sess.id,
@@ -430,6 +485,7 @@ class ContextWorker:
                         "context_summary": scrubbed_summary,
                         "token_map": token_map,
                         "metadata": sess.session_metadata or {},
+                        "relevant_skills": relevant_skills or [],
                         "routed_model": {
                             "provider": sess.routed_model_provider,
                             "model_id": sess.routed_model_id,

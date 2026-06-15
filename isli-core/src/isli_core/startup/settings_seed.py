@@ -46,6 +46,17 @@ DEFAULT_SETTINGS: list[dict] = [
         "value": 120,
         "description": "Seconds to wait for a new agent container to become healthy.",
     },
+    {
+        "key": "local_permitted_models",
+        "scope": "system",
+        "value": {
+            "gen": ["qwen3:1.7b", "qwen3:4b", "mistral:7b", "qwen2.5-coder:1.5b"],
+            "embed": ["nomic-embed-text", "mxbai-embed-large"],
+            "stt": ["whisper-tiny", "whisper-base", "whisper-small", "whisper-medium"],
+            "tts": ["piper-en-us-lessac-medium", "piper-en-us-amy-medium"],
+        },
+        "description": "Permitted local models per slot for Keeper and Audio services.",
+    },
 ]
 
 

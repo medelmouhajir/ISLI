@@ -563,9 +563,30 @@ A JSON blob is accepted as a tool call only if it:
 
 This prevents ordinary JSON prose (e.g., a code example or data payload) from being misinterpreted as a tool call.
 
+### Tier 4 — Legacy `<tool_call>` Markup (`<tool_call><function=...>`)
+
+**Fallback for Ollama models (e.g., Kimi K2.6) that hallucinate their own tool-calling syntax.** When none of the above formats are found, the runner scans `message.content` for `<tool_call>` blocks:
+
+```xml
+<tool_call>
+<function=ui_components>
+<parameter=component_type>card</parameter>
+<parameter=action_id>demo_001</parameter>
+</function>
+</tool_call>
+```
+
+Two variants are supported:
+- **Attribute style:** `<function name="ui_components">` / `<parameter name="component_type">`
+- **Inline style:** `<function=ui_components>` / `<parameter=component_type>`
+
+Parameter values may span multiple lines. JSON values inside parameters are auto-parsed. The parser uses regex (not `xml.etree.ElementTree`) because the markup is not valid XML (`=` in tag names).
+
+Only tools registered in `self.tools` are extracted. Unrecognized tool names are silently skipped.
+
 ### Stripping & History Cleanup
 
-When either XML or JSON fallback is triggered, the runner:
+When any fallback (XML, JSON, or Legacy) is triggered, the runner:
 - Removes the markup from `message.content` before sending the final reply to the user
 - Injects synthetic `tool_calls` into the conversation history `msg_dict` so LiteLLM replay remains valid
 - Logs the extraction at `debug` level for observability
@@ -577,9 +598,10 @@ When either XML or JSON fallback is triggered, the runner:
 | GPT-4, Claude API, Gemini | `message.tool_calls[]` | Tier 1 (native) |
 | Qwen 2.5 via Ollama | `<function_calls>` XML | Tier 2 |
 | Qwen 2.5 via Ollama (variant) | Raw JSON blob in text | Tier 3 |
+| Kimi K2.6 via Ollama | `<tool_call>` markup | Tier 4 |
 | Llama 3.1 via Ollama | `message.tool_calls[]` | Tier 1 (native) |
 
-> **Note:** The XML fallback requires `xml.etree.ElementTree` (stdlib). The JSON fallback requires no extra dependencies. Both are backward-compatible — agents using Tier 1 models are unaffected.
+> **Note:** The XML fallback requires `xml.etree.ElementTree` (stdlib). The JSON and Legacy fallbacks require no extra dependencies. All are backward-compatible — agents using Tier 1 models are unaffected.
 
 ---
 
@@ -774,9 +796,43 @@ The `{context_timestamp}` is injected every turn to allow agents to detect stale
 
 ---
 
+### Task-Mode Execution Block (Added 2026-06-14)
+
+When an agent is executing a Kanban task (the `_execute_task` path), the SDK injects an additional `agent.task_execution_block` from `prompts.yaml` into the system prompt. Session/chat messages do **not** receive this block.
+
+**Purpose:** Prevent agents from returning greeting/status cards or marking tasks done without performing the requested work. The block instructs the model to:
+
+1. Treat the task title and description as a work order.
+2. Call the relevant skills/tools to execute the work.
+3. Write file deliverables via `file-write`, `shared_file_write`, `shared_promote_file_workspace`, or `promote_output` before completing.
+4. Use the final non-tool text as the task result.
+5. Never use `ui_components`, `send_message`, or `notify_user` as a substitute for doing the work.
+
+**SDK implementation:**
+
+```python
+def _assemble_system_prompt(
+    self,
+    context_summary: str,
+    session_info: dict | None = None,
+    relevant_skills: list[str] | None = None,
+    task_mode: bool = False,
+) -> str:
+    # ... base template rendered as before ...
+    if task_mode:
+        block = prompts.get("agent", {}).get("task_execution_block")
+        if block:
+            system_prompt += "\n\n" + block
+```
+
+- `_execute_task()` calls `_assemble_system_prompt(..., task_mode=True)`.
+- `_execute_session_message()` uses the default `task_mode=False`.
+
+> **Note:** The `task_execution_block` is mounted via `prompts.yaml`, but the SDK code that applies it is baked into the `isli-agent-runner` image. After editing the block, restart the agent-runner and recreate agent containers; after changing the injection logic, rebuild the agent-runner image.
+
 ### Prompt Configuration (`prompts.yaml`)
 
-The agent system prompt template and all 15 tool descriptions are loaded from `prompts.yaml` at runtime. The file is mounted as a volume on the `agent-runner` container, so you can tune prompts without rebuilding.
+The agent system prompt template and all 15 tool descriptions are loaded from `prompts.yaml` at runtime. The file is mounted as a volume on the `agent-runner` container, so you can tune prompts without rebuilding (the SDK must still be restarted/reloaded to clear its `lru_cache`).
 
 **Agent keys you can override:**
 
@@ -784,6 +840,7 @@ The agent system prompt template and all 15 tool descriptions are loaded from `p
 |-----|-------------|
 | `agent.system_prompt_template` | Full system prompt with `{name}`, `{description}`, `{persona_line}`, `{tools_list}`, `{context_summary}` |
 | `agent.tool_descriptions.*` | LiteLLM function `description` for each tool (e.g., `file_read`, `web_search`, `memory_save`) |
+| `agent.task_execution_block` | Extra rules injected only during Kanban task execution (see above) |
 
 ---
 
@@ -977,6 +1034,69 @@ async def send_message(agent_id: str, channel: str, channel_user_id: str, text: 
 
 But the LLM tool definition only exposes `channel`, `channel_user_id`, and `text`. The `AgentRunner._execute_tool()` inspects the function signature and injects `agent_id` and `core_client` before calling the function. This keeps tool definitions clean while the runner handles the plumbing.
 
+### Per-Turn Tool Filtering (Added 2026-06-11)
+
+To reduce token waste, the agent runner does **not** send the full tool definitions to the LLM on every turn. Instead, it filters the toolbox dynamically based on the Keeper's intent classification.
+
+**How it works:**
+1. Before each turn, Core asks the Keeper which skills are relevant to the user's message.
+2. The `AgentRunner` receives `relevant_skills` via WebSocket event payload.
+3. At the start of `_execute_task` / `_execute_session_message`, the runner resets `_active_tool_definitions` to the relevant subset.
+4. Only tools matching `relevant_skills` + tools marked `x_isli_always_active: true` are sent to the LLM.
+
+**Dynamic expansion:**
+If the agent calls `discover_skills`, the runner expands `_active_tool_definitions` to the **full** set for the **next** turn only. After that turn, filtering resets automatically. This gives agents on-demand access to their complete toolbox without permanently bloating the context window.
+
+**`x_isli_always_active` flag:**
+Tool definitions can include `"x_isli_always_active": true` to remain visible regardless of intent classification. Currently used for:
+- `get_current_datetime` — agents often need timestamps
+- `discover_skills` — agents must always be able to discover their toolbox
+
+**Always-visible tools are configurable** — any tool definition can opt in by setting the flag.
+
+### Tool Injection Strategy (Added 2026-06-13)
+
+Agents can override the default per-turn filtering behavior via a new `tool_injection_strategy` field in `Agent.config`:
+
+```json
+{
+  "tool_injection_strategy": "auto"
+}
+```
+
+| Strategy | Behavior |
+|----------|----------|
+| `auto` (default) | Filter by `relevant_skills`; fall back to the full set when Keeper returns empty/none. |
+| `all` | Skip Keeper filtering entirely; always send the full registered tool set. |
+| `strict` | Only send tools matching `relevant_skills`. If Keeper returns empty, only `x_isli_always_active` tools survive. |
+
+**Why three modes?**
+- **Coding agents** with many workspace/browser tools often need their full toolkit visible to plan multi-step operations.
+- **Chat-only agents** with 20+ skills benefit from strict filtering to reduce token waste and prevent the LLM from hallucinating irrelevant tool calls.
+- **Auto** preserves the existing behavior: filtered most of the time, with a safety fallback when classification fails.
+
+**Configuration:**
+- Set per-agent via Board UI (`Agent Detail → Model Strategy → Tool Injection Strategy` dropdown).
+- Validated by Core's `AgentUpdate` Pydantic model; invalid values default to `"auto"`.
+- Hot-reloads automatically: changing the setting triggers `agent:config_updated`, the runner re-syncs config, and the next turn uses the new strategy.
+
+**SDK Implementation:**
+The `AgentRunner._filter_tools_by_relevance()` method reads `self.config.config.get("tool_injection_strategy", "auto")` and branches:
+
+```python
+strategy = self.config.config.get("tool_injection_strategy", "auto")
+all_defs = getattr(self, "_all_tool_definitions", None) or self.tool_definitions
+
+if strategy == "all":
+    return all_defs
+if strategy == "auto" and not relevant_skills:
+    return all_defs
+# strict or auto with skills → apply filtering
+```
+
+- `structlog` emits `runner.tools_filtered` with `strategy`, `active_count`, and `total_count` for observability.
+- No database migration required — the setting lives in the existing `config` JSONB blob.
+
 ### Workspace File Tools
 
 Agents can read and write files in their isolated workspace via the `isli-agent-sdk` built-in tools:
@@ -998,7 +1118,7 @@ These tools (`file_read`, `file_write`, `file_list`, `file_delete`) are automati
 
 ### Shared Workspace Tools
 
-Agents that are members of a shared workspace can access it via additional SDK tools. These use `scope="shared"` and `scope_id={workspace_id}` under the hood:
+Agents that are members of a shared workspace can access it via additional SDK tools. Most use `scope="shared"` and `scope_id={workspace_id}` under the hood:
 
 | Tool | Description | Required Skill |
 |------|-------------|----------------|
@@ -1006,20 +1126,28 @@ Agents that are members of a shared workspace can access it via additional SDK t
 | `shared_file_write` | Write a file to a shared workspace | `shared-file-write` |
 | `shared_file_list` | List files in a shared workspace | `shared-file-list` |
 | `shared_file_delete` | Delete a file from a shared workspace | `shared-file-delete` |
-| `promote_output` | Copy/move a file from agent scope to shared workspace | `promote-output` |
+| `shared_file_move` | Move/rename a file within or between shared workspaces | `shared-file-move` |
+| `shared_workspace_info` | Return workspace metadata (name, members, quota, root path) | `shared-workspace-info` |
+| `shared_workspace_search` | Search file names and/or contents across a shared workspace | `shared-workspace-search` |
+| `shared_promote_file_workspace` | Copy a file from the agent's own workspace into a shared workspace | `shared-promote-file-workspace` |
+| `promote_output` | Copy/move a file from a task attachment into a shared workspace | `promote-output` |
 
 **Registration:**
 
 ```python
-runner.add_shared_workspace_tools()  # shared_file_read, shared_file_write, shared_file_list, shared_file_delete
+runner.add_shared_workspace_tools()  # all eight shared workspace tools
 ```
 
 **Typed exceptions:**
 - `WorkspaceNotFoundError` — workspace does not exist or agent is not a member.
-- `WorkspacePathError` — path traversal attempt or invalid path.
+- `WorkspacePathError` — path traversal attempt, invalid path, or access denied.
 - `WorkspaceQuotaError` — write would exceed the workspace's `quota_bytes`.
 
-**Promote output:** Agents can publish deliverables to a shared workspace by calling `promote_output(agent_id, workspace_id, source_path, target_path, delete_source=False)`. Core verifies the agent is a member before proxying to the workspace service.
+**Promote paths:**
+- **Agent workspace → shared workspace:** call `shared_promote_file_workspace(agent_id, workspace_id, source_path, target_path)`.
+- **Task attachment → shared workspace:** call `promote_output(agent_id, task_id, file_path, workspace_id)`. This is useful when a delegated Kanban task produces a deliverable that should become a permanent project asset.
+
+In both cases Core verifies the agent is a workspace member before proxying to the workspace service.
 
 ### Token Recovery and Revocation
 
@@ -1043,8 +1171,8 @@ Agents now support **live response streaming** across all channels (Web, Telegra
 |------|-----|----------------|-----|
 | **Silent** | `silent` | None | Final text delivered at once (legacy behavior) |
 | **Live Text** | `text` | `turn_start`, `token_delta`, `draft_complete`, `turn_end`, `cost_report` | Text appears word-by-word with a blinking cursor |
-| **Live + Tools** | `tools` | All Mode A events + `tool_call` (started/done with duration) | Skill cards appear above the text stream |
-| **Process Trace** | `trace` | All Mode B events + `phase_start`, `phase_end` for context_inject/checkpoint | Collapsible timeline pane shows full execution trace |
+| **Live + Tools** | `tools` | `text` events + `tool_call` + `phase_start`, `phase_end` (llm_inference) | Skill cards appear above the text stream; "THINKING..." pulses per turn |
+| **Process Trace** | `trace` | All `tools` events + `phase_start`, `phase_end` for context_inject/checkpoint/llm_inference | Collapsible timeline pane shows full execution trace |
 | **Debug** | `debug` | All Mode C events + `debug_prompt`, `debug_response` | Same as trace + raw prompt/response previews (admin-only) |
 
 **Default:** `silent` — existing agents behave exactly as before until explicitly reconfigured.
@@ -1092,16 +1220,16 @@ The `AgentRunner` instruments both `_execute_session_message()` and `_execute_ta
 
 | Event | When | Payload |
 |-------|------|---------|
-| `phase_start` | Before context injection or checkpoint recovery | `{phase: "context_inject"}` |
-| `phase_end` | After context injection/checkpoint completes | `{phase: "context_inject", duration_ms: 1200}` |
-| `turn_start` | Before first LLM call | `{}` |
+| `phase_start` | Before context injection, checkpoint recovery, **or LLM inference** | `{phase: "context_inject"}` / `{phase: "llm_inference", label: "THINKING...", turn: 1}` |
+| `phase_end` | After context injection/checkpoint/**LLM inference** completes | `{phase: "context_inject", duration_ms: 1200}` / `{phase: "llm_inference", turn: 1}` |
+| `turn_start` | Before each LLM turn | `{turn_number: 1, model: "...", estimated_tokens: 512}` |
 | `tool_call` | Before/after each tool execution | `{tool: "file_read", status: "started"}` / `{status: "done", duration_ms: 45}` |
-| `token_delta` | After each streamed text chunk | `{text: " chunk"}` |
-| `draft_complete` | After full response assembled | `{text: "full response..."}` |
-| `turn_end` | After reply sent to Core | `{}` |
+| `token_delta` | After each streamed text chunk | `{delta: " chunk"}` |
+| `draft_complete` | After full response assembled | `{}` |
+| `turn_end` | After a ReAct turn completes | `{turn_number: 1}` |
 | `cost_report` | After LiteLLM usage extracted | `{input_tokens: 124, output_tokens: 89, model: "claude-sonnet-4-6"}` |
-| `debug_prompt` | After system prompt assembled | `{prompt: "..."}` |
-| `debug_response` | After LLM response received | `{response: "..."}` |
+| `debug_prompt` | Before LLM call (debug mode only) | `{prompt_preview: "...", token_count: 512}` |
+| `debug_response` | After LLM response (debug mode only) | `{response_preview: "...", token_count: 256}` |
 
 **Important:** `debug_prompt` and `debug_response` are **never broadcast over WebSocket**. They are stored in a Redis list (`session:{id}:debug_trace`) and exposed via an admin-only REST endpoint `GET /v1/sessions/{id}/debug-trace`. This prevents prompt injection data exposure through the public event bus.
 
@@ -1112,19 +1240,22 @@ Every `_emit_stream_event()` call is wrapped in a broad `try/except` that logs a
 ### Architecture
 
 ```
-Agent ReAct loop
+Agent ReAct loop (per turn)
   ├─ _emit_stream_event("phase_start", {phase: "context_inject"})
   ├─ Keeper context injection
   ├─ _emit_stream_event("phase_end", {phase: "context_inject", duration_ms: ...})
-  ├─ _emit_stream_event("turn_start")
-  ├─ LLM call
+  ├─ _emit_stream_event("turn_start", {turn_number: N, ...})
+  ├─ _emit_stream_event("phase_start", {phase: "llm_inference", label: "THINKING...", turn: N})
+  ├─ LLM call (blocking acompletion)
+  ├─ _emit_stream_event("phase_end", {phase: "llm_inference", turn: N})
   │   ├─ _emit_stream_event("tool_call", {tool: "...", status: "started"})
   │   ├─ Skill execution
   │   └─ _emit_stream_event("tool_call", {tool: "...", status: "done", duration_ms: ...})
   ├─ _stream_text() → chunks text per config, emits "token_delta" + "draft_complete"
   ├─ _emit_stream_event("cost_report", {...})
-  ├─ _emit_stream_event("turn_end")
+  ├─ _emit_stream_event("turn_end", {turn_number: N})
   └─ reply_to_session(text, ...)
+     └─ finally: _notify_core_session_ready() → POST /v1/sessions/{id}/status → "ready"
 
 Agent WS loop
   ├─ outgoing_queue accumulates events
@@ -1141,6 +1272,34 @@ Board UI
   ├─ ToolCallBar.tsx / ToolCallCard.tsx — spinner→checkmark transition
   └─ ProcessTracePane.tsx — collapsible timeline
 ```
+
+### Session Status Lifecycle (2026-06-12)
+
+The session status field drives the Board UI's loading indicators and streaming state. The lifecycle is:
+
+```
+User sends message
+    ↓
+sess.status = "pending_context"           → UI: INJECTING_CONTEXT...
+    ↓
+ContextWorker finishes injection
+    ↓
+sess.status = "agent_processing"        → UI: PROCESSING...
+    ↓
+session:message event → Agent ReAct loop starts
+    ↓
+phase_start {phase: "llm_inference"}      → UI: THINKING...
+    ↓
+Agent finishes → reply_to_session()
+    ↓
+Core reply endpoint sets status = "ready" → UI clears streaming state
+```
+
+**`agent_processing`** (added 2026-06-12) is an intermediate status set by `ContextWorker` immediately after context injection succeeds. It prevents the "blank gap" between "INJECTING_CONTEXT..." and the agent's first `phase_start` heartbeat (which can be 2–5 seconds on cold Ollama starts). The Board UI maps `agent_processing` → `PROCESSING...`, then quickly overrides it to `THINKING...` when the `llm_inference` heartbeat arrives.
+
+**Explicit `ready` reset:** The `AgentRunner` wraps the entire session execution path in a `try/finally` that calls `_notify_core_session_ready(session_id)`. This POSTs to Core's new `POST /v1/sessions/{id}/status` endpoint to flip the status back to `ready` **even if the agent crashes, times out, or hits max turns**. Without this, sessions could get stuck in `agent_processing` forever.
+
+**DB safety:** `Session.status` is a plain `String(32)` column — no PostgreSQL enum or CHECK constraint. Adding `agent_processing` requires zero migrations.
 
 ### Board UI Integration
 

@@ -22,6 +22,13 @@ class GroundingVerifier:
 
     @staticmethod
     def verify(skill_name: str, raw_response: dict[str, Any]) -> VerificationResult:
+        # 0. Defensive guard: skill response must be a JSON object
+        if not isinstance(raw_response, dict):
+            return VerificationResult(
+                is_valid=False,
+                reason=f"Skill response must be a JSON object, got {type(raw_response).__name__}",
+            )
+
         # 1. Check for hallucinated success / contradiction
         status = raw_response.get("status")
         error = raw_response.get("error")

@@ -56,4 +56,9 @@ async def get_blob(
     elif data.startswith(b"RIFF") and b"WAVE" in data[:12]:
         content_type = "audio/wav"
 
-    return Response(content=data, media_type=content_type)
+    headers = {}
+    if "agent" in blob_key:
+        # Agent images are considered immutable for a long time as they are referenced by UUID
+        headers["Cache-Control"] = "public, max-age=31536000, immutable"
+
+    return Response(content=data, media_type=content_type, headers=headers)

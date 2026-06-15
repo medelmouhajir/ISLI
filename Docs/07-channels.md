@@ -99,11 +99,14 @@ Platform (e.g., Telegram)
                     }
               ├─ Core: SessionContextInjectorWorker polls sessions with status="pending_context"
               ├─ Core: POST /context/inject to Keeper (with session_id)
-              └─ Core: Update session status="ready", context_summary set
+              └─ Core: Update session status="agent_processing", context_summary set
+                    ├─→ Core: emit "session:updated" (status: agent_processing) → Board UI
                     └─→ Core: emit "session:message" via Redis → WebSocket
                           └─→ Agent Runner (kimi-02) receives event
+                                ├─→ Agent emits phase_start {phase: "llm_inference"} → Board UI: THINKING...
                                 └─→ Agent LLM generates reply
                                       └─→ Core: POST /v1/sessions/{id}/reply
+                                            └─→ Core: status="ready", emit "session:updated" → Board UI clears
                                             └─→ Gateway: sendMessage to user
 ```
 

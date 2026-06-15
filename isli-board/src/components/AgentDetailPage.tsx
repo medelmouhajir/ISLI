@@ -1,14 +1,13 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { useAgents, useUpdateAgent, useDeleteAgent } from '@/hooks/useAgents'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
-import { Select } from '@/components/ui/Select'
 import { Textarea } from '@/components/ui/Textarea'
 import { Label } from '@/components/ui/Label'
 import { ConfirmationModal } from '@/components/ui/ConfirmationModal'
-import { getJSON, postJSON, postFormData } from '@/lib/api'
+import { postJSON, postFormData } from '@/lib/api'
 import {
   Bot,
   ChevronLeft,
@@ -18,8 +17,7 @@ import {
   ShieldAlert,
   Terminal,
   Brain,
-  Eye,
-  EyeOff,
+  BookOpen,
   Play,
   Square,
   RotateCcw,
@@ -27,39 +25,24 @@ import {
   Hammer,
   Users,
   Radio,
-  X,
   Camera,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import type { Agent, ProviderSettings } from '@/types'
+import type { Agent } from '@/types'
 
-function buildForm(agent: Agent | null): Record<string, unknown> {
+function buildForm(agent: Agent | null, allAgents: Agent[]): Record<string, unknown> {
   if (!agent) return {}
   const config = agent.config ?? {}
+  const validPeerIds = new Set(allAgents.filter(a => !a.deleted_at).map(a => a.id))
+  const known_agent_ids: string[] = (agent.known_agent_ids || []).filter(id => validPeerIds.has(id))
   return {
     name: agent.name,
     description: agent.description ?? '',
     persona: agent.persona ?? '',
-    model_provider: agent.model_provider ?? '',
-    model_id: agent.model_id ?? '',
-    token_budget: agent.token_budget ?? '',
-    turn_token_cap: agent.turn_token_cap ?? '',
-    max_retries: agent.max_retries,
-    fallback_agent_id: agent.fallback_agent_id ?? '',
-    known_agent_ids: [...agent.known_agent_ids],
+    known_agent_ids,
     channels: [...agent.channels],
     config: JSON.stringify(config, null, 2),
-    api_key: '',
-    has_api_key: agent.has_api_key,
-    api_key_mask: agent.api_key_mask,
-    model_routing_enabled: agent.model_routing_enabled || false,
-    secondary_models: agent.secondary_models || [],
-    streaming_mode: agent.config?.streaming_mode || 'silent',
-    stream_chunk_size: agent.config?.stream_chunk_size ?? 5,
-    stream_delay_ms: agent.config?.stream_delay_ms ?? 20,
-    pii_mesh_enabled: agent.config?.pii_mesh_enabled || false,
-    pii_use_slm: agent.config?.pii_use_slm || false,
   }
 }
 
@@ -70,12 +53,6 @@ export function AgentDetailPage() {
   const updateAgent = useUpdateAgent()
   const deleteAgent = useDeleteAgent()
   const queryClient = useQueryClient()
-
-  const { data: providers = [] } = useQuery({
-    queryKey: ['providers'],
-    queryFn: () => getJSON<ProviderSettings[]>('/v1/settings/providers'),
-    staleTime: 30000,
-  })
 
   const agent = useMemo(() => agents.find((a) => a.id === id), [agents, id])
   const [uploadingPicture, setUploadingPicture] = useState(false)
@@ -189,9 +166,7 @@ export function AgentDetailPage() {
   const [form, setForm] = useState<Record<string, unknown>>({})
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [savingSection, setSavingSection] = useState<string | null>(null)
-  const [showApiKey, setShowApiKey] = useState(false)
   const [restarting, setRestarting] = useState(false)
-  const [addingSecondaryModel, setAddingSecondaryModel] = useState(false)
   const [confirmModal, setConfirmModal] = useState<{
     open: boolean;
     title: string;
@@ -206,20 +181,13 @@ export function AgentDetailPage() {
     onConfirm: () => {},
     variant: 'primary',
   })
-  const [newSecondaryModel, setNewSecondaryModel] = useState({
-    provider: '',
-    model_id: '',
-    label: '',
-    description: '',
-    cost_tier: 'standard',
-  })
 
   useEffect(() => {
     if (agent) {
-      setForm(buildForm(agent))
+      setForm(buildForm(agent, agents))
       setJsonError(null)
     }
-  }, [agent])
+  }, [agent, agents])
 
   const setField = useCallback((key: string, value: unknown) => {
     setForm((prev: Record<string, unknown>) => ({ ...prev, [key]: value }))
@@ -232,27 +200,6 @@ export function AgentDetailPage() {
         ? current.filter((id) => id !== peerId)
         : [...current, peerId]
       return { ...prev, known_agent_ids: next }
-    })
-  }, [])
-
-  const addSecondaryModel = useCallback(() => {
-    if (!newSecondaryModel.provider || !newSecondaryModel.model_id) return
-    setForm((prev: Record<string, unknown>) => {
-      const current = (prev.secondary_models as Agent['secondary_models']) || []
-      return {
-        ...prev,
-        secondary_models: [...current, { ...newSecondaryModel }],
-      }
-    })
-    setNewSecondaryModel({ provider: '', model_id: '', label: '', description: '', cost_tier: 'standard' })
-    setAddingSecondaryModel(false)
-  }, [newSecondaryModel])
-
-  const removeSecondaryModel = useCallback((index: number) => {
-    setForm((prev: Record<string, unknown>) => {
-      const current = [...((prev.secondary_models as Agent['secondary_models']) || [])]
-      current.splice(index, 1)
-      return { ...prev, secondary_models: current }
     })
   }, [])
 
@@ -273,25 +220,6 @@ export function AgentDetailPage() {
       form.name !== agent.name ||
       (form.description || '') !== (agent.description || '') ||
       (form.persona || '') !== (agent.persona || '')
-    )
-  }, [form, agent])
-
-  const modelDirty = useMemo(() => {
-    if (!agent) return false
-    const agentConfig = agent.config || {}
-    return (
-      (form.model_provider || '') !== (agent.model_provider || '') ||
-      (form.model_id || '') !== (agent.model_id || '') ||
-      (form.fallback_agent_id || '') !== (agent.fallback_agent_id || '') ||
-      (form.token_budget || '') !== (agent.token_budget || '') ||
-      (form.turn_token_cap || '') !== (agent.turn_token_cap || '') ||
-      Number(form.max_retries ?? 3) !== Number(agent.max_retries ?? 3) ||
-      String(form.api_key || '').trim() !== '' ||
-      Boolean(form.model_routing_enabled) !== Boolean(agent.model_routing_enabled) ||
-      JSON.stringify(form.secondary_models || []) !== JSON.stringify(agent.secondary_models || []) ||
-      String(form.streaming_mode || 'silent') !== String(agentConfig.streaming_mode || 'silent') ||
-      Boolean(form.pii_mesh_enabled) !== Boolean(agentConfig.pii_mesh_enabled) ||
-      Boolean(form.pii_use_slm) !== Boolean(agentConfig.pii_use_slm)
     )
   }, [form, agent])
 
@@ -336,43 +264,6 @@ export function AgentDetailPage() {
     )
   }
 
-  const saveModel = () => {
-    if (!agent) return
-    const payload: Partial<Agent> = {}
-    const model_provider = String(form.model_provider || '').trim()
-    if (model_provider) payload.model_provider = model_provider
-    const model_id = String(form.model_id || '').trim()
-    if (model_id) payload.model_id = model_id
-    const fallback = String(form.fallback_agent_id || '').trim()
-    payload.fallback_agent_id = fallback || null
-    const tokenBudget = Number(form.token_budget)
-    if (!Number.isNaN(tokenBudget) && tokenBudget > 0) payload.token_budget = tokenBudget
-    else payload.token_budget = null
-    const turnTokenCap = Number(form.turn_token_cap)
-    if (!Number.isNaN(turnTokenCap) && turnTokenCap > 0) payload.turn_token_cap = turnTokenCap
-    else payload.turn_token_cap = null
-    const maxRetries = Number(form.max_retries)
-    if (!Number.isNaN(maxRetries)) payload.max_retries = maxRetries
-    const apiKey = String(form.api_key || '').trim()
-    if (apiKey) payload.api_key = apiKey
-
-    payload.model_routing_enabled = Boolean(form.model_routing_enabled)
-    payload.secondary_models = Array.isArray(form.secondary_models) ? form.secondary_models : []
-
-    // Include streaming_mode and PII mesh in config blob
-    const config = JSON.parse(String(form.config || '{}'))
-    config.streaming_mode = String(form.streaming_mode || 'silent')
-    config.pii_mesh_enabled = Boolean(form.pii_mesh_enabled)
-    config.pii_use_slm = Boolean(form.pii_use_slm)
-    payload.config = config
-
-    setSavingSection('model')
-    updateAgent.mutate(
-      { id: agent.id, payload },
-      { onSettled: () => setSavingSection(null) }
-    )
-  }
-
   const saveAdvanced = () => {
     if (!agent) return
     try {
@@ -402,8 +293,10 @@ export function AgentDetailPage() {
 
   const savePeers = () => {
     if (!agent) return
+    const validPeerIds = new Set(agents.filter(a => !a.deleted_at).map(a => a.id))
     const payload: Partial<Agent> = {
-      known_agent_ids: Array.isArray(form.known_agent_ids) ? form.known_agent_ids : [],
+      known_agent_ids: (Array.isArray(form.known_agent_ids) ? form.known_agent_ids : [])
+        .filter((id: string) => validPeerIds.has(id)),
     }
     setSavingSection('peers')
     updateAgent.mutate(
@@ -417,24 +310,6 @@ export function AgentDetailPage() {
     setForm((prev) => ({
       ...prev,
       known_agent_ids: [...(agent.known_agent_ids || [])],
-    }))
-  }
-
-  const resetModel = () => {
-    if (!agent) return
-    setForm((prev) => ({
-      ...prev,
-      model_provider: agent.model_provider ?? '',
-      model_id: agent.model_id ?? '',
-      fallback_agent_id: agent.fallback_agent_id ?? '',
-      token_budget: agent.token_budget ?? '',
-      turn_token_cap: agent.turn_token_cap ?? '',
-      max_retries: agent.max_retries,
-      api_key: '',
-      model_routing_enabled: agent.model_routing_enabled || false,
-      secondary_models: agent.secondary_models || [],
-      pii_mesh_enabled: agent.config?.pii_mesh_enabled || false,
-      pii_use_slm: agent.config?.pii_use_slm || false,
     }))
   }
 
@@ -453,24 +328,6 @@ export function AgentDetailPage() {
       onSuccess: () => {
         navigate('/agents')
       },
-    })
-  }
-
-  const handleClearApiKey = () => {
-    if (!agent) return
-    setConfirmModal({
-      open: true,
-      title: 'Clear API Key Override',
-      description: 'Are you sure you want to clear the custom API key? This node will revert to using global provider credentials.',
-      onConfirm: async () => {
-        setField('api_key', '')
-        updateAgent.mutate(
-          { id: agent.id, payload: { api_key: null } },
-          { onSettled: () => queryClient.invalidateQueries({ queryKey: ['agents'] }) }
-        )
-      },
-      variant: 'warning',
-      confirmText: 'Clear Key',
     })
   }
 
@@ -634,6 +491,17 @@ export function AgentDetailPage() {
               </button>
 
               <button
+                onClick={() => navigate(`/agents/${id}/journals`)}
+                className="bg-bg-base hover:bg-accent-cyan/5 p-6 flex flex-col gap-3 group transition-all"
+              >
+                <BookOpen className="w-5 h-5 text-text-muted group-hover:text-accent-cyan" />
+                <div className="flex flex-col text-left">
+                  <span className="text-[10px] text-text-muted tracking-widest font-bold">EPISODIC</span>
+                  <span className="text-sm font-bold text-text-primary group-hover:text-accent-cyan">JOURNALS</span>
+                </div>
+              </button>
+
+              <button
                 onClick={() => navigate(`/agents/${id}/secrets`)}
                 className="bg-bg-base hover:bg-accent-cyan/5 p-6 flex flex-col gap-3 group transition-all"
               >
@@ -652,6 +520,17 @@ export function AgentDetailPage() {
                 <div className="flex flex-col text-left">
                   <span className="text-[10px] text-text-muted tracking-widest font-bold">CAPABILITIES</span>
                   <span className="text-sm font-bold text-text-primary group-hover:text-accent-cyan">SKILLS</span>
+                </div>
+              </button>
+
+              <button
+                onClick={() => navigate(`/agents/${id}/model`)}
+                className="bg-bg-base hover:bg-accent-cyan/5 p-6 flex flex-col gap-3 group transition-all"
+              >
+                <Zap className="w-5 h-5 text-text-muted group-hover:text-accent-cyan" />
+                <div className="flex flex-col text-left">
+                  <span className="text-[10px] text-text-muted tracking-widest font-bold">ENGINE</span>
+                  <span className="text-sm font-bold text-text-primary group-hover:text-accent-cyan">MODEL_STRATEGY</span>
                 </div>
               </button>
             </div>
@@ -776,346 +655,8 @@ export function AgentDetailPage() {
               </div>
             </div>
 
-            {/* Right Column: Model, Skills, Advanced, Danger */}
+            {/* Right Column: Advanced, Danger */}
             <div className="space-y-12">
-              {/* Model Card */}
-              <div className="space-y-6">
-                <div className="space-y-1">
-                  <h2 className="text-sm font-bold tracking-[0.2em] text-text-secondary uppercase flex items-center gap-3">
-                    <Zap className="w-4 h-4" />
-                    02 // MODEL_STRATEGY
-                  </h2>
-                  <div className="h-px bg-border-dim w-full" />
-                </div>
-
-                <div className="p-8 border border-border-bright bg-bg-surface space-y-6">
-                  <div className="space-y-2">
-                    <Label className="text-[10px] tracking-widest text-text-muted uppercase">Primary Provider</Label>
-                    <Select
-                      value={String(form.model_provider || '')}
-                      onChange={(e) => {
-                        setField('model_provider', e.target.value)
-                        setField('model_id', '')
-                      }}
-                      className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12"
-                    >
-                      <option value="">SELECT_PROVIDER</option>
-                      {providers
-                        .filter((p) => p.enabled)
-                        .map((p) => (
-                          <option key={p.provider} value={p.provider}>{p.provider.toUpperCase()}</option>
-                        ))}
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label className="text-[10px] tracking-widest text-text-muted uppercase">Reasoning Engine</Label>
-                    <Select
-                      value={String(form.model_id || '')}
-                      onChange={(e) => setField('model_id', e.target.value)}
-                      disabled={!form.model_provider}
-                      className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12 disabled:opacity-20"
-                    >
-                      <option value="">{form.model_provider ? 'SELECT_MODEL' : 'AWAITING_PROVIDER'}</option>
-                      {providers
-                        .find((p) => p.provider === form.model_provider)
-                        ?.models.filter((m) => m.enabled)
-                        .map((m) => (
-                          <option key={m.model_id} value={m.model_id}>{m.name || m.model_id}</option>
-                        ))}
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label className="text-[10px] tracking-widest text-text-muted uppercase">Streaming Interface</Label>
-                    <Select
-                      value={String(form.streaming_mode || 'silent')}
-                      onChange={(e) => {
-                        setField('streaming_mode', e.target.value)
-                        const cfg = { ...(agent?.config || {}) }
-                        cfg.streaming_mode = e.target.value
-                        setField('config', JSON.stringify(cfg, null, 2))
-                      }}
-                      className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12"
-                    >
-                      <option value="silent">BATCH_MODE (SILENT)</option>
-                      <option value="text">LIVE_TEXT (REVEAL)</option>
-                      <option value="tools">LIVE_TOOLS (CARDS)</option>
-                      <option value="trace">PROCESS_TRACE (FULL)</option>
-                      <option value="debug">DEBUG_MODE (RAW)</option>
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label className="text-[10px] tracking-widest text-text-muted uppercase flex justify-between">
-                      API Key Override
-                      {Boolean(form.has_api_key) && (
-                        <button
-                          type="button"
-                          onClick={handleClearApiKey}
-                          className="text-[9px] text-accent-red hover:text-accent-red/80 uppercase tracking-widest"
-                        >
-                          [ CLEAR ]
-                        </button>
-                      )}
-                    </Label>
-                    <div className="relative">
-                      <Input
-                        type={showApiKey ? 'text' : 'password'}
-                        value={String(form.api_key || '')}
-                        onChange={(e) => setField('api_key', e.target.value)}
-                        placeholder={form.has_api_key ? 'REPLACE_EXISTING_KEY' : 'OPTIONAL_OVERRIDE'}
-                        className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12 pr-12"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowApiKey((v) => !v)}
-                        className="absolute right-4 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
-                      >
-                        {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                    {Boolean(form.has_api_key) && (
-                      <span className="text-[9px] text-text-muted font-mono tabular-nums tracking-widest">
-                        CURRENT_MASK: {String(form.api_key_mask || '')}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label className="text-[10px] tracking-widest text-text-muted uppercase">Lifetime Limit</Label>
-                      <Input
-                        type="number"
-                        value={String(form.token_budget ?? '')}
-                        onChange={(e) => setField('token_budget', e.target.value === '' ? '' : Number(e.target.value))}
-                        placeholder="UNLIMITED"
-                        className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-[10px] tracking-widest text-text-muted uppercase">Per-Turn Cap</Label>
-                      <Input
-                        type="number"
-                        value={String(form.turn_token_cap ?? '')}
-                        onChange={(e) => setField('turn_token_cap', e.target.value === '' ? '' : Number(e.target.value))}
-                        placeholder="e.g. 4000"
-                        className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label className="text-[10px] tracking-widest text-text-muted uppercase">Retry Limit</Label>
-                      <Input
-                        type="number"
-                        value={String(form.max_retries ?? 3)}
-                        onChange={(e) => setField('max_retries', Number(e.target.value))}
-                        className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Model Routing */}
-                  <div className="pt-6 border-t border-border-dim space-y-4">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-[10px] tracking-widest text-text-muted uppercase flex items-center gap-2">
-                        <Brain className="w-3.5 h-3.5 text-accent-cyan" />
-                        Model Routing
-                      </Label>
-                      <button
-                        type="button"
-                        onClick={() => setField('model_routing_enabled', !form.model_routing_enabled)}
-                        className={cn(
-                          "relative inline-flex h-5 w-9 items-center rounded-none transition-colors border",
-                          form.model_routing_enabled ? "border-accent-cyan bg-accent-cyan/10" : "border-border-bright bg-bg-elevated"
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            "inline-block h-3 w-3 transform rounded-none transition-transform",
-                            form.model_routing_enabled ? "translate-x-5 bg-accent-cyan" : "translate-x-1 bg-text-muted"
-                          )}
-                        />
-                      </button>
-                    </div>
-                    <p className="text-[10px] text-text-secondary leading-relaxed uppercase tracking-tight">
-                      When enabled, the Keeper local model analyzes each task and selects the optimal engine from the registry below.
-                    </p>
-
-                    {Boolean(form.model_routing_enabled) && (
-                      <div className="space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
-                        {((form.secondary_models || []) as Agent['secondary_models']).map((m, i) => (
-                          <div
-                            key={i}
-                            className="flex items-center justify-between bg-bg-surface border border-border-dim p-4"
-                          >
-                            <div className="flex flex-col gap-1">
-                              <div className="flex items-center gap-3">
-                                <span className="text-[10px] font-bold text-text-primary tabular-nums">
-                                  {m.provider.toUpperCase()} // {m.model_id.toUpperCase()}
-                                </span>
-                                <span className={cn(
-                                  "text-[8px] font-bold px-1.5 py-0.5 border uppercase tracking-widest",
-                                  m.cost_tier === 'local' ? "border-accent-green/30 text-accent-green" :
-                                  m.cost_tier === 'premium' ? "border-accent-violet/30 text-accent-violet" : "border-border-bright text-text-muted"
-                                )}>
-                                  {m.cost_tier}
-                                </span>
-                              </div>
-                              {m.label && <span className="text-[9px] text-text-muted uppercase">{m.label}</span>}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => removeSecondaryModel(i)}
-                              className="text-text-muted hover:text-accent-red transition-colors"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        ))}
-
-                        {addingSecondaryModel ? (
-                          <div className="border border-border-bright bg-bg-surface p-6 space-y-4">
-                            <div className="grid grid-cols-2 gap-4">
-                              <div className="space-y-1.5">
-                                <Label className="text-[10px] tracking-widest text-text-muted uppercase">Provider</Label>
-                                <Select
-                                  value={newSecondaryModel.provider}
-                                  onChange={(e) => setNewSecondaryModel((prev) => ({ ...prev, provider: e.target.value, model_id: '' }))}
-                                  className="bg-bg-surface border-border-bright text-[11px] h-10 rounded-none"
-                                >
-                                  <option value="">SELECT</option>
-                                  {providers.filter(p => p.enabled).map(p => (
-                                    <option key={p.provider} value={p.provider}>{p.provider.toUpperCase()}</option>
-                                  ))}
-                                </Select>
-                              </div>
-                              <div className="space-y-1.5">
-                                <Label className="text-[10px] tracking-widest text-text-muted uppercase">Model</Label>
-                                <Select
-                                  value={newSecondaryModel.model_id}
-                                  onChange={(e) => setNewSecondaryModel((prev) => ({ ...prev, model_id: e.target.value }))}
-                                  disabled={!newSecondaryModel.provider}
-                                  className="bg-bg-surface border-border-bright text-[11px] h-10 rounded-none disabled:opacity-20"
-                                >
-                                  <option value="">SELECT</option>
-                                  {providers.find(p => p.provider === newSecondaryModel.provider)?.models.filter(m => m.enabled).map(m => (
-                                    <option key={m.model_id} value={m.model_id}>{m.model_id.toUpperCase()}</option>
-                                  ))}
-                                </Select>
-                              </div>
-                            </div>
-                            <div className="flex justify-end gap-3 pt-2">
-                               <button
-                                onClick={() => setAddingSecondaryModel(false)}
-                                className="text-[10px] text-text-muted hover:text-text-primary uppercase tracking-widest"
-                               >
-                                CANCEL
-                               </button>
-                               <button
-                                onClick={addSecondaryModel}
-                                disabled={!newSecondaryModel.provider || !newSecondaryModel.model_id}
-                                className="text-[10px] text-accent-cyan hover:text-text-primary uppercase tracking-widest font-bold"
-                               >
-                                REGISTER_NODE
-                               </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => setAddingSecondaryModel(true)}
-                            className="w-full py-3 border border-dashed border-border-bright text-[10px] text-text-muted hover:text-accent-cyan hover:border-accent-cyan transition-all uppercase tracking-widest"
-                          >
-                            + ADD_SECONDARY_NODE
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* PII Mesh */}
-                  <div className="pt-6 border-t border-border-dim space-y-4">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-[10px] tracking-widest text-text-muted uppercase flex items-center gap-2">
-                        <ShieldAlert className="w-3.5 h-3.5 text-accent-amber" />
-                        PII Mesh
-                      </Label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const enabled = !form.pii_mesh_enabled
-                          setField('pii_mesh_enabled', enabled)
-                          if (!enabled) setField('pii_use_slm', false)
-                        }}
-                        className={cn(
-                          "relative inline-flex h-5 w-9 items-center rounded-none transition-colors border",
-                          form.pii_mesh_enabled ? "border-accent-amber bg-accent-amber/10" : "border-border-bright bg-bg-elevated"
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            "inline-block h-3 w-3 transform rounded-none transition-transform",
-                            form.pii_mesh_enabled ? "translate-x-5 bg-accent-amber" : "translate-x-1 bg-text-muted"
-                          )}
-                        />
-                      </button>
-                    </div>
-                    <p className="text-[10px] text-text-secondary leading-relaxed uppercase tracking-tight">
-                      When enabled, the Keeper local model anonymizes PII before sending messages to the cloud LLM. Re-hydration happens locally in the agent runner.
-                    </p>
-
-                    {Boolean(form.pii_mesh_enabled) && (
-                      <div className="flex items-center justify-between animate-in fade-in slide-in-from-top-2 duration-300">
-                        <Label className="text-[10px] tracking-widest text-text-muted uppercase flex items-center gap-2">
-                          <Brain className="w-3 h-3 text-accent-cyan" />
-                          Use Keeper SLM for PII detection
-                        </Label>
-                        <button
-                          type="button"
-                          onClick={() => setField('pii_use_slm', !form.pii_use_slm)}
-                          className={cn(
-                            "relative inline-flex h-5 w-9 items-center rounded-none transition-colors border",
-                            form.pii_use_slm ? "border-accent-cyan bg-accent-cyan/10" : "border-border-bright bg-bg-elevated"
-                          )}
-                        >
-                          <span
-                            className={cn(
-                              "inline-block h-3 w-3 transform rounded-none transition-transform",
-                              form.pii_use_slm ? "translate-x-5 bg-accent-cyan" : "translate-x-1 bg-text-muted"
-                            )}
-                          />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {modelDirty && (
-                    <div className="pt-6 border-t border-border-dim flex justify-end gap-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        onClick={resetModel}
-                        disabled={savingSection === 'model'}
-                        className="text-text-muted hover:text-text-primary rounded-none px-6"
-                      >
-                        DISCARD
-                      </Button>
-                      <Button
-                        type="button"
-                        onClick={saveModel}
-                        disabled={savingSection === 'model'}
-                        className="bg-accent-cyan text-black hover:opacity-90 rounded-none px-8 font-bold text-xs tracking-widest"
-                      >
-                        {savingSection === 'model' ? 'SYNCING...' : 'COMMIT_CHANGES'}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
               {/* Advanced Config Card */}
               <div className="space-y-6">
                 <div className="space-y-1">

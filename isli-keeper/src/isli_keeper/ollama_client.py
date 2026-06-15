@@ -44,8 +44,14 @@ class OllamaClient:
         if self._client is None:
             raise RuntimeError("OllamaClient session not started")
 
-        # Inject CPU-optimized defaults for context and batch sizes
-        default_options = {"num_ctx": 4096, "num_batch": 512}
+        # Lazy import to avoid circular dependency
+        from isli_keeper.main import model_manager
+
+        # Inject runtime-configurable defaults for context and batch sizes
+        default_options = {
+            "num_ctx": model_manager.config.get("num_ctx", 4096),
+            "num_batch": model_manager.config.get("num_batch", 512),
+        }
         merged_options = {**default_options, **(options or {})}
 
         payload = {

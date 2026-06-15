@@ -35,6 +35,14 @@ export function Modal({
     }
     document.addEventListener('keydown', handleKey)
 
+    return () => {
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [open, onClose])
+
+  useEffect(() => {
+    if (!open) return
+
     const timer = setTimeout(() => {
       const focusable = contentRef.current?.querySelector<HTMLElement>(
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
@@ -46,11 +54,10 @@ export function Modal({
     document.body.style.overflow = 'hidden'
 
     return () => {
-      document.removeEventListener('keydown', handleKey)
       clearTimeout(timer)
       document.body.style.overflow = ''
     }
-  }, [open, onClose])
+  }, [open])
 
   const hasHeader = title || showClose
 
@@ -75,17 +82,17 @@ export function Modal({
             />
             
             {/* Centering Wrapper */}
-            <div className="flex min-h-full items-center justify-center pointer-events-none">
+            <div className="flex min-h-full items-end sm:items-center justify-center pointer-events-none">
               <motion.div
                 ref={contentRef}
-                initial={{ opacity: 0, scale: 0.98, y: 10 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.98, y: 10 }}
+                initial={{ opacity: 0, y: "100%" }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: "100%" }}
                 transition={{ type: 'spring', damping: 25, stiffness: 400 }}
                 className={cn(
-                  'relative bg-bg-surface border border-border-bright rounded-none',
+                  'relative bg-bg-surface border border-border-bright rounded-t-xl sm:rounded-none',
                   'w-full sm:max-w-md shadow-2xl pointer-events-auto',
-                  'flex flex-col overflow-hidden',
+                  'flex flex-col max-h-[90vh] sm:max-h-none overflow-hidden',
                   className
                 )}
               >

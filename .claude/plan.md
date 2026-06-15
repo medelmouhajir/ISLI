@@ -1,116 +1,247 @@
-# Plan: Fix Agent Container Env Var Injection from DB
+# Plan: Admin Cleanup Endpoint for Stale `known_agent_ids` + Board Button
 
-## Problem
+## Goal
 
-`AgentProcessManager._spawn_docker()` and `_spawn_subprocess()` build environment variables purely from Core's `os.environ`. They never query the database for the agent's resolved API key or model configuration. This creates a disconnect:
-
-- The Board UI saves provider API keys to the `llm_providers` table.
-- The `/config` endpoint correctly resolves the key (`agent.api_key` → `llm_providers.api_key`).
-- But `process_manager.py` passes `OLLAMA_API_KEY=""` into every new container because Core's env var is empty.
-
-While the SDK's `start_agent.py` fetches `/config` and populates `AgentConfig.api_key`, this is fragile:
-1. If `/config` is temporarily unreachable at startup, the agent falls back to env vars and starts unauthenticated.
-2. The subprocess backend inherits an empty env var, which LiteLLM may read and use as an explicit empty key.
-3. Per-provider `api_base` is not supported at all because there's no `api_base` field in `AgentConfigOut`/`AgentConfig`.
-
-## Current State of kimi-02
-
-- `llm_providers.ollama.api_key` IS populated in the DB.
-- The running `isli-agent-kimi-02` container fetched `/config` at startup and got the key.
-- LiteLLM tests from inside the container confirm `api_key` kwarg + `https://ollama.com` work for simple prompts.
-- **Yet the agent times out after exactly 120s on every turn.** This suggests the prompt + model combination may be pushing past the hardcoded 120s `litellm_timeout`, OR the 30-tool payload is causing Ollama Cloud to queue/throttle. The env-var fix alone may not resolve the timeout, but it is a necessary architectural correction.
+Give admins a one-click way to remove deleted/non-existent agent IDs from every surviving agent's `known_agent_ids` (the "DELEGATION_MAP"). This fixes pre-existing staleness that the delete-time scrubber cannot reach retroactively.
 
 ## Changes
 
-### 1. `isli-core/src/isli_core/services/process_manager.py`
+### 1. Backend: New admin cleanup endpoint in `isli-core/src/isli_core/routers/agents.py`
 
-**Add `_resolve_agent_env(agent_id: str) -> dict[str, str]`**
-- Query DB for `Agent` record.
-- Resolve `api_key`: `agent.api_key` → fallback to `llm_providers` row for `agent.model_provider`.
-- Resolve `api_base`: check `llm_providers` row for `api_base` (new column, or fallback to Core's `os.getenv`).
-- Map provider → env var:
-  - `ollama` → `OLLAMA_API_KEY`
-  - `openai` → `OPENAI_API_KEY`
-  - `anthropic` → `ANTHROPIC_API_KEY`
-  - `google` / `gemini` → `GEMINI_API_KEY`
-  - `deepseek` → `DEEPSEEK_API_KEY`
-- Return a dict of env keys to inject.
+Add a response model and endpoint at the bottom of the agents router:
 
-**Modify `_spawn_docker()`**
-- After building base `env` dict, merge `_resolve_agent_env(agent_id)` on top, overriding `os.getenv` fallbacks.
-- Log the resolved provider and whether a key was injected (mask the key).
+```python
+class CleanupPeerRefsOut(BaseModel):
+    cleaned: int
+    affected_agent_ids: list[str]
 
-**Modify `_spawn_subprocess()`**
-- Similarly merge resolved env into the subprocess environment before `asyncio.create_subprocess_exec`.
 
-### 2. `isli-core/src/isli_core/routers/agents.py`
+@router.post("/cleanup-peer-refs", response_model=CleanupPeerRefsOut)
+async def cleanup_peer_references(
+    db: AsyncSession = Depends(get_db),
+    admin: str = Depends(require_admin_auth),
+):
+    """Remove all deleted/non-existent agent IDs from every non-deleted agent's known_agent_ids."""
+    result = await db.execute(select(Agent))
+    all_agents = result.scalars().all()
 
-- Add `api_base: str | None = None` to `AgentConfigOut` schema.
-- In `get_agent_config()`, resolve `api_base` from `llm_providers.api_base` if available, else from Core settings/env.
+    valid_ids = {a.id for a in all_agents if a.deleted_at is None}
+    affected_agent_ids: list[str] = []
 
-### 3. `isli-core/src/isli_core/models.py`
+    for agent in all_agents:
+        if agent.deleted_at is not None:
+            continue
+        peer_ids = _safe_json(agent.known_agent_ids, []) or []
+        cleaned = [pid for pid in peer_ids if pid in valid_ids]
+        if cleaned != peer_ids:
+            agent.known_agent_ids = cleaned
+            agent.updated_at = datetime.now(UTC)
+            affected_agent_ids.append(agent.id)
 
-- Add `api_base: Mapped[str | None] = mapped_column(Text, nullable=True)` to `LlmProvider` table.
-- This enables per-provider base URLs in the Board UI instead of relying solely on Core's `OLLAMA_API_BASE` env var.
+    if affected_agent_ids:
+        await db.commit()
+        for agent_id in affected_agent_ids:
+            await EventManager.emit(
+                "agent:config_updated",
+                {"agent_id": agent_id, "fields": ["known_agent_ids"]},
+            )
+            await ContextCache.invalidate_for_agent(agent_id)
 
-### 4. `isli-agent-sdk/src/isli_agent/models.py`
+    logger.info("agents.cleanup_peer_refs", cleaned=len(affected_agent_ids))
+    return CleanupPeerRefsOut(
+        cleaned=len(affected_agent_ids),
+        affected_agent_ids=affected_agent_ids,
+    )
+```
 
-- Add `api_base: Optional[str] = None` to `AgentConfig`.
+This reuses the same patterns as `_scrub_peer_references` added earlier.
 
-### 5. `isli-agent-sdk/src/isli_agent/runner.py`
+### 2. Backend: Test in `isli-core/tests/test_api_agents.py`
 
-- In the `api_key` env-var block (currently only sets `GEMINI_API_KEY`), add a provider map so all providers get their env var set:
-  ```python
-  provider_env_map = {
-      "ollama": "OLLAMA_API_KEY",
-      "openai": "OPENAI_API_KEY",
-      "anthropic": "ANTHROPIC_API_KEY",
-      "google": "GEMINI_API_KEY",
-      "deepseek": "DEEPSEEK_API_KEY",
-  }
-  env_var = provider_env_map.get(_normalize_provider(self.config.model_provider))
-  if env_var:
-      os.environ[env_var] = self.config.api_key
-  ```
-- If `self.config.api_base`, pass `api_base=self.config.api_base` into `completion_kwargs`.
+Add:
 
-### 6. `isli-agent-sdk/examples/start_agent.py`
+```python
+    @pytest.mark.asyncio
+    async def test_cleanup_peer_refs_removes_deleted_agents(self, client: AsyncClient):
+        """POST /v1/agents/cleanup-peer-refs should strip deleted agent IDs from peers."""
+        await client.post("/v1/agents", json={
+            "id": "cleanup-a",
+            "name": "Cleanup A",
+            "model_provider": "ollama",
+            "model_id": "qwen3:1.7b",
+        })
+        await client.post("/v1/agents", json={
+            "id": "cleanup-b",
+            "name": "Cleanup B",
+            "model_provider": "ollama",
+            "model_id": "qwen3:1.7b",
+        })
+        # A lists both B and a never-existing ID
+        await client.put("/v1/agents/cleanup-a", json={
+            "known_agent_ids": ["cleanup-b", "ghost-agent"],
+        })
 
-- Pass `api_base=data.get("api_base")` into `AgentConfig(...)`.
+        # Delete B
+        await client.delete("/v1/agents/cleanup-b")
 
-### 7. Board UI / Settings (optional future)
+        # Run cleanup
+        resp = await client.post("/v1/agents/cleanup-peer-refs", json={})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["cleaned"] == 1
+        assert "cleanup-a" in data["affected_agent_ids"]
 
-- Add `api_base` input field to the LLM provider settings form so users can set per-provider base URLs.
-- Not required for this fix but makes the `api_base` column useful.
+        resp = await client.get("/v1/agents/cleanup-a")
+        assert resp.status_code == 200
+        assert resp.json()["known_agent_ids"] == []
 
-## Rollout / Verification
+        # Cleanup
+        await client.delete("/v1/agents/cleanup-a")
+```
 
-1. **DB migration** (Core): Add `api_base` column to `llm_providers`.
-2. **Rebuild** `isli-core` image and restart the `core` container.
-3. **Rebuild** `isli-agent-runner` image (SDK changes are baked in).
-4. Kill `isli-agent-kimi-02` → Core respawns it with injected env vars.
-5. Verify: `docker exec isli-agent-kimi-02 env | grep OLLAMA_API_KEY` shows the masked key.
-6. Send a test message. If it still times out at 120s, the next step is to increase `litellm_timeout` in the agent config or switch to a faster model.
+### 3. Board UI: Add API helper in `isli-board/src/lib/api.ts`
 
-## Files to Touch
+Add `postJSON` already exists. If we need a typed response:
 
-| File | Change |
-|------|--------|
-| `isli-core/src/isli_core/services/process_manager.py` | Add `_resolve_agent_env()`, merge into both spawn methods |
-| `isli-core/src/isli_core/routers/agents.py` | Add `api_base` to `AgentConfigOut`, resolve it |
-| `isli-core/src/isli_core/models.py` | Add `api_base` to `LlmProvider` |
-| `isli-agent-sdk/src/isli_agent/models.py` | Add `api_base` to `AgentConfig` |
-| `isli-agent-sdk/src/isli_agent/runner.py` | Set env vars for all providers; pass `api_base` to `acompletion` |
-| `isli-agent-sdk/examples/start_agent.py` | Pass `api_base` into `AgentConfig` |
+```typescript
+export async function postJSON<T>(path: string, body: unknown): Promise<T>
+```
 
-## Trade-offs
+No new helper needed; reuse `postJSON<CleanupPeerRefsOut>('/v1/agents/cleanup-peer-refs', {})`.
 
-- **DB query per spawn:** Adds one async query per container spawn. Spawns are infrequent (agent start/restart), so this is negligible.
-- **Hardcoded provider→env map:** 5 providers. Maintainable and matches LiteLLM conventions. Can be extended.
-- **DB migration required:** Adding `api_base` to `llm_providers` needs an Alembic migration or schema-on-startup since other services manage their own schemas.
+### 4. Board UI: Add hook in `isli-board/src/hooks/useAgents.ts`
 
-## Open Question for User
+Add:
 
-The 120s timeout on `kimi-k2.6` may be a separate issue from the missing env var. Do you also want to:
-- Increase the default `litellm_timeout` from 120s to 300s?
-- Switch `kimi-02` to a smaller/faster model (e.g., `qwen3:1.7b` local) while keeping `kimi-k2.6` as a fallback?
+```typescript
+export function useCleanupPeerRefs() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => postJSON<{ cleaned: number; affected_agent_ids: string[] }>(
+      '/v1/agents/cleanup-peer-refs',
+      {}
+    ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['agents'] })
+    },
+  })
+}
+```
+
+Need to import `postJSON` in this file.
+
+### 5. Board UI: Add cleanup card to `SecuritySettingsPage.tsx`
+
+Add a new admin action card below the E-Stop block:
+
+```tsx
+const cleanupPeerRefs = useCleanupPeerRefs()
+const [isConfirmingCleanup, setIsConfirmingCleanup] = useState(false)
+
+const handleCleanupPeerRefs = () => {
+  cleanupPeerRefs.mutate(undefined, {
+    onSettled: () => setIsConfirmingCleanup(false),
+  })
+}
+```
+
+JSX card (same visual style as E-Stop block):
+
+```tsx
+<div className="bg-bg-surface border border-border-dim rounded-xl p-5">
+  <div className="flex items-center justify-between gap-4 mb-4">
+    <div className="flex items-center gap-3">
+      <div className="w-8 h-8 rounded-lg bg-bg-elevated text-text-muted flex items-center justify-center">
+        <Users className="w-4 h-4" />
+      </div>
+      <div>
+        <h2 className="text-xs font-display font-bold uppercase tracking-widest text-text-primary">
+          Clean Delegation Map
+        </h2>
+        <p className="text-[10px] text-text-muted mt-0.5">
+          Remove deleted or unknown agents from every agent's peer/delegation list.
+        </p>
+      </div>
+    </div>
+    <button
+      onClick={() => setIsConfirmingCleanup(true)}
+      disabled={cleanupPeerRefs.isPending}
+      className="px-4 py-2 rounded-lg text-[11px] font-display font-bold uppercase tracking-wider transition-all bg-accent-cyan text-black hover:opacity-90"
+    >
+      {cleanupPeerRefs.isPending ? (
+        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+      ) : (
+        'Run Cleanup'
+      )}
+    </button>
+  </div>
+
+  {cleanupPeerRefs.isSuccess && (
+    <div className="text-[11px] text-text-secondary">
+      Cleaned {cleanupPeerRefs.data.cleaned} agent(s):
+      {' '}{cleanupPeerRefs.data.affected_agent_ids.join(', ') || 'none'}
+    </div>
+  )}
+</div>
+
+{isConfirmingCleanup && (
+  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+    <div className="bg-bg-surface border border-border-dim rounded-2xl p-6 max-w-md w-full shadow-2xl animate-in fade-in zoom-in duration-200">
+      <div className="flex items-center gap-3 text-accent-cyan mb-4">
+        <AlertTriangle className="w-6 h-6" />
+        <h3 className="text-lg font-display font-bold">Clean Delegation Map?</h3>
+      </div>
+      <p className="text-sm text-text-secondary mb-6 leading-relaxed">
+        This will remove every deleted or unknown agent ID from all agents'
+        <code>known_agent_ids</code> lists. Running agents will receive a
+        config update and reload their peer map automatically.
+      </p>
+      <div className="flex gap-3 justify-end">
+        <button
+          onClick={() => setIsConfirmingCleanup(false)}
+          className="px-4 py-2 rounded-xl text-xs font-bold text-text-muted hover:bg-bg-elevated transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleCleanupPeerRefs}
+          className="px-4 py-2 rounded-xl text-xs font-bold bg-accent-cyan text-black hover:opacity-90 transition-all"
+        >
+          Run Cleanup
+        </button>
+      </div>
+    </div>
+  </div>
+)}
+```
+
+Import `Users` from `lucide-react` and `useState` is already imported.
+
+### 6. Update `SettingsPage.tsx`
+
+No change needed unless we want to mention the new Security action. The Security card already covers "Authentication, access control, and audit settings"; adding delegation-map cleanup there is appropriate.
+
+## Verification
+
+1. Backend:
+   ```bash
+   cd isli-core
+   .venv/bin/python -m pytest tests/test_api_agents.py::TestAgentsAPI::test_cleanup_peer_refs_removes_deleted_agents -v
+   ```
+
+2. Board:
+   ```bash
+   cd isli-board
+   npm run typecheck
+   npm run lint
+   ```
+
+## Rollout
+
+Because the endpoint is additive and read/write only on admin request, it is safe to deploy immediately. After the build:
+
+```bash
+docker compose up -d --build --force-recreate core board
+```
+
+Then open Board → Settings → Security → "Clean Delegation Map" → confirm. The UI will show how many agents were cleaned, and running agents will receive `agent:config_updated` events so their runners reload the peer list without restart.

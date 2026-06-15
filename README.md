@@ -79,6 +79,11 @@ ISLI is feature-complete across 12 rigorous development phases, including:
 - **Phase 10:** Full Cron Scheduling with Transactional Cloning
 - **Phase 12:** Agent Identity Enhancements & Avatar System
 
+**Recent Post-Roadmap additions:**
+- **Dynamic Local Model Management** — add arbitrary Ollama models (`gemma3:1b`, `phi4-mini`, etc.) to the Keeper catalog directly from the Board UI without code changes
+- **Unified Notification System** — in-app inbox + Telegram alerts with quiet hours, digest batching, and agent-facing SDK tools
+- **Context Safety** — hard output caps on file-read, db-query, and git-log to prevent silent context-window exhaustion
+
 ## Documentation
 
 Dive deep into the architecture, memory tiers, and security models in the `Docs/` directory:

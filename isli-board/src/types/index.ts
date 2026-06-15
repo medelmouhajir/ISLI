@@ -22,6 +22,7 @@ export interface Agent {
   has_api_key: boolean
   api_key_mask: string | null
   api_key?: string | null
+  deleted_at?: string | null
   model_routing_enabled: boolean
   secondary_models: Array<{
     provider: string
@@ -46,6 +47,7 @@ export interface ProviderSettings {
   has_api_key: boolean
   api_key_mask: string | null
   api_key?: string | null
+  api_base?: string | null
   models: PermittedModel[]
 }
 
@@ -131,9 +133,11 @@ export interface Session {
   channel: string | null
   messages: Message[]
   token_count: number
-  status: string // 'ready' | 'pending_context' | 'processing_context' | 'context_failed' | 'closed'
+  status: string // 'ready' | 'pending_context' | 'processing_context' | 'agent_processing' | 'context_failed' | 'closed'
   created_at: string
   last_activity_at: string | null
+  journal?: string | null
+  journal_updated_at?: string | null
   session_metadata?: Record<string, unknown> | null
 }
 
@@ -271,6 +275,24 @@ export interface SkillMetadata {
   type: string
   category: string
   url: string | null
+  status: string | null
+  last_probe_status: string | null
+  last_probe_at: string | null
+  version: string | null
+  author: string | null
+  tools: Record<string, unknown>[]
+  // Versioning fields
+  source_url: string | null
+  source_ref: string | null
+  installed_commit_sha: string | null
+  latest_commit_sha: string | null
+  latest_version: string | null
+  update_policy: string
+  changelog: Array<{ version: string; date: string; message: string }>
+  last_checked_at: string | null
+  previous_version: string | null
+  previous_commit_sha: string | null
+  previous_image_tag: string | null
 }
 
 export interface PromptsOut {

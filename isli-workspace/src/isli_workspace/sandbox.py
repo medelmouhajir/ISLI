@@ -221,6 +221,162 @@ def list_dir(scope: str, scope_id: str, base_path: str, relative_path: str = "")
     return {"entries": sorted(entries, key=lambda e: (e["type"] != "directory", e["name"]))}
 
 
+def move_file(
+    source_scope: str,
+    source_scope_id: str,
+    source_base_path: str,
+    source_relative_path: str,
+    target_scope: str,
+    target_scope_id: str,
+    target_base_path: str,
+    target_relative_path: str,
+) -> dict[str, Any]:
+    """Move or rename a file. Source and target scopes may be the same or different."""
+    src = resolve_path(source_scope, source_scope_id, source_base_path, source_relative_path)
+    dst = resolve_path(target_scope, target_scope_id, target_base_path, target_relative_path)
+
+    if not src.exists():
+        raise FileNotFoundError(f"File not found: {source_relative_path}")
+    if src.is_dir():
+        raise IsADirectoryError(f"Cannot move a directory: {source_relative_path}")
+    if src.resolve() == dst.resolve():
+        raise ValueError("Source and target paths are identical")
+
+    size = src.stat().st_size
+    if not check_quota(target_scope, target_scope_id, target_base_path, size):
+        raise ValueError("Target workspace quota exceeded")
+
+    dst.parent.mkdir(parents=True, exist_ok=True, mode=0o777)
+
+    # Atomic-ish: copy to a temp file next to the destination, then replace, then remove source.
+    fd, temp_path = tempfile.mkstemp(dir=str(dst.parent), prefix=".tmp_move_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            with open(src, "rb") as sf:
+                f.write(sf.read())
+        os.replace(temp_path, dst)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
+    try:
+        src.unlink()
+    except OSError as exc:
+        # Best-effort cleanup; the move itself succeeded.
+        raise OSError(f"Moved file to {target_relative_path} but failed to remove source: {exc}")
+
+    stat = dst.stat()
+    return {
+        "status": "moved",
+        "path": target_relative_path,
+        "size_bytes": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+    }
+
+
+def _is_likely_binary(path: Path) -> bool:
+    """Guess whether a file is binary by reading the first 1024 bytes."""
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(1024)
+    except OSError:
+        return True
+    if b"\x00" in chunk:
+        return True
+    # Use a simple heuristic: if more than 30% of bytes are non-text control chars, treat as binary.
+    text_chars = bytearray({7, 8, 9, 10, 12, 13, 27} | set(range(0x20, 0x100)) - {0x7F})
+    if not chunk:
+        return False
+    non_text = sum(1 for b in chunk if b not in text_chars)
+    return non_text / len(chunk) > 0.30
+
+
+def search_workspace(
+    scope: str,
+    scope_id: str,
+    base_path: str,
+    query: str,
+    relative_path: str = "",
+    search_names: bool = True,
+    search_content: bool = False,
+    case_sensitive: bool = False,
+    max_results: int = 50,
+) -> dict[str, Any]:
+    """Search file names and/or contents under a workspace scope."""
+    root = resolve_path(scope, scope_id, base_path, relative_path)
+    if not root.exists():
+        raise FileNotFoundError(f"Directory not found: {relative_path}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"Path is not a directory: {relative_path}")
+
+    if not query:
+        raise ValueError("Search query cannot be empty")
+
+    matcher = query if case_sensitive else query.lower()
+    matches: list[dict[str, Any]] = []
+    total_scanned = 0
+
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for filename in filenames:
+            if filename.startswith(".") or filename.startswith(".tmp_"):
+                continue
+            file_path = Path(dirpath) / filename
+            try:
+                rel = file_path.relative_to(root)
+                rel_str = str(rel)
+            except ValueError:
+                continue
+
+            matched = False
+            snippet: str | None = None
+            name_to_check = filename if case_sensitive else filename.lower()
+            if search_names and matcher in name_to_check:
+                matched = True
+
+            if search_content and not matched and file_path.is_file():
+                try:
+                    if _is_likely_binary(file_path):
+                        continue
+                    stat = file_path.stat()
+                    if stat.st_size > MAX_FILE_SIZE_BYTES:
+                        continue
+                    content = file_path.read_text(encoding="utf-8", errors="ignore")
+                    content_to_check = content if case_sensitive else content.lower()
+                    idx = content_to_check.find(matcher)
+                    if idx != -1:
+                        matched = True
+                        start = max(0, idx - 60)
+                        end = min(len(content), idx + len(query) + 60)
+                        snippet = content[start:end].replace("\n", " ")
+                except (OSError, UnicodeDecodeError):
+                    continue
+
+            if matched:
+                try:
+                    stat = file_path.stat()
+                    matches.append({
+                        "path": rel_str,
+                        "name": filename,
+                        "size_bytes": stat.st_size,
+                        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                        "snippet": snippet,
+                    })
+                except FileNotFoundError:
+                    continue
+                if len(matches) >= max_results:
+                    break
+
+        if len(matches) >= max_results:
+            break
+
+    return {
+        "matches": matches[:max_results],
+        "total": len(matches),
+        "truncated": len(matches) > max_results,
+    }
+
+
 def delete_file(scope: str, scope_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
     path = resolve_path(scope, scope_id, base_path, relative_path)
     if not path.exists():

@@ -172,6 +172,74 @@ class KeeperClient:
             return None
 
     @staticmethod
+    async def classify_intent(
+        user_message: str,
+        available_skills: list[dict[str, str]],
+        agent_id: str | None = None,
+    ) -> list[str]:
+        """Call Keeper to classify which skills are relevant to a user message.
+
+        Returns a list of skill names. On failure, returns ALL skill names (safe fallback).
+        """
+        settings = get_settings()
+        url = f"{settings.keeper_url}/intent/classify"
+
+        payload = {
+            "user_message": user_message,
+            "available_skills": available_skills,
+            "agent_id": agent_id,
+        }
+
+        start = time.monotonic()
+        try:
+            token = create_internal_token("core-api", scopes=["keeper:intent"], expires_minutes=1)
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(url, json=payload, headers={"X-Internal-Auth": token, "X-Agent-ID": agent_id or ""})
+                resp.raise_for_status()
+                data = resp.json()
+            latency = (time.monotonic() - start) * 1000
+            relevant_skills = data.get("relevant_skills", [])
+            if not isinstance(relevant_skills, list):
+                relevant_skills = []
+            await EventManager.emit("keeper:inference", {
+                "agent_id": agent_id or "system",
+                "endpoint": "intent/classify",
+                "latency_ms": round(latency, 2),
+                "status": "success",
+                "prompt": user_message[:80],
+                "completion": json.dumps(relevant_skills),
+                "prompt_preview": user_message[:80],
+                "completion_preview": json.dumps(relevant_skills)[:80],
+            })
+            logger.info(
+                "keeper.intent_classified",
+                agent_id=agent_id,
+                relevant_skills=relevant_skills,
+                latency_ms=latency,
+            )
+            return relevant_skills
+        except Exception as exc:
+            latency = (time.monotonic() - start) * 1000
+            await EventManager.emit("keeper:inference", {
+                "agent_id": agent_id or "system",
+                "endpoint": "intent/classify",
+                "latency_ms": round(latency, 2),
+                "status": "error",
+                "error": str(exc),
+                "prompt": user_message[:80],
+                "prompt_preview": user_message[:80],
+            })
+            logger.error(
+                "keeper.intent_classify_failed",
+                agent_id=agent_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            # Safe fallback: return all skill names
+            return [s["name"] for s in available_skills]
+
+    @staticmethod
     async def get_model_routing(
         agent_id: str,
         task_description: str,

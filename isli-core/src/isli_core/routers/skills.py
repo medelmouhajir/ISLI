@@ -10,7 +10,7 @@ from pydantic import BaseModel
 import httpx
 import structlog
 
-from isli_core.auth import create_internal_token, SkillProxyAuth
+from isli_core.auth import create_internal_token, SkillProxyAuth, require_admin_auth
 from isli_core.security.content_scanner import ContentScanner
 from isli_core.security.policy_engine import PolicyEngine
 from isli_core.db import get_db
@@ -18,6 +18,7 @@ from isli_core.memory.keeper_client import KeeperClient
 from isli_core.memory.chroma_client import ChromaMemoryClient
 from isli_core.services.skill_manager import skill_manager
 from isli_core.config import get_settings
+from isli_core.event_manager import EventManager
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import uuid4
 
@@ -53,6 +54,12 @@ SKILL_REGISTRY = {
     "file-write": _WORKSPACE_URL,
     "file-list": _WORKSPACE_URL,
     "file-delete": _WORKSPACE_URL,
+    "shared-file-read": _WORKSPACE_URL,
+    "shared-file-write": _WORKSPACE_URL,
+    "shared-file-list": _WORKSPACE_URL,
+    "shared-file-delete": _WORKSPACE_URL,
+    "shared-file-move": f"{_WORKSPACE_URL}/shared",
+    "shared-workspace-search": f"{_WORKSPACE_URL}/shared",
     "git-clone": _WORKSPACE_URL,
     "git-status": _WORKSPACE_URL,
     "git-commit": _WORKSPACE_URL,
@@ -80,6 +87,8 @@ SKILL_REGISTRY = {
     "web-browse-images": f"{_SKILLS_URL}/browse",
     # inline handlers (executed within Core)
     "get-secret": "inline",
+    "shared-promote-file-workspace": "inline",
+    "shared-workspace-info": "inline",
     "memory-save": "inline",
     "memory-delete": "inline",
     "memory-search": "inline",
@@ -186,6 +195,46 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
     },
     "file-delete": {
         "description": "Delete a file from the agent workspace.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "shared-file-read": {
+        "description": "Read a file from a shared workspace by workspace_id and path.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "shared-file-write": {
+        "description": "Write a file into a shared workspace by workspace_id and path.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "shared-file-list": {
+        "description": "List files and directories inside a shared workspace.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "shared-file-delete": {
+        "description": "Delete a file from a shared workspace.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "shared-file-move": {
+        "description": "Move or rename a file within (or between) shared workspaces.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "shared-promote-file-workspace": {
+        "description": "Promote a file from the agent's own workspace into a shared workspace.",
+        "type": "inline",
+        "category": "workspace",
+    },
+    "shared-workspace-info": {
+        "description": "Return shared workspace metadata: name, members, root path, and quota.",
+        "type": "inline",
+        "category": "workspace",
+    },
+    "shared-workspace-search": {
+        "description": "Search file names and/or contents across a shared workspace.",
         "type": "external",
         "category": "workspace",
     },
@@ -346,6 +395,23 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
     },
 }
 
+
+def _get_skill_hint(name: str, meta: dict[str, Any]) -> str:
+    """Return a compressed hint for skill intent classification.
+
+    Explicit 'hint' field in SKILL_METADATA takes priority.
+    Otherwise, truncate description to max 8 words.
+    """
+    explicit = meta.get("hint")
+    if explicit:
+        return explicit
+    desc = meta.get("description", "")
+    words = desc.split()
+    if len(words) <= 8:
+        return desc
+    return " ".join(words[:8]) + "..."
+
+
 chroma = ChromaMemoryClient()
 
 
@@ -360,6 +426,49 @@ class SkillMetadataOut(BaseModel):
     type: str
     category: str = "uncategorized"
     url: str | None = None
+    status: str | None = None
+    last_probe_status: str | None = None
+    last_probe_at: str | None = None
+    version: str | None = None
+    author: str | None = None
+    tools: list[dict[str, Any]] = []
+    # Versioning fields
+    source_url: str | None = None
+    source_ref: str | None = None
+    installed_commit_sha: str | None = None
+    latest_commit_sha: str | None = None
+    latest_version: str | None = None
+    update_policy: str = "manual"
+    changelog: list[dict[str, Any]] = []
+    last_checked_at: str | None = None
+
+
+class SkillUpdateCheckOut(BaseModel):
+    has_update: bool
+    current_version: str | None = None
+    latest_version: str | None = None
+    current_commit: str | None = None
+    latest_commit: str | None = None
+    changelog: list[dict[str, Any]] = []
+    update_policy: str = "manual"
+    last_checked_at: str | None = None
+
+
+class SkillUpdateRequest(BaseModel):
+    target_version: str | None = None
+    force: bool = False
+
+
+class SkillRollbackOut(BaseModel):
+    skill_id: str
+    rolled_back_to_version: str | None = None
+    rolled_back_to_commit: str | None = None
+    status: str
+
+
+class SkillPatchRequest(BaseModel):
+    update_policy: str | None = None
+    source_ref: str | None = None
 
 
 @router.get("", response_model=list[SkillMetadataOut])
@@ -379,58 +488,377 @@ async def list_skills():
                 type=meta.get("type", "external"),
                 category=meta.get("category", "uncategorized"),
                 url=base_url if base_url != "inline" else None,
+                status="builtin",
             )
         )
-    
-    # Dynamic skills
-    dynamic_meta = skill_manager.get_skill_metadata()
-    for skill_id, meta in dynamic_meta.items():
+
+    # DB-backed external skills + legacy dynamic skills (unified)
+    all_meta = await skill_manager.get_all_metadata()
+    for skill_id, meta in all_meta.items():
         skills.append(
             SkillMetadataOut(
                 name=skill_id,
-                description=meta.get("description", "Installed via Skills Store"),
-                type="dynamic",
+                description=meta.get("description", ""),
+                type=meta.get("type", "external"),
                 category=meta.get("category", "custom"),
                 url=None,
+                status=meta.get("status"),
+                last_probe_status=meta.get("last_probe_status"),
+                last_probe_at=meta.get("last_probe_at"),
+                version=meta.get("version"),
+                author=meta.get("author"),
+                tools=meta.get("tools", []),
+                source_url=meta.get("source_url"),
+                source_ref=meta.get("source_ref"),
+                installed_commit_sha=meta.get("installed_commit_sha"),
+                latest_commit_sha=meta.get("latest_commit_sha"),
+                latest_version=meta.get("latest_version"),
+                update_policy=meta.get("update_policy", "manual"),
+                changelog=meta.get("changelog", []),
+                last_checked_at=meta.get("last_checked_at"),
             )
         )
 
     return skills
 
 
+@router.get("/{skill_name}", response_model=SkillMetadataOut)
+async def get_skill(skill_name: str):
+    """Return metadata for a single skill, including manifest tools."""
+    # Check static registry first
+    base_url = SKILL_REGISTRY.get(skill_name)
+    if base_url:
+        meta = SKILL_METADATA.get(skill_name, {})
+        return SkillMetadataOut(
+            name=skill_name,
+            description=meta.get("description", ""),
+            type=meta.get("type", "external"),
+            category=meta.get("category", "uncategorized"),
+            url=base_url if base_url != "inline" else None,
+            status="builtin",
+        )
+
+    # Check unified registry (legacy dynamic + DB-backed)
+    all_meta = await skill_manager.get_all_metadata()
+    if skill_name in all_meta:
+        meta = all_meta[skill_name]
+        return SkillMetadataOut(
+            name=skill_name,
+            description=meta.get("description", ""),
+            type=meta.get("type", "external"),
+            category=meta.get("category", "custom"),
+            url=None,
+            status=meta.get("status"),
+            last_probe_status=meta.get("last_probe_status"),
+            last_probe_at=meta.get("last_probe_at"),
+            version=meta.get("version"),
+            author=meta.get("author"),
+            tools=meta.get("tools", []),
+            source_url=meta.get("source_url"),
+            source_ref=meta.get("source_ref"),
+            installed_commit_sha=meta.get("installed_commit_sha"),
+            latest_commit_sha=meta.get("latest_commit_sha"),
+            latest_version=meta.get("latest_version"),
+            update_policy=meta.get("update_policy", "manual"),
+            changelog=meta.get("changelog", []),
+            last_checked_at=meta.get("last_checked_at"),
+        )
+
+    raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+
 @router.post("/install")
 async def install_skill(
     request: SkillInstallRequest,
+    admin_key: str = Depends(require_admin_auth),
     db: AsyncSession = Depends(get_db),
 ):
-    """Clones a skill from a git repository and registers it locally."""
-    settings = get_settings()
-    target_dir = os.path.join(settings.installed_skills_path, request.skill_id)
+    """Install a skill from a git repository into the DB registry (does not start container)."""
+    try:
+        skill = await skill_manager.install_from_git(
+            skill_id=request.skill_id,
+            git_url=request.git_url,
+            installed_by="admin",
+        )
+        return {
+            "status": "installed",
+            "skill_id": skill.id,
+            "name": skill.name,
+            "version": skill.version,
+            "category": skill.category,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
-    if os.path.exists(target_dir):
-        logger.info("skills.install_already_exists", skill_id=request.skill_id)
-        # Optionally perform git pull here
-        try:
-            subprocess.run(["git", "-C", target_dir, "pull"], check=True)
-        except subprocess.CalledProcessError as e:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to update skill: {str(e)}"
-            ) from e
-    else:
-        try:
-            logger.info(
-                "skills.install_cloning", skill_id=request.skill_id, url=request.git_url
-            )
-            subprocess.run(["git", "clone", request.git_url, target_dir], check=True)
-        except subprocess.CalledProcessError as e:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to clone skill repository: {str(e)}"
-            ) from e
 
-    # Refresh registry
-    skill_manager.refresh_registry()
+@router.post("/install-and-enable")
+async def install_and_enable_skill(
+    request: SkillInstallRequest,
+    admin_key: str = Depends(require_admin_auth),
+):
+    """Install a skill from git and immediately build/start the container."""
+    import time
+    start_time = time.monotonic()
+    try:
+        skill = await skill_manager.install_from_git(
+            skill_id=request.skill_id,
+            git_url=request.git_url,
+            installed_by="admin",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
-    return {"status": "success", "skill_id": request.skill_id, "path": target_dir}
+    try:
+        await skill_manager.enable(request.skill_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": str(e), "skill_id": request.skill_id, "phase": "enable"},
+        ) from e
+
+    # Probe with retry loop (max 60s)
+    probe_ok = False
+    probe_result: dict[str, Any] = {}
+    for attempt in range(20):
+        probe_result = await skill_manager.probe(request.skill_id)
+        if probe_result.get("ok"):
+            probe_ok = True
+            break
+        await asyncio.sleep(3.0)
+
+    build_time_ms = round((time.monotonic() - start_time) * 1000, 2)
+
+    if not probe_ok:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "Skill container started but health probe failed",
+                "skill_id": request.skill_id,
+                "probe": probe_result,
+                "build_time_ms": build_time_ms,
+            },
+        )
+
+    # Fetch manifest tools for the broadcast
+    manifest = await skill_manager.get_skill_manifest(request.skill_id) or {}
+    tools = manifest.get("tools", [])
+
+    # Broadcast event to board and agents
+    await EventManager.emit(
+        "skill:enabled",
+        {
+            "skill_id": request.skill_id,
+            "skill_name": skill.name,
+            "category": skill.category,
+            "tools": tools,
+        },
+    )
+
+    return {
+        "status": "active",
+        "skill_id": request.skill_id,
+        "name": skill.name,
+        "version": skill.version,
+        "category": skill.category,
+        "build_time_ms": build_time_ms,
+        "probe_ok": True,
+    }
+
+
+@router.post("/{skill_id}/enable")
+async def enable_skill(
+    skill_id: str,
+    admin_key: str = Depends(require_admin_auth),
+):
+    """Build and start the skill container."""
+    try:
+        await skill_manager.enable(skill_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    # Fetch manifest tools for the broadcast
+    manifest = await skill_manager.get_skill_manifest(skill_id) or {}
+    tools = manifest.get("tools", [])
+    meta = await skill_manager.get_all_metadata()
+    skill_meta = meta.get(skill_id, {})
+
+    await EventManager.emit(
+        "skill:enabled",
+        {
+            "skill_id": skill_id,
+            "skill_name": skill_meta.get("name", skill_id),
+            "category": skill_meta.get("category", "custom"),
+            "tools": tools,
+        },
+    )
+
+    return {"status": "enabled", "skill_id": skill_id}
+
+
+@router.post("/{skill_id}/disable")
+async def disable_skill(
+    skill_id: str,
+    admin_key: str = Depends(require_admin_auth),
+):
+    """Stop the skill container."""
+    try:
+        await skill_manager.disable(skill_id)
+        return {"status": "disabled", "skill_id": skill_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.delete("/{skill_id}")
+async def uninstall_skill(
+    skill_id: str,
+    admin_key: str = Depends(require_admin_auth),
+):
+    """Remove a skill completely (container, image, DB row, source)."""
+    try:
+        await skill_manager.uninstall(skill_id)
+        return {"status": "uninstalled", "skill_id": skill_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get("/{skill_id}/probe")
+async def probe_skill(skill_id: str):
+    """Health-check a skill's /health endpoint."""
+    result = await skill_manager.probe(skill_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@router.post("/{skill_id}/check-update", response_model=SkillUpdateCheckOut)
+async def check_update_skill(
+    skill_id: str,
+    admin_key: str = Depends(require_admin_auth),
+):
+    """Check remote git repository for a newer version of the skill."""
+    try:
+        result = await skill_manager.check_update(skill_id)
+        return SkillUpdateCheckOut(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@router.post("/{skill_id}/update")
+async def update_skill(
+    skill_id: str,
+    request: SkillUpdateRequest,
+    admin_key: str = Depends(require_admin_auth),
+):
+    """Pull new source, build new image, and perform a blue/green container swap."""
+    try:
+        skill = await skill_manager.update(skill_id, target_version=request.target_version, force=request.force)
+        return {
+            "status": "updated",
+            "skill_id": skill.id,
+            "version": skill.version,
+            "previous_version": skill.previous_version,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=409 if "already in progress" in str(e) or "pinned" in str(e) else 502, detail=str(e)) from e
+
+
+@router.post("/{skill_id}/rollback", response_model=SkillRollbackOut)
+async def rollback_skill(
+    skill_id: str,
+    admin_key: str = Depends(require_admin_auth),
+):
+    """Rollback a skill to its previous version."""
+    try:
+        skill = await skill_manager.rollback(skill_id)
+        return SkillRollbackOut(
+            skill_id=skill.id,
+            rolled_back_to_version=skill.version,
+            rolled_back_to_commit=skill.installed_commit_sha,
+            status=skill.status,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=409 if "already in progress" in str(e) else 502, detail=str(e)) from e
+
+
+@router.get("/{skill_id}/versions")
+async def list_skill_versions(
+    skill_id: str,
+    admin_key: str = Depends(require_admin_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """List available git tags for a skill."""
+    from isli_core.models import SkillRegistry as SkillRegistryModel
+    result = await db.execute(select(SkillRegistryModel).where(SkillRegistryModel.id == skill_id))
+    skill = result.scalar_one_or_none()
+    if not skill or not skill.source_url:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' not found or has no source_url")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "ls-remote", "--tags", "--refs", skill.source_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        if proc.returncode != 0:
+            raise RuntimeError(stderr.decode().strip())
+        tags = []
+        for line in stdout.decode().strip().splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].startswith("refs/tags/"):
+                tag = parts[1].replace("refs/tags/", "")
+                tags.append(tag)
+        return sorted(set(tags))
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="git ls-remote timed out")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@router.patch("/{skill_id}")
+async def patch_skill(
+    skill_id: str,
+    request: SkillPatchRequest,
+    admin_key: str = Depends(require_admin_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update mutable skill metadata (update_policy, source_ref, etc.)."""
+    from isli_core.models import SkillRegistry as SkillRegistryModel
+    result = await db.execute(
+        select(SkillRegistryModel).where(SkillRegistryModel.id == skill_id)
+    )
+    skill = result.scalar_one_or_none()
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' not found")
+
+    if request.update_policy is not None:
+        allowed = {"auto", "manual", "pinned"}
+        if request.update_policy not in allowed:
+            raise HTTPException(status_code=400, detail=f"update_policy must be one of {allowed}")
+        skill.update_policy = request.update_policy
+    if request.source_ref is not None:
+        skill.source_ref = request.source_ref
+
+    await db.commit()
+    return {
+        "status": "patched",
+        "skill_id": skill_id,
+        "update_policy": skill.update_policy,
+        "source_ref": skill.source_ref,
+    }
 
 
 @router.post("/{skill_name}/{action}")
@@ -441,11 +869,17 @@ async def skill_proxy(
     db: AsyncSession = Depends(get_db),
 ):
     base_url = SKILL_REGISTRY.get(skill_name)
-    
-    # Check if it's a dynamic skill if not in static registry
     is_dynamic = False
+    is_db_external = False
+
     if not base_url:
-        if skill_name in skill_manager.get_skill_metadata():
+        # Check DB-backed external skills first so container skills shadow stale filesystem copies
+        db_registry = await skill_manager.get_registry()
+        if skill_name in db_registry:
+            base_url = db_registry[skill_name]
+            is_db_external = True
+        # Fallback to legacy dynamic skills
+        elif skill_name in skill_manager.get_skill_metadata():
             is_dynamic = True
         else:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not registered")
@@ -784,6 +1218,95 @@ async def skill_proxy(
 
             return {"ok": True, "notification_id": notif.id}
 
+        if skill_name == "shared-promote-file-workspace" and action == "promote":
+            agent_id = body_json.get("agent_id")
+            workspace_id = body_json.get("workspace_id")
+            source_path = body_json.get("source_path")
+            target_path = body_json.get("target_path")
+            delete_source = body_json.get("delete_source", False)
+            if not all([agent_id, workspace_id, source_path, target_path]):
+                raise HTTPException(status_code=400, detail="Missing required fields: agent_id, workspace_id, source_path, target_path")
+
+            from sqlalchemy import select
+            from isli_core.models import SharedWorkspace
+            result = await db.execute(
+                select(SharedWorkspace).where(
+                    SharedWorkspace.id == workspace_id,
+                    SharedWorkspace.deleted_at.is_(None),
+                )
+            )
+            workspace = result.scalar_one_or_none()
+            if not workspace:
+                raise HTTPException(status_code=404, detail="Shared workspace not found")
+            if agent_id != workspace.owner_id and agent_id not in (workspace.members or []):
+                raise HTTPException(status_code=403, detail="Access denied to this shared workspace")
+
+            settings = get_settings()
+            url = f"{settings.workspace_url}/shared/promote"
+            token = create_internal_token("core-api", scopes=["workspace"], expires_minutes=1)
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    url,
+                    json={
+                        "agent_id": agent_id,
+                        "source_scope": "agent",
+                        "source_scope_id": agent_id,
+                        "source_path": source_path,
+                        "target_workspace_id": workspace_id,
+                        "target_path": target_path,
+                        "delete_source": bool(delete_source),
+                        "quota_bytes": workspace.quota_bytes,
+                    },
+                    headers={"X-Internal-Auth": token},
+                )
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+            from isli_core.audit_writer import AuditWriter
+            await AuditWriter.write(
+                db,
+                actor_type="agent",
+                actor_id=agent_id,
+                action="shared_promote_file_workspace",
+                target_type="shared_workspace",
+                target_id=workspace_id,
+                payload={"source_path": source_path, "target_path": target_path},
+            )
+            await db.commit()
+            return {"status": "ok", "workspace_id": workspace_id, "target_path": target_path}
+
+        if skill_name == "shared-workspace-info" and action == "info":
+            agent_id = body_json.get("agent_id")
+            workspace_id = body_json.get("workspace_id")
+            if not all([agent_id, workspace_id]):
+                raise HTTPException(status_code=400, detail="Missing required fields: agent_id, workspace_id")
+
+            from sqlalchemy import select
+            from isli_core.models import SharedWorkspace
+            result = await db.execute(
+                select(SharedWorkspace).where(
+                    SharedWorkspace.id == workspace_id,
+                    SharedWorkspace.deleted_at.is_(None),
+                )
+            )
+            workspace = result.scalar_one_or_none()
+            if not workspace:
+                raise HTTPException(status_code=404, detail="Shared workspace not found")
+            if agent_id != workspace.owner_id and agent_id not in (workspace.members or []):
+                raise HTTPException(status_code=403, detail="Access denied to this shared workspace")
+
+            return {
+                "workspace_id": workspace.id,
+                "name": workspace.name,
+                "description": workspace.description,
+                "owner_id": workspace.owner_id,
+                "members": workspace.members or [],
+                "quota_bytes": workspace.quota_bytes,
+                "root_path": f"_shared/{workspace.id}",
+                "created_at": workspace.created_at.isoformat() if workspace.created_at else None,
+                "updated_at": workspace.updated_at.isoformat() if workspace.updated_at else None,
+            }
+
         if skill_name == "get-secret" and action == "get":
             secret_name = body_json.get("name")
             if not secret_name:
@@ -986,7 +1509,7 @@ async def skill_proxy(
     url = f"{base_url}/{action}"
 
     async def _call_skill() -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(url, headers=headers, content=body)
             resp.raise_for_status()
             return resp.json()
@@ -1027,6 +1550,18 @@ async def skill_proxy(
     if not result.is_valid:
         from isli_core.telemetry import get_skill_invocation_error_counter
         reason_lower = result.reason.lower() if result.reason else ""
+
+        # Preserve 4xx client errors so the agent knows it sent bad arguments
+        status_code = 502
+        if "422" in reason_lower or "unprocessable entity" in reason_lower:
+            status_code = 422
+        elif "400" in reason_lower or "bad request" in reason_lower:
+            status_code = 400
+        elif "403" in reason_lower or "forbidden" in reason_lower:
+            status_code = 403
+        elif "404" in reason_lower or "not found" in reason_lower:
+            status_code = 404
+
         if "httpx" in reason_lower and "status" in reason_lower:
             get_skill_invocation_error_counter().add(
                 1, {"skill": skill_name, "reason": "http_error"}
@@ -1040,7 +1575,7 @@ async def skill_proxy(
         )
         logger.error("skills.verification_failed", skill=skill_name, reason=result.reason)
         raise HTTPException(
-            status_code=502,
+            status_code=status_code,
             detail={"success": False, "error": result.reason, "skill": skill_name},
         )
 

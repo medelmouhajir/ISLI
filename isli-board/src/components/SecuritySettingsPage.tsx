@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useSettings, useUpdateSetting } from '@/hooks/useSettings'
 import { useEStopStatus, useTriggerEStop, useResetEStop } from '@/hooks/useSecurity'
-import { ChevronLeft, Shield, AlertTriangle, Loader2, RefreshCw, Power } from 'lucide-react'
+import { useCleanupPeerRefs } from '@/hooks/useAgents'
+import { ChevronLeft, Shield, AlertTriangle, Loader2, RefreshCw, Power, Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface SettingField {
@@ -178,6 +179,15 @@ export function SecuritySettingsPage() {
   const resetEStop = useResetEStop()
   const [isConfirmingEStop, setIsConfirmingEStop] = useState(false)
 
+  const cleanupPeerRefs = useCleanupPeerRefs()
+  const [isConfirmingCleanup, setIsConfirmingCleanup] = useState(false)
+
+  const handleCleanupPeerRefs = () => {
+    cleanupPeerRefs.mutate(undefined, {
+      onSettled: () => setIsConfirmingCleanup(false),
+    })
+  }
+
   const values: Record<string, unknown> = {}
   for (const s of settings) {
     values[s.key] = s.value
@@ -316,6 +326,43 @@ export function SecuritySettingsPage() {
             savingKey={savingKey}
           />
         </div>
+
+        {/* Clean Delegation Map */}
+        <div className="bg-bg-surface border border-border-dim rounded-xl p-5">
+          <div className="flex items-center justify-between gap-4 mb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-bg-elevated text-text-muted flex items-center justify-center">
+                <Users className="w-4 h-4" />
+              </div>
+              <div>
+                <h2 className="text-xs font-display font-bold uppercase tracking-widest text-text-primary">
+                  Clean Delegation Map
+                </h2>
+                <p className="text-[10px] text-text-muted mt-0.5">
+                  Remove deleted or unknown agents from every agent's peer/delegation list.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setIsConfirmingCleanup(true)}
+              disabled={cleanupPeerRefs.isPending}
+              className="px-4 py-2 rounded-lg text-[11px] font-display font-bold uppercase tracking-wider transition-all bg-accent-cyan text-black hover:opacity-90 disabled:opacity-50"
+            >
+              {cleanupPeerRefs.isPending ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                'Run Cleanup'
+              )}
+            </button>
+          </div>
+
+          {cleanupPeerRefs.isSuccess && (
+            <div className="text-[11px] text-text-secondary">
+              Cleaned {cleanupPeerRefs.data.cleaned} agent(s):
+              {' '}{cleanupPeerRefs.data.affected_agent_ids.join(', ') || 'none'}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Confirmation Modal */}
@@ -342,6 +389,36 @@ export function SecuritySettingsPage() {
                 className="px-4 py-2 rounded-xl text-xs font-bold bg-accent-red text-white hover:bg-accent-red/90 transition-all shadow-lg shadow-accent-red/20"
               >
                 Trigger System Halt
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isConfirmingCleanup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-bg-surface border border-border-dim rounded-2xl p-6 max-w-md w-full shadow-2xl animate-in fade-in zoom-in duration-200">
+            <div className="flex items-center gap-3 text-accent-cyan mb-4">
+              <AlertTriangle className="w-6 h-6" />
+              <h3 className="text-lg font-display font-bold">Clean Delegation Map?</h3>
+            </div>
+            <p className="text-sm text-text-secondary mb-6 leading-relaxed">
+              This will remove every deleted or unknown agent ID from all agents'
+              <code className="bg-bg-elevated px-1 py-0.5 rounded text-[11px]">known_agent_ids</code> lists. Running agents will
+              receive a config update and reload their peer map automatically.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setIsConfirmingCleanup(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-text-muted hover:bg-bg-elevated transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCleanupPeerRefs}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-accent-cyan text-black hover:opacity-90 transition-all"
+              >
+                Run Cleanup
               </button>
             </div>
           </div>

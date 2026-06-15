@@ -1,8 +1,10 @@
+import json
 import os
 import secrets
 import shutil
 import socket
 import subprocess
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -44,6 +46,129 @@ def check_docker():
         return True
     except subprocess.CalledProcessError:
         return False
+
+
+def _core_api_url() -> str:
+    domain = get_env("ISLI_DOMAIN", "localhost")
+    if domain == "localhost":
+        return "http://localhost:8000"
+    return f"https://{domain}"
+
+
+def _admin_api_key() -> str:
+    return get_env("ADMIN_API_KEY", "")
+
+
+def _api_request(method: str, path: str, body: dict | None = None) -> dict:
+    url = f"{_core_api_url()}{path}"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Admin-Key": _admin_api_key(),
+    }
+    data = json.dumps(body).encode("utf-8") if body else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        if resp.status == 204:
+            return {}
+        return json.loads(resp.read().decode("utf-8"))
+
+
+# --- Skill Sub-Commands ---
+skill_app = typer.Typer(help="Manage ISLI skills")
+app.add_typer(skill_app, name="skill")
+
+
+@skill_app.command()
+def install(url: str, skill_id: str = typer.Option(None, help="Override skill ID (defaults to repo name)"), auto_enable: bool = True):
+    """Install a skill from a git URL."""
+    if not skill_id:
+        # Derive skill_id from last path segment of git URL, stripping .git
+        skill_id = Path(url).name.replace(".git", "")
+
+    endpoint = "/v1/skills/install-and-enable" if auto_enable else "/v1/skills/install"
+    try:
+        result = _api_request("POST", endpoint, {"skill_id": skill_id, "git_url": url})
+        console.print(f"[green]✓ Skill '{skill_id}' installed{(' and enabled' if auto_enable else '')}.[/green]")
+        if "build_time_ms" in result:
+            console.print(f"[dim]Build time: {result['build_time_ms']}ms[/dim]")
+        if "probe_ok" in result:
+            console.print(f"[green]Health probe: {'OK' if result['probe_ok'] else 'FAILED'}[/green]")
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="ignore")
+        console.print(f"[red]✗ Installation failed: {e.code} {err_body}[/red]")
+        raise typer.Exit(1)
+
+
+@skill_app.command()
+def enable(skill_id: str):
+    """Enable a previously installed skill."""
+    try:
+        _api_request("POST", f"/v1/skills/{skill_id}/enable")
+        console.print(f"[green]✓ Skill '{skill_id}' enabled.[/green]")
+    except urllib.error.HTTPError as e:
+        console.print(f"[red]✗ Enable failed: {e.code} {e.reason}[/red]")
+        raise typer.Exit(1)
+
+
+@skill_app.command()
+def disable(skill_id: str):
+    """Disable a running skill."""
+    try:
+        _api_request("POST", f"/v1/skills/{skill_id}/disable")
+        console.print(f"[yellow]✓ Skill '{skill_id}' disabled.[/yellow]")
+    except urllib.error.HTTPError as e:
+        console.print(f"[red]✗ Disable failed: {e.code} {e.reason}[/red]")
+        raise typer.Exit(1)
+
+
+@skill_app.command()
+def uninstall(skill_id: str):
+    """Uninstall a skill completely."""
+    if not typer.confirm(f"Are you sure you want to uninstall '{skill_id}'?"):
+        console.print("[yellow]Aborted.[/yellow]")
+        raise typer.Exit(0)
+    try:
+        _api_request("DELETE", f"/v1/skills/{skill_id}")
+        console.print(f"[green]✓ Skill '{skill_id}' uninstalled.[/green]")
+    except urllib.error.HTTPError as e:
+        console.print(f"[red]✗ Uninstall failed: {e.code} {e.reason}[/red]")
+        raise typer.Exit(1)
+
+
+@skill_app.command("list")
+def list_skills():
+    """List all installed (non-builtin) skills."""
+    try:
+        skills = _api_request("GET", "/v1/skills")
+        installed = [s for s in skills if s.get("status") != "builtin"]
+        if not installed:
+            console.print("[dim]No installed skills found.[/dim]")
+            return
+
+        table = Table(title="Installed Skills")
+        table.add_column("ID", style="cyan")
+        table.add_column("Name", style="bold")
+        table.add_column("Status", style="bold")
+        table.add_column("Probe", style="bold")
+        table.add_column("Version", style="dim")
+        table.add_column("Category", style="dim")
+
+        for s in installed:
+            status = s.get("status", "unknown")
+            probe = s.get("last_probe_status", "n/a")
+            style = "green" if status == "active" and probe == "healthy" else "red" if status == "error" else "yellow"
+            table.add_row(
+                s["name"],
+                s.get("author", "") or "—",
+                f"[{style}]{status}[/{style}]",
+                probe,
+                s.get("version", "") or "—",
+                s.get("category", "custom"),
+            )
+        console.print(table)
+    except urllib.error.HTTPError as e:
+        console.print(f"[red]✗ List failed: {e.code} {e.reason}[/red]")
+        raise typer.Exit(1)
 
 def check_ollama():
     try:

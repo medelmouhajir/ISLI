@@ -43,6 +43,7 @@ DATETIME_DEF = {
             "required": [],
         },
     },
+    "x_isli_always_active": True,
 }
 
 SHELL_EXEC_DEF = {

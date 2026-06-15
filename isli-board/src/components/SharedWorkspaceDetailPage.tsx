@@ -27,6 +27,9 @@ export function SharedWorkspaceDetailPage() {
     title: string;
     description: string;
     onConfirm: () => void | Promise<void>;
+    variant?: 'danger' | 'warning' | 'primary';
+    hideCancel?: boolean;
+    confirmText?: string;
   }>({
     open: false,
     title: '',
@@ -71,7 +74,14 @@ export function SharedWorkspaceDetailPage() {
       await addMember.mutateAsync({ workspaceId: workspace.id, memberId: newMemberId })
       setNewMemberId('')
     } catch (err) {
-      alert('Failed to add member: ' + (err instanceof Error ? err.message : String(err)))
+      setConfirmModal({
+        open: true,
+        title: 'Error',
+        description: 'Failed to add member: ' + (err instanceof Error ? err.message : String(err)),
+        onConfirm: () => {},
+        hideCancel: true,
+        variant: 'danger'
+      })
     }
   }
 
@@ -80,12 +90,21 @@ export function SharedWorkspaceDetailPage() {
     setConfirmModal({
       open: true,
       title: 'Remove Member',
+      variant: 'warning',
+      confirmText: 'Remove Member',
       description: `Are you sure you want to remove ${agent?.name || memberId} from this workspace? They will no longer have access to the shared files.`,
       onConfirm: async () => {
         try {
           await removeMember.mutateAsync({ workspaceId: workspace.id, memberId })
         } catch (err) {
-          alert('Failed to remove member: ' + (err instanceof Error ? err.message : String(err)))
+          setConfirmModal({
+            open: true,
+            title: 'Error',
+            description: 'Failed to remove member: ' + (err instanceof Error ? err.message : String(err)),
+            onConfirm: () => {},
+            hideCancel: true,
+            variant: 'danger'
+          })
         }
       },
     })
@@ -238,8 +257,9 @@ export function SharedWorkspaceDetailPage() {
         open={confirmModal.open}
         title={confirmModal.title}
         description={confirmModal.description}
-        variant="warning"
-        confirmText="Remove Member"
+        variant={confirmModal.variant || "warning"}
+        confirmText={confirmModal.confirmText || "Remove Member"}
+        hideCancel={confirmModal.hideCancel}
         onConfirm={confirmModal.onConfirm}
         onClose={() => setConfirmModal(prev => ({ ...prev, open: false }))}
         isLoading={removeMember.isPending}

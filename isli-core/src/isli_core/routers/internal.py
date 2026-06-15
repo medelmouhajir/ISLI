@@ -1,13 +1,27 @@
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Any, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Literal
 
 from isli_core.db import get_db
-from isli_core.models import Task, SharedWorkspace, Agent
-from isli_core.auth import require_internal_auth
+from isli_core.models import Agent, SharedWorkspace, Task
+from isli_core.auth import verify_internal_token
 
 router = APIRouter(prefix="/internal", tags=["internal"])
+
+
+def _require_service_auth(request: Request) -> dict[str, Any]:
+    """Verify a valid internal JWT from a sibling service.
+
+    Unlike require_internal_auth, this does not perform agent token revocation
+    checks because service-to-service tokens use non-agent subjects.
+    """
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    token = auth[7:]
+    return verify_internal_token(token)
 
 ScopeType = Literal["agent", "attachment", "shared"]
 
@@ -39,8 +53,9 @@ async def verify_access(
     agent_id: str,
     scope: ScopeType,
     scope_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    auth: dict = Depends(require_internal_auth)
+    auth: dict = Depends(_require_service_auth),
 ):
     """
     Internal endpoint for other services to verify agent access to a scope.

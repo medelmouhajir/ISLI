@@ -14,7 +14,9 @@ export function ProviderSettingsPage() {
 
   const [showKey, setShowKey] = useState<Record<string, boolean>>({})
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({})
+  const [baseInputs, setBaseInputs] = useState<Record<string, string>>({})
   const [modelInputs, setModelInputs] = useState<Record<string, { model_id: string; name: string }>>({})
+  const [newProviderName, setNewProviderName] = useState('')
 
   if (isLoading) {
     return (
@@ -173,6 +175,56 @@ export function ProviderSettingsPage() {
                   )}
                 </div>
 
+                {/* API Base */}
+                <div className="space-y-2">
+                  <label className="text-[10px] font-display uppercase tracking-wider text-text-muted font-bold">
+                    API Base URL
+                  </label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={baseInputs[provider.provider] ?? provider.api_base ?? ''}
+                      onChange={(e) =>
+                        setBaseInputs((prev) => ({
+                          ...prev,
+                          [provider.provider]: e.target.value,
+                        }))
+                      }
+                      placeholder="e.g. http://localhost:11434/v1"
+                      className="bg-bg-base/50 flex-1"
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => {
+                        const base = baseInputs[provider.provider]
+                        if (base === undefined) return
+                        updateProvider.mutate(
+                          {
+                            provider: provider.provider,
+                            payload: { api_base: base },
+                          },
+                          {
+                            onSuccess: () =>
+                              setBaseInputs((prev) => {
+                                const next = { ...prev }
+                                delete next[provider.provider]
+                                return next
+                              }),
+                          }
+                        )
+                      }}
+                      disabled={baseInputs[provider.provider] === undefined || updateProvider.isPending}
+                    >
+                      Save
+                    </Button>
+                  </div>
+                  {provider.api_base && (
+                    <p className="text-[10px] text-text-muted font-mono-data">
+                      Active: {provider.api_base}
+                    </p>
+                  )}
+                </div>
+
                 {/* Models List */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
@@ -282,6 +334,47 @@ export function ProviderSettingsPage() {
               </div>
             </div>
           ))}
+
+          {/* Add New Provider Card */}
+          <div className="bg-bg-surface border border-border-dim border-dashed rounded-xl overflow-hidden flex flex-col items-center justify-center p-8 space-y-4 hover:border-accent-cyan/40 transition-colors group">
+            <div className="w-12 h-12 rounded-2xl bg-bg-elevated border border-border-dim flex items-center justify-center text-text-muted group-hover:text-accent-cyan group-hover:bg-accent-cyan/5 transition-all">
+              <Plus className="w-6 h-6" />
+            </div>
+            <div className="text-center space-y-1">
+              <h3 className="text-xs font-display font-bold text-text-primary uppercase tracking-wider">
+                Add New Provider
+              </h3>
+              <p className="text-[10px] text-text-muted font-mono-data">
+                Register a new LLM provider name
+              </p>
+            </div>
+            <div className="w-full max-w-[240px] flex flex-col gap-2">
+              <Input
+                placeholder="Provider (e.g. anthropic)"
+                value={newProviderName}
+                onChange={(e) => setNewProviderName(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
+                className="bg-bg-base/50 text-center font-mono-data text-xs"
+              />
+              <Button
+                variant="primary"
+                className="w-full"
+                disabled={!newProviderName || updateProvider.isPending}
+                onClick={() => {
+                  updateProvider.mutate(
+                    {
+                      provider: newProviderName,
+                      payload: { enabled: true },
+                    },
+                    {
+                      onSuccess: () => setNewProviderName(''),
+                    }
+                  )
+                }}
+              >
+                Add Provider
+              </Button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

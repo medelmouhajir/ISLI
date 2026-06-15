@@ -4,12 +4,15 @@ import { cn } from '@/lib/utils'
 import { AgentsPanel } from './AgentsPanel'
 import { CostPanel } from './CostPanel'
 import { StatusBadge } from './StatusBadge'
+import { useUpdateAgent } from '@/hooks/useAgents'
+import { useCreateSession } from '@/hooks/useSessions'
 import {
   BarChart3,
   ChevronLeft,
   ChevronRight,
   X,
   LayoutGrid,
+  Calendar,
   MessageSquare,
   MessageCircle,
   BrainCircuit,
@@ -22,6 +25,9 @@ import {
   Cpu,
   ShoppingBag,
   Newspaper,
+  Plus,
+  Play,
+  Pause,
 } from 'lucide-react'
 import { motion, AnimatePresence, animate, useMotionValue, type PanInfo } from 'framer-motion'
 import { useState, useEffect, useRef, useCallback } from 'react'
@@ -41,6 +47,7 @@ export function Sidebar({ agents, cost, collapsed, onToggle, mobileOpen, onClose
   const navItems = [
     { label: 'Dashboard', icon: Gauge, path: '/' },
     { label: 'Kanban', icon: LayoutGrid, path: '/kanban' },
+    { label: 'Calendar', icon: Calendar, path: '/calendar' },
     { label: 'Agents', icon: Bot, path: '/agents' },
     { label: 'Skills Store', icon: ShoppingBag, path: '/store' },
     { label: 'Workspaces', icon: FolderGit2, path: '/workspaces' },
@@ -160,6 +167,163 @@ interface NavItemDef {
   path: string
 }
 
+function MobileAgentCard({ agent, onNavigate }: { agent: Agent; onNavigate: (path: string, options?: { state?: any }) => void }) {
+  const updateAgent = useUpdateAgent()
+  const createSession = useCreateSession()
+  const x = useMotionValue(0)
+
+  const handleCreateSession = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    try {
+      const session = await createSession.mutateAsync({ agent_id: agent.id })
+      onNavigate('/sessions', { state: { sessionId: session.id } })
+    } catch (err) {
+      console.error('Failed to create session:', err)
+    }
+  }
+
+  const handleToggleStatus = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    updateAgent.mutate({
+      id: agent.id,
+      payload: { status: agent.status === 'online' ? 'paused' : 'online' },
+    })
+  }
+
+  const handleViewLogs = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    onNavigate(`/agents/${agent.id}/logs`)
+  }
+
+  const pct = agent.token_budget
+    ? Math.min((agent.token_used / agent.token_budget) * 100, 100)
+    : 0
+  const tokenColor =
+    agent.token_budget && agent.token_used / agent.token_budget > 0.8
+      ? 'bg-accent-red'
+      : agent.token_budget && agent.token_used / agent.token_budget > 0.5
+      ? 'bg-accent-amber'
+      : 'bg-accent-cyan'
+
+  return (
+    <div className="relative overflow-hidden rounded-2xl bg-bg-surface/40 border border-border-dim/40 backdrop-blur-sm group">
+      {/* Background Actions */}
+      <div className="absolute inset-y-0 right-0 flex items-center pr-3 gap-2">
+        <button
+          onClick={handleCreateSession}
+          className="w-10 h-10 rounded-xl bg-accent-cyan/10 text-accent-cyan flex items-center justify-center border border-accent-cyan/20 active:scale-95 transition-transform"
+          title="New Session"
+        >
+          <Plus className="w-5 h-5" />
+        </button>
+        <button
+          onClick={handleToggleStatus}
+          className={cn(
+            'w-10 h-10 rounded-xl flex items-center justify-center border active:scale-95 transition-transform',
+            agent.status === 'online'
+              ? 'bg-accent-amber/10 text-accent-amber border-accent-amber/20'
+              : 'bg-accent-green/10 text-accent-green border-accent-green/20'
+          )}
+          title={agent.status === 'online' ? 'Pause Agent' : 'Start Agent'}
+        >
+          {agent.status === 'online' ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+        </button>
+        <button
+          onClick={handleViewLogs}
+          className="w-10 h-10 rounded-xl bg-bg-elevated text-text-secondary flex items-center justify-center border border-border-dim active:scale-95 transition-transform"
+          title="View Logs"
+        >
+          <ScrollText className="w-5 h-5" />
+        </button>
+      </div>
+
+      {/* Swipable Foreground */}
+      <motion.div
+        style={{ x }}
+        drag="x"
+        dragDirectionLock
+        dragConstraints={{ left: -145, right: 0 }}
+        dragElastic={0.05}
+        onDragEnd={(_, info) => {
+          if (info.offset.x < -60) {
+            animate(x, -145, { type: 'spring', stiffness: 400, damping: 35 })
+          } else {
+            animate(x, 0, { type: 'spring', stiffness: 400, damping: 35 })
+          }
+        }}
+        onClick={() => onNavigate(`/agents/${agent.id}`)}
+        className="relative z-10 flex items-center gap-3 p-3 bg-bg-surface border-transparent cursor-pointer active:bg-bg-elevated transition-colors"
+      >
+        {/* Avatar with status */}
+        <div className="relative shrink-0">
+          <div
+            className={cn(
+              'w-11 h-11 rounded-xl flex items-center justify-center border overflow-hidden',
+              agent.status === 'online'
+                ? 'bg-accent-green/10 border-accent-green/20 text-accent-green'
+                : agent.status === 'paused'
+                ? 'bg-accent-amber/10 border-accent-amber/20 text-accent-amber'
+                : 'bg-accent-red/10 border-accent-red/20 text-accent-red'
+            )}
+          >
+            {agent.picture ? (
+              <img
+                src={`/api/v1/blobs/${agent.picture}`}
+                alt={agent.name}
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <Cpu className="w-5 h-5" />
+            )}
+          </div>
+          <span
+            className={cn(
+              'absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-bg-base',
+              agent.status === 'online' && 'bg-accent-green',
+              agent.status === 'paused' && 'bg-accent-amber',
+              agent.status === 'offline' && 'bg-accent-red',
+              agent.status === 'registered' && 'bg-accent-cyan',
+              agent.status === 'deleted' && 'bg-text-muted'
+            )}
+          />
+        </div>
+
+        {/* Info */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between gap-2 mb-0.5">
+            <h3 className="text-sm font-display font-bold text-text-primary truncate">
+              {agent.name}
+            </h3>
+            <StatusBadge status={agent.status} />
+          </div>
+
+          <div className="flex items-center gap-1.5 mb-2">
+            <span className="text-[10px] px-1.5 py-[1px] rounded-md bg-bg-elevated border border-border-dim/50 text-text-muted font-mono-data truncate max-w-[90px]">
+              {agent.model_id || 'Not set'}
+            </span>
+            <span className="text-[10px] px-1.5 py-[1px] rounded-md bg-bg-elevated border border-border-dim/50 text-text-muted font-mono-data">
+              {agent.skills.length} tools
+            </span>
+          </div>
+
+          {/* Token bar */}
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-[3px] rounded-full bg-border-dim/40 overflow-hidden">
+              <div
+                className={cn('h-full rounded-full transition-all duration-500', tokenColor)}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className="text-[9px] font-mono-data text-text-muted shrink-0 leading-none">
+              {agent.token_used.toLocaleString()}
+            </span>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  )
+}
+
 function MobileNavMenu({
   agents,
   cost,
@@ -228,8 +392,8 @@ function MobileNavMenu({
   }, [page, width, contentX])
 
   const goTo = useCallback(
-    (path: string) => {
-      navigate(path)
+    (path: string, options?: { state?: any }) => {
+      navigate(path, options)
       onClose()
     },
     [navigate, onClose]
@@ -406,87 +570,9 @@ function MobileNavMenu({
             )}
 
             <div className="flex flex-col gap-2.5">
-              {agents.map((agent) => {
-                const pct = agent.token_budget
-                  ? Math.min((agent.token_used / agent.token_budget) * 100, 100)
-                  : 0
-                const tokenColor =
-                  agent.token_budget && agent.token_used / agent.token_budget > 0.8
-                    ? 'bg-accent-red'
-                    : agent.token_budget && agent.token_used / agent.token_budget > 0.5
-                    ? 'bg-accent-amber'
-                    : 'bg-accent-cyan'
-                return (
-                  <motion.button
-                    key={agent.id}
-                    whileTap={{ scale: 0.97 }}
-                    onClick={() => goTo(`/agents/${agent.id}`)}
-                    className={cn(
-                      'flex items-center gap-3 p-3 rounded-2xl text-left transition-colors duration-150',
-                      'bg-bg-surface/40 border border-border-dim/40 backdrop-blur-sm',
-                      'hover:bg-bg-elevated/50 hover:border-border-dim/70'
-                    )}
-                  >
-                    {/* Avatar with status */}
-                    <div className="relative shrink-0">
-                      <div
-                        className={cn(
-                          'w-11 h-11 rounded-xl flex items-center justify-center border',
-                          agent.status === 'online'
-                            ? 'bg-accent-green/10 border-accent-green/20 text-accent-green'
-                            : agent.status === 'paused'
-                            ? 'bg-accent-amber/10 border-accent-amber/20 text-accent-amber'
-                            : 'bg-accent-red/10 border-accent-red/20 text-accent-red'
-                        )}
-                      >
-                        <Cpu className="w-5 h-5" />
-                      </div>
-                      <span
-                        className={cn(
-                          'absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-bg-base',
-                          agent.status === 'online' && 'bg-accent-green',
-                          agent.status === 'paused' && 'bg-accent-amber',
-                          agent.status === 'offline' && 'bg-accent-red',
-                          agent.status === 'registered' && 'bg-accent-cyan',
-                          agent.status === 'deleted' && 'bg-text-muted'
-                        )}
-                      />
-                    </div>
-
-                    {/* Info */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-2 mb-0.5">
-                        <h3 className="text-sm font-display font-bold text-text-primary truncate">
-                          {agent.name}
-                        </h3>
-                        <StatusBadge status={agent.status} />
-                      </div>
-
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <span className="text-[10px] px-1.5 py-[1px] rounded-md bg-bg-elevated border border-border-dim/50 text-text-muted font-mono-data truncate max-w-[90px]">
-                          {agent.model_id || 'Not set'}
-                        </span>
-                        <span className="text-[10px] px-1.5 py-[1px] rounded-md bg-bg-elevated border border-border-dim/50 text-text-muted font-mono-data">
-                          {agent.skills.length} tools
-                        </span>
-                      </div>
-
-                      {/* Token bar */}
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 h-[3px] rounded-full bg-border-dim/40 overflow-hidden">
-                          <div
-                            className={cn('h-full rounded-full transition-all duration-500', tokenColor)}
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                        <span className="text-[9px] font-mono-data text-text-muted shrink-0 leading-none">
-                          {agent.token_used.toLocaleString()}
-                        </span>
-                      </div>
-                    </div>
-                  </motion.button>
-                )
-              })}
+              {agents.map((agent) => (
+                <MobileAgentCard key={agent.id} agent={agent} onNavigate={goTo} />
+              ))}
             </div>
 
             {agents.length === 0 && (

@@ -46,6 +46,8 @@ export function WorkspaceDetailPage() {
     description: string;
     onConfirm: () => void | Promise<void>;
     variant?: 'primary' | 'danger' | 'warning';
+    hideCancel?: boolean;
+    confirmText?: string;
   }>({
     open: false,
     title: '',
@@ -104,7 +106,14 @@ export function WorkspaceDetailPage() {
       setIsDirty(false)
       // Success is handled by mutation's onSuccess (invalidation)
     } catch (err) {
-      alert('Failed to save file: ' + (err instanceof Error ? err.message : String(err)))
+      setConfirmModal({
+        open: true,
+        title: 'Error',
+        description: 'Failed to save file: ' + (err instanceof Error ? err.message : String(err)),
+        onConfirm: () => {},
+        hideCancel: true,
+        variant: 'danger'
+      })
     }
   }
 
@@ -121,7 +130,14 @@ export function WorkspaceDetailPage() {
         try {
           await deleteMutation.mutateAsync({ agentId, path: fullPath })
         } catch (err) {
-          alert('Failed to delete: ' + (err instanceof Error ? err.message : String(err)))
+          setConfirmModal({
+            open: true,
+            title: 'Error',
+            description: 'Failed to delete: ' + (err instanceof Error ? err.message : String(err)),
+            onConfirm: () => {},
+            hideCancel: true,
+            variant: 'danger'
+          })
         }
       },
       variant: 'danger',
@@ -137,7 +153,14 @@ export function WorkspaceDetailPage() {
       await uploadMutation.mutateAsync({ agentId, path, file })
       if (fileInputRef.current) fileInputRef.current.value = ''
     } catch (err) {
-      alert('Upload failed: ' + (err instanceof Error ? err.message : String(err)))
+      setConfirmModal({
+        open: true,
+        title: 'Upload Failed',
+        description: 'Upload failed: ' + (err instanceof Error ? err.message : String(err)),
+        onConfirm: () => {},
+        hideCancel: true,
+        variant: 'danger'
+      })
     }
   }
 
@@ -149,7 +172,14 @@ export function WorkspaceDetailPage() {
     try {
       await mkdirMutation.mutateAsync({ agentId, path })
     } catch (err) {
-      alert('Failed to create folder: ' + (err instanceof Error ? err.message : String(err)))
+      setConfirmModal({
+        open: true,
+        title: 'Error',
+        description: 'Failed to create folder: ' + (err instanceof Error ? err.message : String(err)),
+        onConfirm: () => {},
+        hideCancel: true,
+        variant: 'danger'
+      })
     }
   }
 
@@ -161,7 +191,14 @@ export function WorkspaceDetailPage() {
     try {
       await downloadFileBlob(`/v1/workspaces/${agentId}/download?path=${encodeURIComponent(fullPath)}`, entry.name)
     } catch (err) {
-      alert('Download failed: ' + (err instanceof Error ? err.message : String(err)))
+      setConfirmModal({
+        open: true,
+        title: 'Download Failed',
+        description: 'Download failed: ' + (err instanceof Error ? err.message : String(err)),
+        onConfirm: () => {},
+        hideCancel: true,
+        variant: 'danger'
+      })
     }
   }
 
@@ -377,6 +414,8 @@ export function WorkspaceDetailPage() {
         title={confirmModal.title}
         description={confirmModal.description}
         variant={confirmModal.variant}
+        hideCancel={confirmModal.hideCancel}
+        confirmText={confirmModal.confirmText}
         onConfirm={confirmModal.onConfirm}
         onClose={() => setConfirmModal(prev => ({ ...prev, open: false }))}
         isLoading={deleteMutation.isPending}

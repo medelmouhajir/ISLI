@@ -23,6 +23,7 @@ _WORKER_SPECS = [
     "isli_core.jobs.attachment_cleanup:AttachmentCleanupWorker.loop",
     "isli_core.jobs.audio_cleanup:AudioCleanupWorker.loop",
     "isli_core.jobs.chromadb_backup_worker:ChromaBackupWorker.loop",
+    "isli_core.jobs.skill_update_worker:SkillUpdateWorker.loop",
 ]
 
 

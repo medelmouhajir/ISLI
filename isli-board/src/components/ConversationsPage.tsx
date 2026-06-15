@@ -60,7 +60,7 @@ export function ConversationsPage() {
             : null
         const anyReady = userSessions.some((s) => s.status === 'ready')
         const anyPending = userSessions.some((s) =>
-          ['pending_context', 'processing_context'].includes(s.status)
+          ['pending_context', 'processing_context', 'agent_processing'].includes(s.status)
         )
         const allClosed = userSessions.every((s) => s.status === 'closed')
         const statusColor = anyPending
@@ -643,7 +643,9 @@ export function ConversationsPage() {
                             {lastStatusText[activeSessionId || ''] ||
                               (activeClient.latestSession.status === 'pending_context'
                                 ? 'INJECTING_CONTEXT...'
-                                : 'THINKING...')}
+                                : activeClient.latestSession.status === 'agent_processing'
+                                  ? 'PROCESSING...'
+                                  : 'THINKING...')}
                           </span>
                         </div>
                       </div>

@@ -55,6 +55,19 @@ The Kanban board remains ISLI's **central nervous system for human oversight**.
 
 Columns are fixed. Cards move left to right: `Inbox → Assigned → In Progress → Review → Done`.
 
+### Task Execution Discipline (Added 2026-06-14)
+
+To prevent agents from greeting or status-carding their way out of a work order, the SDK injects a **Task-Mode Execution Block** into the system prompt whenever it is executing a Kanban task. This block is not present during chat/session messages.
+
+The block enforces:
+- Read the task title and description as the work order.
+- Execute the work by calling the relevant skills/tools.
+- Write required file deliverables before completing.
+- Never use `ui_components`, `send_message`, or `notify_user` as a substitute for doing the work.
+- If unsure, create a sub-task or mark the task `blocked`; do not mark it `done`.
+
+This is a prompt-level guard. A future Core-side guard may also inspect `skill_runs` and `attachments` before allowing a move to `done`.
+
 ### The "Review" Column (Violet)
 The **Review** status is a critical human-in-the-loop gating mechanism. 
 
@@ -426,6 +439,7 @@ The workspace service enforces `quota_bytes` per shared workspace on every write
 
 Agents (or the Board) can copy a file from an agent or attachment scope into a shared workspace:
 
+**REST path (Board / external clients):**
 ```
 Agent / Board
   → POST /v1/shared-workspaces/{id}/promote
@@ -433,6 +447,12 @@ Agent / Board
   → Core proxies to workspace service /shared/promote
   → Workspace service validates access, checks quota, copies/moves the file
 ```
+
+**Skill path (agents calling tools):**
+- `POST /v1/skills/shared-promote-file-workspace/promote` — copy from the agent's own workspace into a shared workspace.
+- `POST /v1/skills/promote-output/promote` — copy from a task attachment scope into a shared workspace.
+
+Both skill endpoints perform the same membership/quota validation and proxy to the workspace service.
 
 ## Kanban as Communication Protocol
 

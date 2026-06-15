@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import base64
 import json
+import re
 import structlog
 from uuid import uuid4
 
@@ -17,7 +18,7 @@ from isli_core.auth import create_internal_token
 
 from isli_core.db import get_db
 from isli_core.redis_client import get_redis
-from isli_core.models import Session, ChannelMessage, ChannelIdentity
+from isli_core.models import Agent, Session, ChannelMessage, ChannelIdentity
 from isli_core.config import get_settings
 from isli_core.auth import require_internal_auth, require_admin_auth
 from isli_core.retry import exponential_backoff
@@ -26,6 +27,7 @@ from isli_core.redis_streams import add_to_stream
 from isli_core.cost.complexity import TaskComplexityScorer
 from isli_core.memory.context_cache import ContextCache
 from isli_core.utils.tokens import count_message_tokens
+from isli_core.jobs.journal_worker import update_session_journal
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -48,12 +50,17 @@ class SessionOut(BaseModel):
     last_activity_at: datetime | None
     compacted_at: datetime | None
     journal: str | None
+    journal_updated_at: datetime | None
     complexity_score: int | None
     complexity_tier: str | None
     routed_model_provider: str | None
     routed_model_id: str | None
     routed_model_reason: str | None
     session_metadata: dict[str, Any] | None
+
+
+class JournalUpdateIn(BaseModel):
+    journal: str | None
 
 
 class SessionCreateIn(BaseModel):
@@ -159,7 +166,6 @@ async def create_session(
     payload: SessionCreateIn,
     db: AsyncSession = Depends(get_db),
 ):
-    from isli_core.models import Agent
     agent_check = await db.execute(select(Agent).where(Agent.id == payload.agent_id, Agent.deleted_at.is_(None)))
     if not agent_check.scalar_one_or_none():
         raise HTTPException(status_code=400, detail=f"Agent '{payload.agent_id}' not found or deleted")
@@ -216,7 +222,6 @@ async def send_human_message(
 
     # --- Channel identity upsert (moved from worker to ingress) ---
     if sess.user_id and sess.channel and sess.channel != "web":
-        from isli_core.models import Agent
         agent_result = await db.execute(
             select(Agent).where(Agent.id == sess.agent_id, Agent.deleted_at.is_(None))
         )
@@ -457,6 +462,39 @@ async def reply_to_session(
     return {"status": "sent", "session_id": session_id, "message": api_response_msg}
 
 
+class SessionStatusUpdateIn(BaseModel):
+    status: str
+
+
+@router.post("/{session_id}/status")
+async def update_session_status(
+    session_id: str,
+    payload: SessionStatusUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_internal_auth),
+):
+    """Allow the agent runner to explicitly update session status (e.g. ready after processing)."""
+    result = await db.execute(
+        select(Session).where(
+            Session.id == session_id,
+            Session.deleted_at.is_(None),
+            Session.status != "closed",
+        )
+    )
+    sess = result.scalar_one_or_none()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if auth.get("sub") != sess.agent_id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this session")
+
+    sess.status = payload.status
+    sess.last_activity_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    await EventManager.emit("session:updated", {"session_id": session_id})
+    return {"status": "updated", "session_id": session_id, "new_status": sess.status}
+
+
 @router.get("/{session_id}/draft")
 async def get_session_draft(session_id: str):
     redis = await get_redis()
@@ -628,6 +666,92 @@ async def download_session_audio(
         media_type=resp.headers.get("content-type", "audio/wav"),
         headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )
+
+
+@router.put("/{session_id}/journal", response_model=SessionOut)
+async def update_session_journal_text(
+    session_id: str,
+    data: JournalUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_admin_auth),
+):
+    """Manually update the session journal text."""
+    result = await db.execute(
+        select(Session).where(Session.id == session_id, Session.deleted_at.is_(None))
+    )
+    sess = result.scalar_one_or_none()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    old_journal = sess.journal
+    sess.journal = data.journal
+    sess.journal_updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(sess)
+
+    await EventManager.emit(
+        "memory:journal_updated",
+        {
+            "session_id": session_id,
+            "agent_id": sess.agent_id,
+            "old_journal": old_journal,
+            "new_journal": sess.journal,
+        },
+    )
+    return sess
+
+
+@router.post("/{session_id}/journal/regenerate", response_model=SessionOut)
+async def regenerate_session_journal(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_admin_auth),
+):
+    """Force-regenerate the session journal using the Keeper."""
+    result = await db.execute(
+        select(Session).where(Session.id == session_id, Session.deleted_at.is_(None))
+    )
+    sess = result.scalar_one_or_none()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    success = await update_session_journal(db, sess, trigger="manual_regenerate")
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to regenerate journal")
+
+    await db.refresh(sess)
+    return sess
+
+
+@router.delete("/{session_id}/journal", response_model=SessionOut)
+async def clear_session_journal(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_admin_auth),
+):
+    """Clear the session journal."""
+    result = await db.execute(
+        select(Session).where(Session.id == session_id, Session.deleted_at.is_(None))
+    )
+    sess = result.scalar_one_or_none()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    sess.journal = None
+    sess.journal_updated_at = None
+    await db.commit()
+    await db.refresh(sess)
+
+    await EventManager.emit(
+        "memory:journal_updated",
+        {
+            "session_id": session_id,
+            "agent_id": sess.agent_id,
+            "old_journal": None,
+            "new_journal": None,
+        },
+    )
+    return sess
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
