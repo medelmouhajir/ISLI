@@ -10,6 +10,7 @@ COMPONENT_TYPES = [
     "json_viewer",
     "status_timeline",
     "metric_grid",
+    "file_card",
 ]
 
 UI_RENDERING_INSTRUCTIONS = """
@@ -92,6 +93,17 @@ Available component types and their props schemas:
    Trend values: up, down, flat. Color values: cyan, amber, green, red, violet.
    Interaction: read-only. No events fired.
 
+9. file_card
+   props: {
+     "filename": "report.pdf",
+     "mime_type": "application/pdf",
+     "size_bytes": 12345,
+     "download_url": "https://...",
+     "caption": "Optional caption"
+   }
+   Interaction: read-only. Renders a download button and a preview modal for images,
+   PDFs, videos, audio, and text files.
+
 Rules:
 - Always provide an action_id when you want to receive interactions.
 - Provide text_fallback for channels that cannot render components (e.g., Telegram).
@@ -116,7 +128,7 @@ def render_ui_component(
 
     Args:
         component_type: One of "table", "card", "button_group", "comparison_table",
-                        "form", "json_viewer", "status_timeline", "metric_grid".
+                        "form", "json_viewer", "status_timeline", "metric_grid", "file_card".
         props: Component-specific properties (see UI_RENDERING_INSTRUCTIONS).
         action_id: Unique identifier for this component instance. Required if you
                    want to receive interaction events from it.
@@ -143,7 +155,7 @@ RENDER_UI_COMPONENT_DEF = {
         "name": "ui_components",
         "description": (
             "Render a structured UI component (table, card, button_group, comparison_table, "
-            "form, json_viewer, status_timeline, metric_grid) inline in the chat stream. "
+            "form, json_viewer, status_timeline, metric_grid, file_card) inline in the chat stream. "
             "Provide an action_id to receive user interactions."
         ),
         "parameters": {
@@ -169,5 +181,8 @@ RENDER_UI_COMPONENT_DEF = {
             },
             "required": ["component_type", "props"],
         },
+        # Always expose ui_components so it is available in council rooms and
+        # other contexts where per-turn skill filtering might otherwise hide it.
+        "x_isli_always_active": True,
     },
 }

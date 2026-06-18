@@ -129,7 +129,6 @@ class ContextWorker:
         agent_id = payload.get("agent_id")
         task_description = payload.get("task_description")
         session_id = payload.get("session_id")
-        complexity_score = payload.get("complexity_score")
         memory_similarity_threshold = payload.get(
             "memory_similarity_threshold", 0.4
         )
@@ -486,6 +485,7 @@ class ContextWorker:
                         "token_map": token_map,
                         "metadata": sess.session_metadata or {},
                         "relevant_skills": relevant_skills or [],
+                        "room_id": sess.room_id,
                         "routed_model": {
                             "provider": sess.routed_model_provider,
                             "model_id": sess.routed_model_id,

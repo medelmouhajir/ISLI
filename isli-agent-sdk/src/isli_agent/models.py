@@ -17,7 +17,7 @@ class AgentConfig(BaseModel):
     turn_token_cap: Optional[int] = None
     api_key: Optional[str] = None
     api_base: Optional[str] = None
-    heartbeat_interval: int = 180
+    heartbeat_interval: int = 600
     model_routing_enabled: bool = False
     secondary_models: list[dict] = Field(default_factory=list)
     # Forward-compatible fields from Core Agent record (may be absent in config endpoint)

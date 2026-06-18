@@ -80,9 +80,11 @@ ISLI is feature-complete across 12 rigorous development phases, including:
 - **Phase 12:** Agent Identity Enhancements & Avatar System
 
 **Recent Post-Roadmap additions:**
+- **Council Chat (Multi-Agent Rooms)** — address multiple agents in one thread with side-by-side responses and shared context.
+- **Files Generation (PDF, DOCX, XLSX)** — agents can now generate professional reports, spreadsheets, and documents natively and save them to their workspace.
 - **Dynamic Local Model Management** — add arbitrary Ollama models (`gemma3:1b`, `phi4-mini`, etc.) to the Keeper catalog directly from the Board UI without code changes
 - **Unified Notification System** — in-app inbox + Telegram alerts with quiet hours, digest batching, and agent-facing SDK tools
-- **Context Safety** — hard output caps on file-read, db-query, and git-log to prevent silent context-window exhaustion
+- **Context Safety** — hard output caps on file-read, db-query, and git-log; and **Secure Server-Side Secret Injection** to prevent credential leakage into logs or RAG memory.
 
 ## Documentation
 

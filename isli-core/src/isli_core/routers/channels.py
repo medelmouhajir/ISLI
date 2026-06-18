@@ -4,15 +4,18 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
 from isli_core.access import resolve_access
 from isli_core.auth import verify_webhook_signature
+from isli_core.cost.complexity import TaskComplexityScorer
 from isli_core.db import get_db
-from isli_core.models import ChannelMessage, Task, Session, UserConsent
+from isli_core.event_manager import EventManager
+from isli_core.models import Agent, ChannelMessage, Task, Session, UserConsent
+from isli_core.redis_streams import add_to_stream
 from isli_core.schemas import validate_event
 
 logger = structlog.get_logger()
@@ -35,15 +38,17 @@ async def channel_webhook(channel: str, request: Request, db: AsyncSession = Dep
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # Idempotency check via Redis or DB (simplified: check dedup key in payload)
+    # Idempotency check via DB. Use exists() + scalar_one() so multiple rows are safe.
     dedup_key = payload.get("dedup_id") or payload.get("message_id")
     if dedup_key:
-        existing = await db.execute(
-            select(ChannelMessage).where(
-                ChannelMessage.raw_payload.cast(JSONB).contains({"dedup_id": dedup_key})
+        dedup_exists = await db.execute(
+            select(
+                exists().where(
+                    ChannelMessage.raw_payload.cast(JSONB).contains({"dedup_id": dedup_key})
+                )
             )
         )
-        if existing.scalar_one_or_none():
+        if dedup_exists.scalar_one():
             logger.info("channels.dedup_drop", channel=channel, dedup_id=dedup_key)
             return {"status": "deduplicated"}
 
@@ -148,6 +153,11 @@ async def channel_webhook(channel: str, request: Request, db: AsyncSession = Dep
                 logger.error("channels.webhook_stt_failed", session_id=session_id, error=str(exc))
                 # Fallback: keep the token in the text so it's not lost
 
+        # Complexity scoring at ingress for model routing
+        score, tier = TaskComplexityScorer.score_task_input(msg_text)
+        sess.complexity_score = score
+        sess.complexity_tier = tier
+
         sess.messages = (sess.messages or []) + [
             {"role": "user", "content": msg_text, "timestamp": now.isoformat()}
         ]
@@ -169,6 +179,30 @@ async def channel_webhook(channel: str, request: Request, db: AsyncSession = Dep
         )
         db.add(msg)
         await db.commit()
+
+        # Notify UI and enqueue context injection / agent turn
+        await EventManager.emit("session:updated", {"session_id": session_id})
+        agent_config = {}
+        if agent_id:
+            agent_result = await db.execute(
+                select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None))
+            )
+            agent_row = agent_result.scalar_one_or_none()
+            if agent_row:
+                agent_config = agent_row.config or {}
+        await add_to_stream(
+            "context:requests",
+            {
+                "type": "session",
+                "id": str(sess.id),
+                "agent_id": str(sess.agent_id),
+                "task_description": f"Session with {sess.user_id or 'user'}: {msg_text}",
+                "session_id": str(sess.id),
+                "complexity_score": score,
+                "complexity_tier": tier,
+                "memory_similarity_threshold": agent_config.get("memory_similarity_threshold", 0.4),
+            },
+        )
 
         logger.info("channels.session_ingested", channel=channel, session_id=sess.id, agent_id=agent_id)
         return {"status": "ok", "session_id": sess.id}

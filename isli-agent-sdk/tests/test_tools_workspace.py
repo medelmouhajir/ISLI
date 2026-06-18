@@ -142,7 +142,7 @@ class TestFileDelete:
 
 
 class TestAgentRunnerWorkspaceTools:
-    def test_registers_four_tools(self):
+    def test_registers_workspace_tools(self):
         config = AgentConfig(
             id="test-agent",
             name="Test Agent",
@@ -151,10 +151,31 @@ class TestAgentRunnerWorkspaceTools:
         )
         runner = AgentRunner(config, "http://localhost:8000")
         runner.add_workspace_tools()
-        assert len(runner.tools) == 4
-        assert len(runner.tool_definitions) == 4
+        assert len(runner.tools) == 7
+        assert len(runner.tool_definitions) == 7
         names = {d["function"]["name"] for d in runner.tool_definitions}
-        assert names == {"file_read", "file_write", "file_list", "file_delete"}
+        assert names == {
+            "file_read", "file_write", "file_list", "file_delete",
+            "describe_workspace_file", "search_workspace_file", "read_workspace_file",
+        }
+
+    async def test_auto_register_file_search_and_describe(self):
+        """file-search and file-describe from Core must resolve to the SDK workspace tools."""
+        config = AgentConfig(
+            id="test-agent",
+            name="Test Agent",
+            model_provider="ollama",
+            model_id="qwen2.5:7b",
+            skills=["file-search", "file-describe"],
+        )
+        runner = AgentRunner(config, "http://localhost:8000")
+        await runner._auto_register_tools_from_skills()
+        names = {d["function"]["name"] for d in runner.tool_definitions}
+        assert "search_workspace_file" in names
+        assert "describe_workspace_file" in names
+        skill_tags = {d.get("x_isli_skill") for d in runner.tool_definitions}
+        assert "file-search" in skill_tags
+        assert "file-describe" in skill_tags
 
 
 class TestAgentRunnerChannelTools:

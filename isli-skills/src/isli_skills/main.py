@@ -178,6 +178,13 @@ class ShellExecRequest(BaseModel):
     working_dir: str | None = None
 
 
+class DocumentGenerateRequest(BaseModel):
+    format: str
+    content: Any
+    filename: str
+    agent_id: str
+
+
 KEEPER_URL = os.getenv("KEEPER_URL", "http://localhost:8001")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search")
 
@@ -599,6 +606,25 @@ async def shell_exec(request: ShellExecRequest, auth: dict = Depends(require_int
         working_dir=request.working_dir,
     )
     return result
+
+
+@app.post("/generate")
+async def generate_document_endpoint(request: DocumentGenerateRequest, auth: dict = Depends(require_internal_auth)):
+    """Generate a PDF, DOCX, or XLSX document and save it to the agent's workspace."""
+    from .document_manager import handle_document_generation
+    try:
+        result = await handle_document_generation(
+            format=request.format,
+            content=request.content,
+            filename=request.filename,
+            agent_id=request.agent_id
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("skills.document_generate_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/skills/{name}/invoke")

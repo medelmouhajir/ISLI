@@ -4,12 +4,13 @@ import { useSessions, useSession, useSendMessage, useCreateSession, useCloseSess
 import { useAgents } from '@/hooks/useAgents'
 import { useSessionAction } from '@/hooks/useSessionAction'
 import { cn } from '@/lib/utils'
-import { MessageSquare, Plus, Bot, User, Clock, Loader2, Archive, Trash2, ChevronLeft, ArrowDown, Download, Copy, Check } from 'lucide-react'
+import { MessageSquare, Plus, Bot, User, Clock, Loader2, Archive, Trash2, ChevronLeft, ArrowDown, Download, Copy, Check, Users } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { Modal } from '@/components/ui/Modal'
 import { ConfirmationModal } from '@/components/ui/ConfirmationModal'
 import { ChatInput } from '@/components/ChatInput'
 import { UiComponentRenderer } from '@/components/ui/registry/UiComponentRegistry'
+import { AttachmentList } from '@/components/AttachmentList'
 import type { ComponentPayload } from '@/types'
 
 export function SessionsPage() {
@@ -19,6 +20,7 @@ export function SessionsPage() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     (location.state as { sessionId?: string })?.sessionId || null
   )
+  const [showCouncilSessions, setShowCouncilSessions] = useState(false)
 
   // Clear state after reading to prevent re-selection on refresh if desired, 
   // though React Router state persists in history.
@@ -43,8 +45,13 @@ export function SessionsPage() {
     onConfirm: () => {},
   })
   
-  const sortedSessions = useMemo(() => {
-    return [...sessions].sort((a, b) => {
+  const filteredSessions = useMemo(() => {
+    let list = sessions || []
+    if (!showCouncilSessions) {
+      list = list.filter((s) => !s.room_id)
+    }
+    
+    return [...list].sort((a, b) => {
       const aLastMsg = a.messages && a.messages.length > 0 ? a.messages[a.messages.length - 1] : null
       const bLastMsg = b.messages && b.messages.length > 0 ? b.messages[b.messages.length - 1] : null
       
@@ -53,7 +60,7 @@ export function SessionsPage() {
       
       return bTime - aTime
     })
-  }, [sessions])
+  }, [sessions, showCouncilSessions])
 
   const { data: selectedSession } = useSession(selectedSessionId)
   const [messageText, setMessageText] = useState('')
@@ -179,13 +186,27 @@ export function SessionsPage() {
           <h2 className="text-xs font-mono font-bold text-text-primary uppercase tracking-widest">
             Sessions_LOG
           </h2>
-          <button
-            onClick={() => setIsModalOpen(true)}
-            className="p-1.5 rounded-none bg-bg-elevated border border-border-dim text-accent-cyan hover:border-accent-cyan transition-all"
-            title="New Chat"
-          >
-            <Plus className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCouncilSessions(!showCouncilSessions)}
+              className={cn(
+                "p-1.5 rounded-none border transition-all",
+                showCouncilSessions
+                  ? "bg-accent-cyan/10 border-accent-cyan text-accent-cyan shadow-glow-cyan"
+                  : "bg-bg-elevated border-border-dim text-text-muted hover:text-text-primary hover:border-border-bright"
+              )}
+              title={showCouncilSessions ? "Hide Council Sessions" : "Show Council Sessions"}
+            >
+              <Users className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setIsModalOpen(true)}
+              className="p-1.5 rounded-none bg-bg-elevated border border-border-dim text-accent-cyan hover:border-accent-cyan transition-all"
+              title="New Chat"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         <Modal open={isModalOpen} onClose={() => setIsModalOpen(false)} title="Initialize Agent" className="sm:max-w-xl rounded-none font-mono">
@@ -227,7 +248,7 @@ export function SessionsPage() {
               <p className="text-[10px] font-mono text-text-muted uppercase tracking-widest">No active sessions</p>
             </div>
           ) : (
-            sortedSessions.map((s) => {
+            filteredSessions.map((s) => {
               const agent = agents?.find(a => a.id === s.agent_id)
               const lastMsg = s.messages && s.messages.length > 0 ? s.messages[s.messages.length - 1] : null
               return (
@@ -393,11 +414,11 @@ export function SessionsPage() {
                         <Bot className="w-4 h-4" />
                       )}
                     </div>
-                    <div className={cn('space-y-1', msg.role === 'user' || msg.role === 'action' ? 'text-right' : '')}>
+                    <div className={cn('space-y-1 min-w-0', msg.role === 'user' || msg.role === 'action' ? 'text-right' : '')}>
                       <div className="relative group">
                         <div
                           className={cn(
-                            'p-3 md:p-4 rounded-none text-sm leading-relaxed border font-mono',
+                            'p-3 md:p-4 rounded-none text-sm leading-relaxed border font-mono break-all whitespace-pre-wrap max-w-full',
                             msg.role === 'user'
                               ? 'bg-accent-purple/5 border-accent-purple/20 text-text-primary'
                               : msg.role === 'action'
@@ -454,7 +475,7 @@ export function SessionsPage() {
                       )}
                       {/* Components inline below assistant message */}
                       {msg.role === 'assistant' && msg.components && msg.components.length > 0 && (
-                        <div className="mt-2 space-y-2">
+                        <div className="mt-2 space-y-2 max-w-full overflow-x-auto">
                           {msg.components.map((comp: ComponentPayload, ci: number) => (
                             <UiComponentRenderer
                               key={ci}
@@ -464,6 +485,10 @@ export function SessionsPage() {
                             />
                           ))}
                         </div>
+                      )}
+                      {/* Attachments inline below assistant message */}
+                      {msg.role === 'assistant' && msg.attachments && msg.attachments.length > 0 && (
+                        <AttachmentList attachments={msg.attachments} />
                       )}
                       <div
                         className={cn(

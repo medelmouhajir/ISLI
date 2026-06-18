@@ -136,15 +136,19 @@ async def _handle_start(db: AsyncSession, cmd: CommandRequest, channel: str) -> 
 
 
 async def _handle_new(db: AsyncSession, redis, cmd: CommandRequest) -> dict:
-    sess = await _get_session(db, cmd.session_id)
     now = datetime.now(timezone.utc)
-
-    # Wipe old session data so accidental revival is harmless
-    sess.messages = []
-    sess.journal = None
-    sess.journal_updated_at = None
-    sess.context_summary = None
-    sess.deleted_at = now
+    try:
+        sess = await _get_session(db, cmd.session_id)
+        # Wipe old session data so accidental revival is harmless
+        sess.messages = []
+        sess.journal = None
+        sess.journal_updated_at = None
+        sess.context_summary = None
+        sess.deleted_at = now
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        logger.info("commands.new_session_no_old_found", session_id=cmd.session_id)
 
     # Generate a new short, globally unique session ID
     new_session_id = str(uuid4())

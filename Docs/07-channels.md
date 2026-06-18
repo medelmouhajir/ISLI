@@ -75,6 +75,19 @@ channels:
 | Voice (Board UI) | ✅ Built-in | Browser `MediaRecorder` → `POST /v1/stt/transcribe` → text inserted into chat input with auto-send toggle |
 | Voice (phone) | 📋 Planned | Twilio Voice + ASR |
 | Web Push (PWA) | ✅ Built-in | Standard Web Push API via Service Worker; multi-device support |
+| Council Chat (Rooms) | ✅ Phase 1 — Web only | Multi-agent room thread; see [`Docs/17-council-chat.md`](./17-council-chat.md) |
+
+### Council Chat Notes (Added 2026-06-17)
+
+Council Chat Phase 1 is implemented as a **Board UI feature** on the `web` channel. It is not available through Telegram, WhatsApp, Email, or other channel adapters.
+
+Each agent in a room gets a deterministic per-agent session:
+
+```
+sess_id = "room:{room_id}:{agent_id}"
+```
+
+These room sessions are excluded from the normal channel session idle detector and expire together with the room. They reuse the same session reply flow (`reply_to_session`) as direct web chat, so no adapter changes are required for Phase 1.
 
 ---
 
@@ -207,6 +220,19 @@ When a new message arrives for a soft-deleted session, the session is **revived*
 - **Raw `messages` and structured `journal` are preserved** so the agent retains conversation history
 
 **Important:** Prior to 2026-05-18, soft-deletion wiped `messages = []` and revival wiped `journal = None`, causing agents to lose all conversation history. Both behaviors were fixed so that historical context survives across session lifecycles.
+
+### Session Archive (Added 2026-06-15)
+
+The Board UI exposes a dedicated archive page at **`/archive/sessions`** for operators to inspect, restore, or permanently delete closed and soft-deleted sessions.
+
+| Action | Endpoint |
+|--------|----------|
+| List archived sessions | `GET /v1/sessions?archived=true` |
+| Restore session | `POST /v1/sessions/{id}/restore` |
+| Permanently delete session | `DELETE /v1/sessions/{id}` |
+| View archived history | `GET /v1/sessions/{id}/history` |
+
+Archive listing includes sessions where `status == "closed"` **or** `deleted_at is not None`. Restore re-opens the session (`status = "ready"`, `deleted_at = None`) and is rejected if the owning agent is itself deleted. Permanent delete removes the session row and cascades to its `channel_messages`.
 
 ---
 

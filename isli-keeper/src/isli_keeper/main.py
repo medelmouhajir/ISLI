@@ -119,9 +119,17 @@ def _compress_activity_log(
     return result[-max_chars:] if len(result) > max_chars else result
 
 
-async def _ollama_generate_task(model: str, prompt: str, timeout: float | None = None, format: str | None = None) -> dict:
+async def _ollama_generate_task(
+    model: str,
+    prompt: str,
+    timeout: float | None = None,
+    format: str | None = None,
+    think: bool | None = None,
+) -> dict:
     async with OllamaClient().session() as client:
-        return await client.generate(model, prompt, timeout=timeout, format=format)
+        return await client.generate(
+            model, prompt, timeout=timeout, format=format, think=think
+        )
 
 
 async def _ollama_embed_task(model: str, input_text: str) -> list[float]:
@@ -137,6 +145,7 @@ async def _generate_with_ollama(
     timeout: float | None = None,
     format: str | None = None,
     priority: int = P2,
+    think: bool | None = None,
 ) -> dict:
     # Default timeouts by priority if not specified
     if timeout is None:
@@ -147,18 +156,31 @@ async def _generate_with_ollama(
         else:
             timeout = 300.0
 
+    # Default to the global Keeper thinking setting when not explicitly requested.
+    if think is None:
+        think = model_manager.get_think()
+
     metadata = {
         "agent_id": agent_id,
         "endpoint": endpoint,
         "model": model,
         "prompt": prompt[:2000],
+        "think": think,
     }
 
     metrics = get_metrics()
     metrics.start_request()
     try:
         return await priority_manager.submit(
-            priority, timeout, _ollama_generate_task, metadata, model, prompt, timeout, format
+            priority,
+            timeout,
+            _ollama_generate_task,
+            metadata,
+            model,
+            prompt,
+            timeout,
+            format,
+            think,
         )
     except asyncio.TimeoutError:
         logger.error("keeper.timeout", endpoint=endpoint, timeout=timeout, agent_id=agent_id)
@@ -183,6 +205,7 @@ async def _keep_model_warm():
                     prompt=".",
                     options={"num_predict": 1},
                     keep_alive=-1,
+                    think=False,
                 )
         except Exception:
             pass  # non-critical background task
@@ -948,6 +971,7 @@ async def reload_prompts(auth: dict = Depends(require_internal_auth)):
 class AdminConfigUpdateRequest(BaseModel):
     num_ctx: int | None = None
     num_batch: int | None = None
+    think: bool | None = None
 
 
 @app.get("/admin/config")
@@ -958,6 +982,7 @@ async def admin_config(auth: dict = Depends(require_internal_auth)):
             "embed": model_manager.get_model("embed"),
             "num_ctx": model_manager.config.get("num_ctx", 4096),
             "num_batch": model_manager.config.get("num_batch", 512),
+            "think": model_manager.get_think(),
         }
     }
 
@@ -968,6 +993,8 @@ async def admin_config_update(
     auth: dict = Depends(require_internal_auth),
 ):
     try:
+        if req.think is not None:
+            model_manager.set_think(req.think)
         updated = model_manager.set_generation_options(
             num_ctx=req.num_ctx,
             num_batch=req.num_batch,
@@ -977,6 +1004,7 @@ async def admin_config_update(
             "config": {
                 "gen": model_manager.get_model("gen"),
                 "embed": model_manager.get_model("embed"),
+                "think": model_manager.get_think(),
                 **updated,
             },
         }

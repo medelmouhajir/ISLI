@@ -17,7 +17,7 @@ from isli_core.routers.tasks import TaskOut
 
 logger = structlog.get_logger()
 
-DEFAULT_HEARTBEAT_STALE_MINUTES = 10
+DEFAULT_HEARTBEAT_STALE_MINUTES = 25
 
 
 class CheckpointRecoveryWorker:

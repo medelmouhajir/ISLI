@@ -1,7 +1,7 @@
-import json
 from typing import Any
 
-from jsonschema import Draft202012Validator, ValidationError as JSONSchemaValidationError
+from jsonschema import Draft202012Validator
+from jsonschema import ValidationError as JSONSchemaValidationError
 
 EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
     "v1": {
@@ -118,6 +118,28 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "messages": {"type": "array"},
                 "context_summary": {"type": ["string", "null"]},
                 "audio_url": {"type": ["string", "null"]},
+                "room_id": {"type": ["string", "null"]},
+            },
+        },
+        "room:updated": {
+            "type": "object",
+            "required": ["type", "room_id"],
+            "properties": {
+                "type": {"const": "room:updated"},
+                "room_id": {"type": "string"},
+                "status": {"type": ["string", "null"]},
+                "parent_id": {"type": ["string", "null"]},
+            },
+        },
+        "room:agent_joined": {
+            "type": "object",
+            "required": ["type", "room_id", "agent_id"],
+            "properties": {
+                "type": {"const": "room:agent_joined"},
+                "room_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "agent_name": {"type": ["string", "null"]},
+                "picture": {"type": ["string", "null"]},
             },
         },
     }

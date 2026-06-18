@@ -60,7 +60,14 @@ async def lifespan(app: FastAPI):
     if tg_token:
         audio_url = os.getenv("AUDIO_URL", "")
         jwt_secret = os.getenv("JWT_SECRET", "")
-        tg_adapter = TelegramAdapter(tg_token, core_url, webhook_secret, redis_client=redis_client, audio_url=audio_url, jwt_secret=jwt_secret)
+        tg_adapter = TelegramAdapter(
+            tg_token,
+            core_url,
+            webhook_secret,
+            redis_client=redis_client,
+            audio_url=audio_url,
+            jwt_secret=jwt_secret,
+        )
         await tg_adapter.start()
         adapters["telegram"] = tg_adapter
 
@@ -163,7 +170,11 @@ async def drain_offline_queue(payload: dict[str, Any]):
     queue = OfflineMessageQueue(redis_client)
     size_before = await queue.size(channel)
     # Note: sender function would be injected in production
-    return {"channel": channel, "size_before": size_before, "note": "drain requires a sender callback"}
+    return {
+        "channel": channel,
+        "size_before": size_before,
+        "note": "drain requires a sender callback",
+    }
 
 
 @app.post("/webhook/telegram/{agent_id}")
@@ -182,10 +193,14 @@ class SendMessageRequest(BaseModel):
     agent_id: str | None = None
     metadata: dict[str, Any] = {}
     audio_b64: str | None = None
+    attachments: list[dict[str, Any]] = []
 
 
 @app.post("/send")
-async def send_message(req: SendMessageRequest, auth: dict = Depends(require_internal_auth)):  # noqa: B008
+async def send_message(
+    req: SendMessageRequest,
+    auth: dict[str, Any] = Depends(require_internal_auth),  # noqa: B008
+) -> dict[str, Any]:
     adapter = adapters.get(req.channel)
     if not adapter:
         raise HTTPException(status_code=400, detail=f"No adapter for channel: {req.channel}")
@@ -195,6 +210,7 @@ async def send_message(req: SendMessageRequest, auth: dict = Depends(require_int
         req.text,
         agent_id=req.agent_id,
         audio_b64=req.audio_b64,
+        attachments=req.attachments,
     )
     return {"success": success}
 

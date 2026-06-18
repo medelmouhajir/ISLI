@@ -1,8 +1,7 @@
 import httpx
 import structlog
-import json
 from typing import Any, Optional
-from .models import AgentConfig, Task, Checkpoint
+from .models import AgentConfig, Task
 
 logger = structlog.get_logger()
 
@@ -240,11 +239,13 @@ class CoreClient:
         components: list[dict[str, Any]] | None = None,
         audio_b64: str | None = None,
         audio_voice: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Send a reply to a session (delivered to user via channels).
 
         If audio_b64 is provided, Core will forward it as a voice message
-        alongside the text reply.
+        alongside the text reply. If attachments are provided, each must be a
+        dict with 'path' and optional 'workspace_id' and 'caption'.
         """
         payload: dict[str, Any] = {"text": text}
         if components:
@@ -253,6 +254,8 @@ class CoreClient:
             payload["audio_b64"] = audio_b64
         if audio_voice:
             payload["audio_voice"] = audio_voice
+        if attachments:
+            payload["attachments"] = attachments
         resp = await self.client.post(
             f"/v1/sessions/{session_id}/reply",
             json=payload,

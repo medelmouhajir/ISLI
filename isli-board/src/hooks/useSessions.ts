@@ -1,11 +1,21 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getJSON, postJSON, deleteJSON } from '@/lib/api'
-import type { Session } from '@/types'
+import type { Session, SessionHistory } from '@/types'
 
 export function useSessions(agentId?: string) {
   return useQuery<Session[]>({
     queryKey: ['sessions', agentId],
     queryFn: () => getJSON(`/v1/sessions${agentId ? `?agent_id=${agentId}` : ''}`),
+    staleTime: 30000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  })
+}
+
+export function useArchivedSessions(agentId?: string) {
+  return useQuery<Session[]>({
+    queryKey: ['archived-sessions', agentId],
+    queryFn: () => getJSON(`/v1/sessions?archived=true${agentId ? `&agent_id=${agentId}` : ''}`),
     staleTime: 30000,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
@@ -71,6 +81,33 @@ export function useDeleteSession() {
     mutationFn: (sessionId: string) => deleteJSON(`/v1/sessions/${sessionId}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      queryClient.invalidateQueries({ queryKey: ['archived-sessions'] })
     },
+  })
+}
+
+export function useRestoreSession() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (sessionId: string): Promise<Session> =>
+      postJSON(`/v1/sessions/${sessionId}/restore`, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      queryClient.invalidateQueries({ queryKey: ['archived-sessions'] })
+    },
+  })
+}
+
+export function useArchivedSessionHistory(sessionId: string | null) {
+  return useQuery<SessionHistory>({
+    queryKey: ['archived-session-history', sessionId],
+    queryFn: () => {
+      if (!sessionId) throw new Error('No session ID')
+      return getJSON(`/v1/sessions/${sessionId}/history`)
+    },
+    enabled: !!sessionId,
+    staleTime: 30000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   })
 }

@@ -1,8 +1,8 @@
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
-import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -19,7 +19,9 @@ logger = structlog.get_logger()
 _REJECTION_REPLIES = {
     "closed_mode": "This assistant only accepts messages from its owner.",
     "not_in_whitelist": "You're not on the access list for this assistant.",
-    "outside_schedule": "This assistant is currently offline. Please try again during business hours.",
+    "outside_schedule": (
+        "This assistant is currently offline. Please try again during business hours."
+    ),
     "consent_required": "Welcome! Please send /start to begin chatting with this agent.",
     "rate_limited": "You've sent too many messages. Please try again later.",
 }
@@ -291,7 +293,10 @@ class WhatsAppAdapter(ChannelAdapter):
             "dedup_id": inbound.metadata.get("message_id"),
             "session_id": session_id,
             "agent_id": agent_id,
-            "attachments": [att.model_dump() if hasattr(att, "model_dump") else att for att in inbound.attachments],
+            "attachments": [
+                att.model_dump() if hasattr(att, "model_dump") else att
+                for att in inbound.attachments
+            ],
         }
 
         try:
@@ -491,6 +496,21 @@ class WhatsAppAdapter(ChannelAdapter):
                     error=str(last_exc),
                 )
 
+        # --- Send file attachments ---
+        attachments = kwargs.get("attachments") or []
+        if attachments and all_ok:
+            for att in attachments:
+                try:
+                    await self._send_attachment(jid, att, agent_id)
+                except Exception as exc:
+                    logger.warning(
+                        "whatsapp.attachment_send_failed",
+                        agent_id=agent_id,
+                        jid=jid,
+                        filename=att.get("filename"),
+                        error=str(exc),
+                    )
+
         # --- Send audio as PTT if present ---
         if audio_b64 and all_ok:
             last_exc = None
@@ -535,6 +555,81 @@ class WhatsAppAdapter(ChannelAdapter):
                 # Audio failure is non-fatal; text was already delivered
 
         return all_ok
+
+    async def _send_attachment(
+        self,
+        jid: str,
+        attachment: dict[str, Any],
+        agent_id: str,
+    ) -> None:
+        """Fetch a file from Core's signed download URL and send it via the WhatsApp sidecar."""
+        url = attachment.get("download_url")
+        if not url:
+            logger.warning(
+                "whatsapp.attachment_missing_url",
+                filename=attachment.get("filename"),
+            )
+            return
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            file_bytes = resp.content
+
+        media_type = attachment.get("media_type", "document")
+        # WhatsApp sidecar supports image, video, document, audio. Voice/PTT uses a separate path.
+        sidecar_type = (
+            media_type if media_type in {"image", "video", "document", "audio"} else "document"
+        )
+        media_b64 = base64.b64encode(file_bytes).decode("utf-8")
+        filename = attachment.get("filename") or "file"
+        caption = (attachment.get("caption") or "")[:1024]
+
+        last_exc: Exception | None = None
+        success = False
+        for attempt in range(4):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(
+                        f"{self.sidecar_url}/send",
+                        headers=self._sidecar_headers(),
+                        json={
+                            "type": sidecar_type,
+                            "agentId": agent_id,
+                            "jid": jid,
+                            "media_b64": media_b64,
+                            "mimetype": attachment.get("mime_type"),
+                            "filename": filename,
+                            "caption": caption or None,
+                        },
+                    )
+                    resp.raise_for_status()
+                    success = resp.json().get("success", False)
+                    if success:
+                        logger.info(
+                            "whatsapp.attachment_sent",
+                            agent_id=agent_id,
+                            jid=jid,
+                            media_type=sidecar_type,
+                            filename=filename,
+                            size=len(file_bytes),
+                        )
+                        break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 3:
+                    delay = min(1.0 * (2 ** attempt), 10.0)
+                    await asyncio.sleep(delay)
+
+        if not success:
+            logger.error(
+                "whatsapp.attachment_send_exhausted",
+                agent_id=agent_id,
+                jid=jid,
+                filename=filename,
+                error=str(last_exc),
+            )
+            raise last_exc or RuntimeError("Failed to send WhatsApp attachment")
 
     async def send_typing(self, channel_user_id: str, **kwargs):
         # Baileys support for typing is optional, skipped for MVP sidecar

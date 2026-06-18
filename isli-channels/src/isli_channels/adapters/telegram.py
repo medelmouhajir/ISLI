@@ -1,20 +1,27 @@
+import asyncio
 import hashlib
 import hmac
-import httpx
+import io
 import json
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import httpx
 import structlog
-from datetime import datetime, timezone, timedelta
-from typing import Optional, Any
-from telegram import Bot, BotCommand, Update
+from jose import jwt
+from telegram import Bot, BotCommand, InputFile, Update
 
 from .base import ChannelAdapter, InboundMessage
 
 logger = structlog.get_logger()
 
 
-def _create_internal_token(secret: str, agent_id: str = "channels", scopes: list[str] | None = None) -> str:
-    from jose import jwt
-    now = datetime.now(timezone.utc)
+def _create_internal_token(
+    secret: str,
+    agent_id: str = "channels",
+    scopes: list[str] | None = None,
+) -> str:
+    now = datetime.now(UTC)
     payload = {
         "sub": agent_id,
         "scopes": scopes or ["audio:stt", "audio:tts"],
@@ -28,7 +35,9 @@ def _create_internal_token(secret: str, agent_id: str = "channels", scopes: list
 _REJECTION_REPLIES = {
     "closed_mode": "This assistant only accepts messages from its owner.",
     "not_in_whitelist": "You're not on the access list for this assistant.",
-    "outside_schedule": "This assistant is currently offline. Please try again during business hours.",
+    "outside_schedule": (
+        "This assistant is currently offline. Please try again during business hours."
+    ),
     "consent_required": "Welcome! Please send /start to begin chatting with this agent.",
     "rate_limited": "You've sent too many messages. Please try again later.",
 }
@@ -51,7 +60,15 @@ ISLI_COMMANDS = [
 
 
 class TelegramAdapter(ChannelAdapter):
-    def __init__(self, token: str, core_api_url: str, webhook_secret: str = "", redis_client=None, audio_url: str = "", jwt_secret: str = ""):
+    def __init__(
+        self,
+        token: str,
+        core_api_url: str,
+        webhook_secret: str = "",
+        redis_client=None,
+        audio_url: str = "",
+        jwt_secret: str = "",
+    ):
         self.token = token
         self.core_api_url = core_api_url.rstrip("/")
         self.webhook_secret = webhook_secret
@@ -173,18 +190,16 @@ class TelegramAdapter(ChannelAdapter):
     # --- Sending ---
 
     async def send_message(self, channel_user_id: str, text: str, **kwargs) -> bool:
-        import asyncio
         import base64
-        import io
-        import uuid
-        from telegram import InputFile
+        import re
+
         from ..attachments import convert_wav_to_opus_ogg
         from ..redis_client import get_blob_redis
 
         agent_id = kwargs.get("agent_id")
         audio_b64 = kwargs.get("audio_b64")
         audio_ref = kwargs.get("audio_ref")
-        
+
         # Detect blob token in text if present
         if text and "blob:audio:" in text and not audio_b64 and not audio_ref:
             import re
@@ -204,7 +219,11 @@ class TelegramAdapter(ChannelAdapter):
                 wav_bytes = await redis.get(audio_ref)
                 if wav_bytes:
                     audio_b64 = base64.b64encode(wav_bytes).decode("utf-8")
-                    logger.info("telegram.outbound_blob_resolved", ref=audio_ref, size=len(wav_bytes))
+                    logger.info(
+                        "telegram.outbound_blob_resolved",
+                        ref=audio_ref,
+                        size=len(wav_bytes),
+                    )
             except Exception as exc:
                 logger.error("telegram.blob_resolution_failed", ref=audio_ref, error=str(exc))
 
@@ -225,8 +244,28 @@ class TelegramAdapter(ChannelAdapter):
                         delay = min(1.0 * (2 ** attempt), 10.0)
                         await asyncio.sleep(delay)
             else:
-                logger.error("telegram.send_text_failed", chat_id=channel_user_id, error=str(last_exc), agent_id=agent_id)
+                logger.error(
+                    "telegram.send_text_failed",
+                    chat_id=channel_user_id,
+                    error=str(last_exc),
+                    agent_id=agent_id,
+                )
                 return False
+
+        # --- Send file attachments ---
+        attachments = kwargs.get("attachments") or []
+        if attachments:
+            for att in attachments:
+                try:
+                    await self._send_attachment(channel_user_id, att, token, agent_id)
+                except Exception as exc:
+                    logger.warning(
+                        "telegram.attachment_send_failed",
+                        chat_id=channel_user_id,
+                        agent_id=agent_id,
+                        filename=att.get("filename"),
+                        error=str(exc),
+                    )
 
         # --- Send voice message if audio is present ---
         if audio_b64:
@@ -265,9 +304,88 @@ class TelegramAdapter(ChannelAdapter):
                     )
                     # Voice failure is non-fatal; text was already delivered
             except Exception as exc:
-                logger.error("telegram.voice_processing_failed", chat_id=channel_user_id, error=str(exc), agent_id=agent_id)
+                logger.error(
+                    "telegram.voice_processing_failed",
+                    chat_id=channel_user_id,
+                    error=str(exc),
+                    agent_id=agent_id,
+                )
 
         return True
+
+    async def _send_attachment(
+        self,
+        channel_user_id: str,
+        attachment: dict[str, Any],
+        token: str,
+        agent_id: str | None,
+    ) -> None:
+        """Fetch a file from Core's signed download URL and send it via Telegram."""
+        url = attachment.get("download_url")
+        if not url:
+            logger.warning("telegram.attachment_missing_url", filename=attachment.get("filename"))
+            return
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            file_bytes = resp.content
+
+        media_type = attachment.get("media_type", "document")
+        filename = attachment.get("filename") or "file"
+        caption = (attachment.get("caption") or "")[:1024]
+        input_file = InputFile(io.BytesIO(file_bytes), filename=filename)
+
+        bot = Bot(token=token) if token != self.token else self.bot
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                if media_type == "image":
+                    await bot.send_photo(
+                        chat_id=channel_user_id,
+                        photo=input_file,
+                        caption=caption or None,
+                    )
+                elif media_type == "video":
+                    await bot.send_video(
+                        chat_id=channel_user_id,
+                        video=input_file,
+                        caption=caption or None,
+                    )
+                elif media_type == "audio":
+                    await bot.send_audio(
+                        chat_id=channel_user_id,
+                        audio=input_file,
+                        caption=caption or None,
+                    )
+                else:
+                    await bot.send_document(
+                        chat_id=channel_user_id,
+                        document=input_file,
+                        caption=caption or None,
+                    )
+                logger.info(
+                    "telegram.attachment_sent",
+                    chat_id=channel_user_id,
+                    agent_id=agent_id,
+                    media_type=media_type,
+                    filename=filename,
+                    size=len(file_bytes),
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 3:
+                    delay = min(1.0 * (2 ** attempt), 10.0)
+                    await asyncio.sleep(delay)
+        logger.error(
+            "telegram.attachment_send_exhausted",
+            chat_id=channel_user_id,
+            agent_id=agent_id,
+            filename=filename,
+            error=str(last_exc),
+        )
+        raise last_exc or RuntimeError("Failed to send attachment")
 
     async def send_typing(self, channel_user_id: str, **kwargs):
         agent_id = kwargs.get("agent_id")
@@ -276,10 +394,15 @@ class TelegramAdapter(ChannelAdapter):
             bot = Bot(token=token) if token != self.token else self.bot
             await bot.send_chat_action(chat_id=channel_user_id, action="typing")
         except Exception as exc:
-            logger.error("telegram.typing_failed", chat_id=channel_user_id, error=str(exc), agent_id=agent_id)
+            logger.error(
+                "telegram.typing_failed",
+                chat_id=channel_user_id,
+                error=str(exc),
+                agent_id=agent_id,
+            )
 
 
-    def parse_update(self, raw_update: dict) -> Optional[InboundMessage]:
+    def parse_update(self, raw_update: dict) -> InboundMessage | None:
         try:
             update = Update.de_json(raw_update, self.bot)
             if not update or not update.message:
@@ -312,6 +435,7 @@ class TelegramAdapter(ChannelAdapter):
     async def handle_webhook(self, raw_update: dict, agent_id: str):
         """Handle incoming webhook and forward to Core."""
         import uuid
+
         from ..redis_client import get_blob_redis
 
         inbound = self.parse_update(raw_update)
@@ -349,21 +473,21 @@ class TelegramAdapter(ChannelAdapter):
 
             if voice_file:
                 audio_bytes = await voice_file.download_as_bytearray()
-                
+
                 # Store in Redis blob store and pass token to Core
                 blob_id = str(uuid.uuid4())
                 blob_key = f"blob:audio:{blob_id}"
-                
+
                 redis = await get_blob_redis()
                 await redis.setex(blob_key, 86400, bytes(audio_bytes))
-                
+
                 logger.info(
                     "telegram.voice_stored",
                     user_id=user_id,
                     blob_key=blob_key,
                     size=len(audio_bytes),
                 )
-                
+
                 # Forward token to Core; Core will call STT
                 inbound.text = blob_key
                 inbound.metadata["voice_ref"] = blob_key

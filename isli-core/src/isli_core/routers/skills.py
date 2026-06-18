@@ -6,6 +6,7 @@ import subprocess
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 import structlog
@@ -14,6 +15,8 @@ from isli_core.auth import create_internal_token, SkillProxyAuth, require_admin_
 from isli_core.security.content_scanner import ContentScanner
 from isli_core.security.policy_engine import PolicyEngine
 from isli_core.db import get_db
+from isli_core.redis_client import get_redis
+from isli_core.file_tokens import create_file_token, consume_file_token
 from isli_core.memory.keeper_client import KeeperClient
 from isli_core.memory.chroma_client import ChromaMemoryClient
 from isli_core.services.skill_manager import skill_manager
@@ -49,11 +52,14 @@ SKILL_REGISTRY = {
     "update-skill": _SKILLS_URL,
     "interactive-debugger": _SKILLS_URL,
     "db-query": _SKILLS_URL,
+    "files-documents-manager": _SKILLS_URL,
     # workspace service
     "file-read": _WORKSPACE_URL,
     "file-write": _WORKSPACE_URL,
     "file-list": _WORKSPACE_URL,
     "file-delete": _WORKSPACE_URL,
+    "file-search": _WORKSPACE_URL,
+    "file-describe": _WORKSPACE_URL,
     "shared-file-read": _WORKSPACE_URL,
     "shared-file-write": _WORKSPACE_URL,
     "shared-file-list": _WORKSPACE_URL,
@@ -124,9 +130,10 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
         "category": "system",
     },
     "web-search": {
-        "description": "Search the web using local SearXNG instance.",
+        "description": "Search the web using local SearXNG instance. For API keys, pass [[secret:SECRET_NAME]].",
         "type": "external",
         "category": "web",
+        "secret_fields": ["api_key"],
     },
     "web-browse-navigate": {
         "description": "Navigate a browser to a URL. Creates or reuses a persistent session per agent.",
@@ -178,6 +185,11 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
         "type": "external",
         "category": "web",
     },
+    "files-documents-manager": {
+        "description": "Generate documents in PDF, DOCX, or XLSX formats and save them to the workspace.",
+        "type": "external",
+        "category": "workspace",
+    },
     "file-read": {
         "description": "Read a file from the agent workspace.",
         "type": "external",
@@ -195,6 +207,16 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
     },
     "file-delete": {
         "description": "Delete a file from the agent workspace.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "file-search": {
+        "description": "Search for a regex or string within a single file in the agent workspace.",
+        "type": "external",
+        "category": "workspace",
+    },
+    "file-describe": {
+        "description": "Provide structure and stats for a specific file in the agent workspace to aid navigation.",
         "type": "external",
         "category": "workspace",
     },
@@ -279,9 +301,10 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
         "category": "audio",
     },
     "db-query": {
-        "description": "Run a read-only SQL query against the ISLI database. Returns structured tabular results. Only SELECT statements on allowed schemas are permitted.",
+        "description": "Run a read-only SQL query against the ISLI database. Returns structured tabular results. For database passwords, pass [[secret:SECRET_NAME]].",
         "type": "external",
         "category": "database",
+        "secret_fields": ["password", "connection_string"],
     },
     "git-clone": {
         "description": "Clone a remote git repository into the agent's workspace. Supports optional branch selection.",
@@ -364,7 +387,8 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
         "category": "communication",
     },
     "create-kanban-task": {
-        "description": "Create a task on the Kanban board (enables self-delegation).",
+        "description": "Create a task on the Kanban board, optionally assigned to yourself or another agent. Supports one-off scheduling via scheduled_at (ISO 8601 datetime) or recurring execution via cron_expression (standard 5-field cron). Assigning a task to yourself with a future scheduled_at acts as a self-reminder/wake-up call. scheduled_at and cron_expression are mutually exclusive — set one or neither, not both.",
+        "hint": "Create a Kanban task or self-reminder, optionally scheduled or recurring.",
         "type": "inline",
         "category": "kanban",
     },
@@ -828,6 +852,49 @@ async def list_skill_versions(
         raise HTTPException(status_code=502, detail=str(e)) from e
 
 
+@router.get("/consume-file")
+async def consume_file(token: str):
+    """
+    Consume a single-use file token and stream the file from the workspace.
+    No authentication is required as it relies on the opaque, single-use token.
+    """
+    redis = await get_redis()
+    metadata = await consume_file_token(redis, token)
+    if not metadata:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+
+    scope = metadata.get("scope", "agent")
+    scope_id = metadata.get("scope_id")
+    path = metadata.get("path")
+
+    if not all([scope_id, path]):
+        raise HTTPException(status_code=400, detail="Invalid token metadata")
+
+    # Internal auth for workspace
+    settings = get_settings()
+    ws_token = create_internal_token("core-api", scopes=["workspace"], expires_minutes=1)
+    
+    # Forward the request to workspace
+    url = f"{settings.workspace_url}/download"
+    params = {
+        "agent_id": scope_id,  # Workspace /download expects agent_id as effective_scope_id
+        "path": path,
+        "scope": scope,
+        "scope_id": scope_id
+    }
+    
+    async def _stream_file():
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            async with client.stream("GET", url, params=params, headers={"X-Internal-Auth": ws_token}) as resp:
+                if resp.status_code != 200:
+                    logger.error("skills.consume_file_workspace_failed", status=resp.status_code, token=token, path=path)
+                    return
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(_stream_file(), media_type="application/octet-stream")
+
+
 @router.patch("/{skill_id}")
 async def patch_skill(
     skill_id: str,
@@ -1172,7 +1239,6 @@ async def skill_proxy(
             # Rate limit check (same logic as notifications router)
             AGENT_NOTIFY_RATE_LIMIT = 20
             try:
-                from isli_core.redis_client import get_redis
                 redis = await get_redis()
                 rate_key = f"notif:agent_rate:{agent_id}:{user_id}"
                 count = await redis.incr(rate_key)
@@ -1315,22 +1381,24 @@ async def skill_proxy(
             from isli_core.secrets_service import get_secret_value
             from isli_core.audit_writer import AuditWriter
 
-            value = await get_secret_value(db, agent_id, secret_name)
-            if value is None:
+            # Verify secret exists for this agent
+            exists = await get_secret_value(db, agent_id, secret_name)
+            if exists is None:
                 raise HTTPException(status_code=404, detail=f"Secret '{secret_name}' not found")
 
-            # Audit every secret read (value never logged)
+            # Audit every secret reference read (value never logged)
             await AuditWriter.write(
                 session=db,
                 actor_type="agent",
                 actor_id=agent_id,
-                action="secret.read",
+                action="secret.reference_read",
                 target_type="secret",
                 target_id=secret_name,
                 payload={"agent_id": agent_id, "secret_name": secret_name},
             )
             await db.commit()
-            return {"status": "ok", "name": secret_name, "value": value}
+            # Return placeholder for server-side injection
+            return {"status": "ok", "name": secret_name, "value": f"[[secret:{secret_name}]]"}
 
         if skill_name == "create-kanban-task" and action == "create":
             title = body_json.get("title")
@@ -1361,7 +1429,9 @@ async def skill_proxy(
                 cron_expression=body_json.get("cron_expression"),
             )
 
-            task = await _create_task_core(db, payload, estop_active=request.app.state.estop.active)
+            estop = getattr(request.app.state, "estop", None)
+            estop_active = estop.active if estop else False
+            task = await _create_task_core(db, payload, estop_active=estop_active)
             return {
                 "status": "created",
                 "task": TaskOut.model_validate(task).model_dump(mode="json"),
@@ -1464,14 +1534,107 @@ async def skill_proxy(
         raise HTTPException(status_code=404, detail=f"Action '{action}' not found for skill '{skill_name}'")
 
     body = body_bytes
-
-    # Content scan on the raw body text
     body_text = body.decode("utf-8", errors="ignore") if body else ""
+
+    # --- Server-Side Secret Injection ---
+    try:
+        body_json = json.loads(body_text) if body_text else {}
+    except json.JSONDecodeError:
+        body_json = {}
+
+    agent_id = body_json.get("agent_id")
+    if agent_id:
+        # Determine authorized secret fields for this skill/action
+        secret_fields = []
+        file_fields = []
+        meta = SKILL_METADATA.get(skill_name, {})
+        if meta:
+            secret_fields = meta.get("secret_fields", [])
+            file_fields = meta.get("file_fields", [])
+        elif is_db_external:
+            manifest = await skill_manager.get_skill_manifest(skill_name)
+            if manifest:
+                for tool in manifest.get("tools", []):
+                    if tool.get("name") == action:
+                        secret_fields = tool.get("secret_fields", [])
+                        file_fields = tool.get("file_fields", [])
+                        break
+
+        if secret_fields:
+            from isli_core.secrets_service import get_secret_value
+            from isli_core.audit_writer import AuditWriter
+            
+            modified = False
+            for field in secret_fields:
+                val = body_json.get(field)
+                if isinstance(val, str) and val.startswith("[[secret:") and val.endswith("]]"):
+                    secret_name = val[9:-2]
+                    secret_val = await get_secret_value(db, agent_id, secret_name)
+                    if secret_val:
+                        body_json[field] = secret_val
+                        modified = True
+                        
+                        # Audit the injection
+                        await AuditWriter.write(
+                            session=db,
+                            actor_type="agent",
+                            actor_id=agent_id,
+                            action="secret.inject",
+                            target_type="skill",
+                            target_id=f"{skill_name}:{action}",
+                            payload={"field": field, "secret_name": secret_name},
+                        )
+
+            if modified:
+                await db.commit()
+                body = json.dumps(body_json).encode("utf-8")
+                # Update body_text for policy engine which uses it for scanning
+                body_text = body.decode("utf-8", errors="ignore")
+
+        if file_fields:
+            from isli_core.audit_writer import AuditWriter
+            redis = await get_redis()
+            
+            modified_files = False
+            for field in file_fields:
+                val = body_json.get(field)
+                if isinstance(val, str) and val.startswith("[[file:") and val.endswith("]]"):
+                    # Format: [[file:scope:scope_id:path]]
+                    parts = val[7:-2].split(":", 2)
+                    if len(parts) == 3:
+                        f_scope, f_scope_id, f_path = parts
+                        token = await create_file_token(redis, f_scope, f_scope_id, f_path)
+                        
+                        # Construct proxy URL
+                        # Note: We use the request's base URL so the skill can reach core back
+                        proxy_url = f"{str(request.base_url).rstrip('/')}/v1/skills/consume-file?token={token}"
+                        body_json[field] = proxy_url
+                        modified_files = True
+                        
+                        # Audit the injection
+                        await AuditWriter.write(
+                            session=db,
+                            actor_type="agent",
+                            actor_id=agent_id,
+                            action="file.inject",
+                            target_type="skill",
+                            target_id=f"{skill_name}:{action}",
+                            payload={"field": field, "scope": f_scope, "scope_id": f_scope_id, "path": f_path},
+                        )
+
+            if modified_files:
+                body = json.dumps(body_json).encode("utf-8")
+                body_text = body.decode("utf-8", errors="ignore")
+
+    # Content scan on the raw (possibly injected) body text
     scan = ContentScanner.scan(body_text)
     if scan.blocked:
         raise HTTPException(status_code=403, detail=f"Content safety block: {scan.reason}")
 
     # Policy evaluation for skill invocation
+    estop = getattr(request.app.state, "estop", None)
+    estop_active = estop.active if estop else False
+
     decision = await PolicyEngine.evaluate(
         db,
         user_id="anonymous",
@@ -1480,7 +1643,7 @@ async def skill_proxy(
         skill_name=skill_name,
         model_id=None,
         budget_exceeded=False,
-        estop_active=request.app.state.estop.active,
+        estop_active=estop_active,
     )
     if not decision.allow:
         detail: dict[str, Any] = {

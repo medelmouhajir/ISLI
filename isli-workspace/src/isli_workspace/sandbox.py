@@ -390,3 +390,90 @@ def delete_file(scope: str, scope_id: str, base_path: str, relative_path: str) -
         path.unlink()
         return {"status": "deleted", "path": relative_path, "size_bytes": size, "type": "file"}
 
+
+def describe_file(scope: str, scope_id: str, base_path: str, relative_path: str) -> dict[str, Any]:
+    """Provide structure and stats for a specific file to aid navigation."""
+    path = resolve_path(scope, scope_id, base_path, relative_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {relative_path}")
+    if path.is_dir():
+        return {"path": relative_path, "type": "directory"}
+
+    stat = path.stat()
+    size = stat.st_size
+    is_binary = _is_likely_binary(path)
+
+    first_5 = []
+    last_5 = []
+    line_count = 0
+
+    if not is_binary:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                all_lines = f.readlines()
+                line_count = len(all_lines)
+                first_5 = [line.strip() for line in all_lines[:5]]
+                last_5 = [line.strip() for line in all_lines[-5:]]
+        except Exception:
+            pass
+
+    # Guess format
+    ext = path.suffix.lower()
+    format_guess = "plaintext"
+    if ext == ".json": format_guess = "json"
+    elif ext == ".csv": format_guess = "csv"
+    elif ext in [".md", ".markdown"]: format_guess = "markdown"
+    elif is_binary: format_guess = "binary"
+
+    return {
+        "path": relative_path,
+        "type": "file",
+        "size_bytes": size,
+        "line_count": line_count,
+        "first_5_lines": first_5,
+        "last_5_lines": last_5,
+        "format": format_guess,
+        "is_binary": is_binary
+    }
+
+
+def search_file(
+    scope: str,
+    scope_id: str,
+    base_path: str,
+    relative_path: str,
+    query: str,
+    case_sensitive: bool = False,
+    max_results: int = 50
+) -> dict[str, Any]:
+    """Search for a regex or string within a single file and return line matches."""
+    path = resolve_path(scope, scope_id, base_path, relative_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {relative_path}")
+    if path.is_dir():
+        raise IsADirectoryError(f"Path is a directory: {relative_path}")
+
+    if _is_likely_binary(path):
+        return {"error": "Cannot search binary files", "matches": []}
+
+    import re
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        pattern = re.compile(query, flags)
+    except re.error as e:
+        # Fallback to literal search if regex is invalid
+        pattern = re.compile(re.escape(query), flags)
+
+    matches = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f, 1):
+                if pattern.search(line):
+                    matches.append({"line": i, "content": line.strip()})
+                    if len(matches) >= max_results:
+                        return {"matches": matches, "max_results_reached": True}
+    except Exception as e:
+        return {"error": str(e), "matches": []}
+
+    return {"matches": matches, "total_matches": len(matches)}
+

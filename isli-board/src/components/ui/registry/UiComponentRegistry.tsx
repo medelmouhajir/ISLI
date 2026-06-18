@@ -7,6 +7,7 @@ import { FormComponent } from './FormComponent'
 import { JsonViewer } from './JsonViewer'
 import { StatusTimeline } from './StatusTimeline'
 import { MetricGrid } from './MetricGrid'
+import { FileCard } from './FileCard'
 
 export type ComponentType =
   | 'table'
@@ -17,6 +18,7 @@ export type ComponentType =
   | 'json_viewer'
   | 'status_timeline'
   | 'metric_grid'
+  | 'file_card'
 
 export interface UiComponentProps {
   payload: ComponentPayload
@@ -33,6 +35,7 @@ const registry: Record<ComponentType, React.FC<UiComponentProps>> = {
   json_viewer: JsonViewer,
   status_timeline: StatusTimeline,
   metric_grid: MetricGrid,
+  file_card: FileCard,
 }
 
 export function UiComponentRenderer({ payload, sessionId, onAction }: UiComponentProps) {

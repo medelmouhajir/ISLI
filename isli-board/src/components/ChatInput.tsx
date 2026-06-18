@@ -27,7 +27,7 @@ export function ChatInput({
   const [autoSend, setAutoSend] = useState(false)
   const [recorderError, setRecorderError] = useState<string | null>(null)
   const [isFocused, setIsFocused] = useState(false)
-  const inputRef = useRef<HTMLInputElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
 
   const {
@@ -48,7 +48,7 @@ export function ChatInput({
         resetRecorder()
       } else {
         onChange(transcribedText)
-        inputRef.current?.focus()
+        textareaRef.current?.focus()
         resetRecorder()
       }
     }
@@ -81,14 +81,17 @@ export function ChatInput({
   const inputDisabled = disabled || isPending || isProcessing
   const isActive = isFocused || isRecording || isProcessing || hasText
 
-  // Keyboard shortcut: Ctrl+Enter or Cmd+Enter to send
+  // Keyboard shortcut: Enter to send, Shift+Enter for newline
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && hasText && !inputDisabled) {
-        onSend(value)
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        if (hasText && !inputDisabled) {
+          onSend(value, voiceModeEnabled)
+        }
       }
     },
-    [hasText, inputDisabled, onSend, value]
+    [hasText, inputDisabled, onSend, value, voiceModeEnabled]
   )
 
   return (
@@ -183,10 +186,9 @@ export function ChatInput({
         </button>
 
         {/* Text Input */}
-        <div className="flex-1 min-w-0 relative">
-          <input
-            ref={inputRef}
-            type="text"
+        <div className="flex-1 min-w-0 relative flex items-center">
+          <textarea
+            ref={textareaRef}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onFocus={() => setIsFocused(true)}
@@ -194,8 +196,9 @@ export function ChatInput({
             onKeyDown={handleKeyDown}
             placeholder={placeholder || 'ENTER COMMAND OR MESSAGE...'}
             disabled={inputDisabled}
+            rows={Math.min(3, value.split('\n').length || 1)}
             className={cn(
-              'w-full h-12 px-4 bg-transparent text-sm font-mono',
+              'w-full px-4 bg-transparent text-sm font-mono resize-none overflow-y-auto py-3.5',
               'focus:outline-none placeholder:text-text-muted/30 placeholder:font-mono placeholder:uppercase placeholder:text-[11px] placeholder:tracking-widest',
               'disabled:opacity-30 disabled:cursor-not-allowed',
               isRecording && 'text-accent-red/70'
@@ -212,7 +215,7 @@ export function ChatInput({
         </div>
 
         {/* Right controls */}
-        <div className="shrink-0 flex items-center gap-1 pr-1 h-12">
+        <div className="shrink-0 flex items-end gap-1 pr-1 pb-2 h-full">
           {/* Voice Mode toggle */}
           {onVoiceModeChange && (
             <button
@@ -297,7 +300,7 @@ export function ChatInput({
           )}
         </div>
         <span className="text-[9px] font-mono text-text-muted/30 uppercase tracking-widest hidden sm:block">
-          {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Enter to send
+          {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Enter or Enter to send
         </span>
       </div>
     </div>

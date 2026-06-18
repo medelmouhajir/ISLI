@@ -38,11 +38,14 @@ WEB_FETCH_DEF = {
     },
 }
 
-async def web_search(agent_id: str, query: str, core_client: CoreClient, max_results: int = 5) -> dict[str, Any]:
+async def web_search(agent_id: str, query: str, core_client: CoreClient, max_results: int = 5, api_key: str | None = None) -> dict[str, Any]:
     """Search the web for information using the web-search skill."""
+    payload: dict[str, Any] = {"agent_id": agent_id, "query": query, "max_results": max_results}
+    if api_key:
+        payload["api_key"] = api_key
     resp = await core_client.client.post(
         "/v1/skills/web-search/search",
-        json={"agent_id": agent_id, "query": query, "max_results": max_results},
+        json=payload,
         headers=core_client._get_headers(),
     )
     resp.raise_for_status()
@@ -52,7 +55,7 @@ WEB_SEARCH_DEF = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": _get_tool_desc("web_search", "Search the web for information using a query."),
+        "description": _get_tool_desc("web_search", "Search the web for information using a query. For API keys, pass [[secret:NAME]]."),
         "parameters": {
             "type": "object",
             "properties": {
@@ -64,6 +67,10 @@ WEB_SEARCH_DEF = {
                     "type": "integer",
                     "description": "Maximum results to return (default: 5)",
                     "default": 5
+                },
+                "api_key": {
+                    "type": "string",
+                    "description": "Optional API key reference (e.g., [[secret:my_api_key]]).",
                 }
             },
             "required": ["query"],

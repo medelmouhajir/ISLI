@@ -3,10 +3,16 @@ from .workspace import (
     file_write,
     file_list,
     file_delete,
+    describe_workspace_file,
+    search_workspace_file,
+    read_workspace_file,
     FILE_READ_DEF,
     FILE_WRITE_DEF,
     FILE_LIST_DEF,
     FILE_DELETE_DEF,
+    DESCRIBE_WORKSPACE_FILE_DEF,
+    SEARCH_WORKSPACE_FILE_DEF,
+    READ_WORKSPACE_FILE_DEF,
     attach_to_task,
     ATTACH_TO_TASK_DEF,
     pull_task_attachment,
@@ -34,7 +40,12 @@ from .workspace import (
     WorkspaceNotFoundError,
     WorkspacePermissionError,
 )
-from .channels import send_message, SEND_MESSAGE_DEF
+from .channels import (
+    send_message,
+    SEND_MESSAGE_DEF,
+    stage_reply_attachment,
+    STAGE_REPLY_ATTACHMENT_DEF,
+)
 from .system import get_current_datetime, shell_exec, DATETIME_DEF, SHELL_EXEC_DEF
 from .web import (
     web_fetch,
@@ -88,6 +99,7 @@ from .kanban import (
     LIST_KANBAN_TASKS_DEF,
     UPDATE_KANBAN_TASK_DEF,
 )
+from .document_manager import generate_document, GENERATE_DOCUMENT_DEF
 from .audio import (
     speech_to_text,
     text_to_speech,
@@ -204,6 +216,8 @@ __all__ = [
     "WorkspacePermissionError",
     "send_message",
     "SEND_MESSAGE_DEF",
+    "stage_reply_attachment",
+    "STAGE_REPLY_ATTACHMENT_DEF",
     "get_current_datetime",
     "shell_exec",
     "DATETIME_DEF",
@@ -252,6 +266,8 @@ __all__ = [
     "LIST_KANBAN_TASKS_DEF",
     "update_kanban_task",
     "UPDATE_KANBAN_TASK_DEF",
+    "generate_document",
+    "GENERATE_DOCUMENT_DEF",
     "create_engineering_plan",
     "PLAN_DEF",
     "test_skill_code",
@@ -337,7 +353,7 @@ async def fetch_dynamic_tools(core_client) -> tuple[dict[str, tuple], dict[str, 
     try:
         resp = await core_client.client.get("/v1/skills", headers=core_client._get_headers())
         resp.raise_for_status()
-    except Exception as exc:
+    except Exception:
         return {}, {}
 
     skills = resp.json()
@@ -408,11 +424,15 @@ SKILL_NAME_ALIASES: dict[str, str] = {
     "web_browse_console": "browser_console",
     "web_browse_vision": "browser_vision",
     "web_browse_images": "browser_get_images",
+    "files_documents_manager": "generate_document",
+    "file_search": "search_workspace_file",
+    "file_describe": "describe_workspace_file",
 }
 
 
 SKILL_TOOL_REGISTRY: dict[str, tuple] = {
     "send_message": (send_message, SEND_MESSAGE_DEF),
+    "stage_reply_attachment": (stage_reply_attachment, STAGE_REPLY_ATTACHMENT_DEF),
     "shell_exec": (shell_exec, SHELL_EXEC_DEF),
     "web_fetch": (web_fetch, WEB_FETCH_DEF),
     "web_search": (web_search, WEB_SEARCH_DEF),
@@ -424,6 +444,9 @@ SKILL_TOOL_REGISTRY: dict[str, tuple] = {
     "file_write": (file_write, FILE_WRITE_DEF),
     "file_list": (file_list, FILE_LIST_DEF),
     "file_delete": (file_delete, FILE_DELETE_DEF),
+    "describe_workspace_file": (describe_workspace_file, DESCRIBE_WORKSPACE_FILE_DEF),
+    "search_workspace_file": (search_workspace_file, SEARCH_WORKSPACE_FILE_DEF),
+    "read_workspace_file": (read_workspace_file, READ_WORKSPACE_FILE_DEF),
     "attach_to_task": (attach_to_task, ATTACH_TO_TASK_DEF),
     "pull_task_attachment": (pull_task_attachment, PULL_TASK_ATTACHMENT_DEF),
     "promote_output": (promote_output, PROMOTE_OUTPUT_DEF),
@@ -441,6 +464,7 @@ SKILL_TOOL_REGISTRY: dict[str, tuple] = {
     "create_kanban_task": (create_kanban_task, CREATE_KANBAN_TASK_DEF),
     "list_kanban_tasks": (list_kanban_tasks, LIST_KANBAN_TASKS_DEF),
     "update_kanban_task": (update_kanban_task, UPDATE_KANBAN_TASK_DEF),
+    "generate_document": (generate_document, GENERATE_DOCUMENT_DEF),
     "create_engineering_plan": (create_engineering_plan, PLAN_DEF),
     "test_skill": (test_skill_code, TEST_SKILL_DEF),
     "register_skill": (register_skill, REGISTER_SKILL_DEF),
@@ -479,6 +503,7 @@ SKILL_TOOL_REGISTRY: dict[str, tuple] = {
 
 SKILL_CATEGORY_MAP: dict[str, str] = {
     "send_message": "communication",
+    "stage_reply_attachment": "communication",
     "shell_exec": "system",
     "web_fetch": "web",
     "web_search": "web",
@@ -490,6 +515,9 @@ SKILL_CATEGORY_MAP: dict[str, str] = {
     "file_write": "workspace",
     "file_list": "workspace",
     "file_delete": "workspace",
+    "describe_workspace_file": "workspace",
+    "search_workspace_file": "workspace",
+    "read_workspace_file": "workspace",
     "attach_to_task": "workspace",
     "pull_task_attachment": "workspace",
     "promote_output": "workspace",
@@ -507,6 +535,7 @@ SKILL_CATEGORY_MAP: dict[str, str] = {
     "create_kanban_task": "kanban",
     "list_kanban_tasks": "kanban",
     "update_kanban_task": "kanban",
+    "generate_document": "workspace",
     "create_engineering_plan": "engineering",
     "test_skill": "engineering",
     "register_skill": "engineering",

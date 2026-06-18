@@ -8,7 +8,9 @@ import { KanbanBoard } from '@/components/KanbanBoard'
 import { CalendarPage } from '@/components/CalendarPage'
 import { DashboardPage } from '@/components/DashboardPage'
 import { SessionsPage } from '@/components/SessionsPage'
+import { ArchivedSessionsPage } from '@/components/ArchivedSessionsPage'
 import { ConversationsPage } from '@/components/ConversationsPage'
+import { CouncilPage } from '@/components/CouncilPage'
 import { KeeperDashboard } from '@/components/KeeperDashboard'
 import { AgentsPage } from '@/components/AgentsPage'
 import { AgentDetailPage } from '@/components/AgentDetailPage'
@@ -88,6 +90,7 @@ function AppContent() {
   }, [sidebarCollapsed])
 
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [mobileSidebarPage, setMobileSidebarPage] = useState(0)
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
 
   const handleCloseTaskModal = () => {
@@ -168,6 +171,16 @@ function AppContent() {
               : s
           ) ?? old
         )
+        break
+      }
+      case 'room:updated':
+      case 'room:agent_joined': {
+        const roomId = lastMessage.payload?.room_id
+        if (roomId) {
+          queryClient.invalidateQueries({ queryKey: ['rooms', roomId] })
+          queryClient.invalidateQueries({ queryKey: ['room-history', roomId] })
+        }
+        queryClient.invalidateQueries({ queryKey: ['rooms'] })
         break
       }
       case 'notification:new': {
@@ -256,7 +269,10 @@ function AppContent() {
     <div className="h-screen bg-bg-base text-text-primary flex flex-col relative overflow-hidden">
       <Header
         mobileNavOpen={mobileSidebarOpen}
-        onToggleMobileSidebar={() => setMobileSidebarOpen((v) => !v)}
+        onToggleMobileSidebar={(page) => {
+          if (page !== undefined) setMobileSidebarPage(page)
+          setMobileSidebarOpen((v) => !v)
+        }}
       />
       <div className="flex-1 flex overflow-hidden relative z-10">
         <Sidebar
@@ -266,10 +282,12 @@ function AppContent() {
           onToggle={() => setSidebarCollapsed((v) => !v)}
           mobileOpen={mobileSidebarOpen}
           onCloseMobile={() => setMobileSidebarOpen(false)}
+          initialMobilePage={mobileSidebarPage}
         />
         
         <Routes>
-          <Route path="/" element={<DashboardPage />} />
+          <Route path="/" element={<CouncilPage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
           <Route
             path="/kanban"
             element={
@@ -288,6 +306,7 @@ function AppContent() {
           <Route path="/calendar" element={<CalendarPage />} />
 
           <Route path="/sessions" element={<SessionsPage />} />
+          <Route path="/archive/sessions" element={<ArchivedSessionsPage />} />
           <Route path="/chats" element={<ConversationsPage />} />
           <Route path="/keeper" element={<KeeperDashboard />} />
           <Route path="/logs" element={<LogsPage />} />

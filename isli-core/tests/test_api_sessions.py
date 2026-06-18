@@ -265,11 +265,91 @@ class TestSessionAPIFilters:
         assert data["all_messages"][1]["content"] == "new msg"
 
     @pytest.mark.asyncio
-    async def test_get_session_history_404_deleted(self, client: AsyncClient, db_session: AsyncSession):
+    async def test_get_session_history_returns_deleted_session(self, client: AsyncClient, db_session: AsyncSession):
         agent = Agent(id="agent-history-2", name="History Agent 2")
         session = Session(
             id="sess-history-2",
             agent_id="agent-history-2",
+            channel="telegram",
+            messages=[{"role": "user", "content": "deleted msg", "timestamp": "2024-01-01T10:00:00+00:00"}],
+            deleted_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent, session])
+        await db_session.commit()
+
+        resp = await client.get("/v1/sessions/sess-history-2/history")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id"] == "sess-history-2"
+        assert len(data["all_messages"]) == 1
+        assert data["all_messages"][0]["content"] == "deleted msg"
+
+
+class TestSessionArchiveAPI:
+    @pytest.mark.asyncio
+    async def test_list_archived_sessions_includes_closed_and_deleted(self, client: AsyncClient, db_session: AsyncSession):
+        agent = Agent(id="agent-archive-1", name="Archive Agent")
+        session_active = Session(
+            id="sess-archive-active",
+            agent_id="agent-archive-1",
+            channel="telegram",
+            messages=[],
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        session_closed = Session(
+            id="sess-archive-closed",
+            agent_id="agent-archive-1",
+            channel="telegram",
+            messages=[],
+            status="closed",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        session_deleted = Session(
+            id="sess-archive-deleted",
+            agent_id="agent-archive-1",
+            channel="telegram",
+            messages=[],
+            deleted_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent, session_active, session_closed, session_deleted])
+        await db_session.commit()
+
+        resp = await client.get("/v1/sessions?archived=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        ids = {s["id"] for s in data}
+        assert "sess-archive-active" not in ids
+        assert "sess-archive-closed" in ids
+        assert "sess-archive-deleted" in ids
+
+    @pytest.mark.asyncio
+    async def test_restore_closed_session(self, client: AsyncClient, db_session: AsyncSession):
+        agent = Agent(id="agent-restore-1", name="Restore Agent")
+        session = Session(
+            id="sess-restore-closed",
+            agent_id="agent-restore-1",
+            channel="telegram",
+            messages=[],
+            status="closed",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent, session])
+        await db_session.commit()
+
+        resp = await client.post("/v1/sessions/sess-restore-closed/restore")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ready"
+        assert data["deleted_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_restore_soft_deleted_session(self, client: AsyncClient, db_session: AsyncSession):
+        agent = Agent(id="agent-restore-2", name="Restore Agent 2")
+        session = Session(
+            id="sess-restore-deleted",
+            agent_id="agent-restore-2",
             channel="telegram",
             messages=[],
             deleted_at=datetime.now(timezone.utc),
@@ -278,5 +358,82 @@ class TestSessionAPIFilters:
         db_session.add_all([agent, session])
         await db_session.commit()
 
-        resp = await client.get("/v1/sessions/sess-history-2/history")
-        assert resp.status_code == 404
+        resp = await client.post("/v1/sessions/sess-restore-deleted/restore")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ready"
+        assert data["deleted_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_restore_fails_when_agent_deleted(self, client: AsyncClient, db_session: AsyncSession):
+        agent = Agent(
+            id="agent-restore-deleted",
+            name="Deleted Restore Agent",
+            deleted_at=datetime.now(timezone.utc),
+            status="deleted",
+        )
+        session = Session(
+            id="sess-restore-bad-agent",
+            agent_id="agent-restore-deleted",
+            channel="telegram",
+            messages=[],
+            deleted_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent, session])
+        await db_session.commit()
+
+        resp = await client.post("/v1/sessions/sess-restore-bad-agent/restore")
+        assert resp.status_code == 400
+        assert "agent is deleted" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_delete_permanently_removes_soft_deleted_session(self, client: AsyncClient, db_session: AsyncSession):
+        agent = Agent(id="agent-delete-1", name="Delete Agent")
+        session = Session(
+            id="sess-delete-soft",
+            agent_id="agent-delete-1",
+            channel="telegram",
+            messages=[],
+            deleted_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent, session])
+        await db_session.commit()
+
+        resp = await client.delete("/v1/sessions/sess-delete-soft")
+        assert resp.status_code == 204
+
+        resp = await client.get("/v1/sessions?archived=true")
+        assert resp.status_code == 200
+        ids = {s["id"] for s in resp.json()}
+        assert "sess-delete-soft" not in ids
+
+    @pytest.mark.asyncio
+    async def test_archive_list_filter_by_agent(self, client: AsyncClient, db_session: AsyncSession):
+        agent_a = Agent(id="agent-archive-a", name="Archive Agent A")
+        agent_b = Agent(id="agent-archive-b", name="Archive Agent B")
+        session_a = Session(
+            id="sess-archive-a",
+            agent_id="agent-archive-a",
+            channel="telegram",
+            messages=[],
+            status="closed",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        session_b = Session(
+            id="sess-archive-b",
+            agent_id="agent-archive-b",
+            channel="telegram",
+            messages=[],
+            status="closed",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db_session.add_all([agent_a, agent_b, session_a, session_b])
+        await db_session.commit()
+
+        resp = await client.get("/v1/sessions?archived=true&agent_id=agent-archive-a")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["id"] == "sess-archive-a"

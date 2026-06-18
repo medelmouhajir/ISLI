@@ -4,7 +4,6 @@ from httpx import Response
 from isli_agent.tools.kanban import create_kanban_task, list_kanban_tasks, update_kanban_task
 from isli_agent.tools.engineering import create_engineering_plan
 from isli_agent.client import CoreClient
-from datetime import datetime, timezone
 
 
 @pytest.fixture

@@ -27,6 +27,7 @@ ISLI is a modular, production-grade multi-agent digital assistant system where *
 | [`14-management-cli.md`](./14-management-cli.md) | Management CLI (`isli`) — installer and operational tool |
 | [`15-service-mesh-backlog.md`](./15-service-mesh-backlog.md) | Deferred: Zero-Trust mTLS for multi-host deployments (Kubernetes/Swarm backlog) |
 | [`16-security-runbook.md`](./16-security-runbook.md) | Operational security — secrets, network segmentation, auth verification, incident response |
+| [`17-council-chat.md`](./17-council-chat.md) | Council Chat — multi-agent rooms with `@mention` addressing and parallel agent lanes |
 
 ---
 
@@ -107,6 +108,7 @@ All implementation phases are **complete** (2026-06-01):
 | 29 | Legacy Tool Call Extractor | Complete (2026-06-14) — **Fourth fallback tier** in `AgentRunner._extract_tool_calls()` for models (e.g., Kimi K2.6 via Ollama) that emit `<tool_call><function=...><parameter=...>` markup instead of native `tool_calls[]` or Anthropic XML. Regex-based parser supports both attribute and inline tag styles, multiline parameter values, JSON auto-decode, and unregistered-tool filtering. `_strip_legacy_tool_calls()` removes markup before user delivery. Prevents raw tool-call text from leaking to users on local models. |
 | 30 | Configurable Keeper Context Length | Complete (2026-06-14) — **Runtime-configurable `num_ctx`/`num_batch`** for the local Ollama engine. Values are persisted by `ModelManager` to `/app/data/model_config.json` and editable from Board UI (`/settings/keeper` → Generation Options card). The next inference call picks up the new value without restart. Core proxies via `GET/PUT /v1/model-management/config`. |
 | 31 | Task-Mode Prompt Injection | Complete (2026-06-14) — **Kanban task execution block** in `prompts.yaml` injected only during `_execute_task`; forces agents to perform described work, write file deliverables, and avoid greeting/status-card shortcuts. Verified with `moroccan-law-skill-isli` research task. |
+| 32 | Council Chat (Phase 1) | Complete (2026-06-17) — **Multi-agent rooms** with `@mention`/`@all` addressing, deterministic per-agent `room:{room_id}:{agent_id}` sessions, canonical `Room.messages` mirrored into every lane, and Board UI Council page; web-only, up to 6 agents per room |
 | 6 | Compliance | Complete — SAR pipeline, audit hashes, AES-256-GCM, TIA |
 | 7 | Scale-Out | Complete — Traefik, Terraform, ECS Fargate, blue/green, CI/CD |
 

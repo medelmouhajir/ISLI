@@ -1,33 +1,32 @@
-from datetime import datetime, timezone, timedelta
-from typing import Any
-from uuid import uuid4
-
 import base64
 import json
 import re
-import structlog
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
+import httpx
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select, delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-import httpx
 
-from isli_core.auth import create_internal_token
-
-from isli_core.db import get_db
-from isli_core.redis_client import get_redis
-from isli_core.models import Agent, Session, ChannelMessage, ChannelIdentity
+from isli_core.auth import create_internal_token, require_admin_auth, require_internal_auth
 from isli_core.config import get_settings
-from isli_core.auth import require_internal_auth, require_admin_auth
-from isli_core.retry import exponential_backoff
-from isli_core.event_manager import EventManager
-from isli_core.redis_streams import add_to_stream
 from isli_core.cost.complexity import TaskComplexityScorer
-from isli_core.memory.context_cache import ContextCache
-from isli_core.utils.tokens import count_message_tokens
+from isli_core.db import get_db
+from isli_core.event_manager import EventManager
 from isli_core.jobs.journal_worker import update_session_journal
+from isli_core.models import Agent, ChannelIdentity, ChannelMessage, Session, SharedWorkspace
+from isli_core.redis_client import get_redis
+from isli_core.redis_streams import add_to_stream
+from isli_core.retry import exponential_backoff
+from isli_core.routers.workspaces import (
+    _create_file_download_token,
+    _validate_path,
+    fetch_file_metadata,
+)
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -57,6 +56,8 @@ class SessionOut(BaseModel):
     routed_model_id: str | None
     routed_model_reason: str | None
     session_metadata: dict[str, Any] | None
+    room_id: str | None
+    deleted_at: datetime | None
 
 
 class JournalUpdateIn(BaseModel):
@@ -76,6 +77,12 @@ class ComponentPayload(BaseModel):
     text_fallback: str | None = None
 
 
+class AttachmentIn(BaseModel):
+    path: str
+    workspace_id: str | None = None
+    caption: str | None = None
+
+
 class SessionReplyIn(BaseModel):
     text: str
     components: list[ComponentPayload] = []
@@ -83,6 +90,7 @@ class SessionReplyIn(BaseModel):
     audio_b64: str | None = None
     audio_voice: str | None = None
     voice_mode_enabled: bool = False
+    attachments: list[AttachmentIn] = []
 
 
 class SessionActionIn(BaseModel):
@@ -97,12 +105,18 @@ async def list_sessions(
     channel: str | None = None,
     user_id: str | None = None,
     include_closed: bool = False,
+    archived: bool = False,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(Session).where(Session.deleted_at.is_(None))
-    if not include_closed:
-        query = query.where(Session.status != "closed")
+    if archived:
+        query = select(Session).where(
+            (Session.status == "closed") | (Session.deleted_at.is_not(None))
+        )
+    else:
+        query = select(Session).where(Session.deleted_at.is_(None))
+        if not include_closed:
+            query = query.where(Session.status != "closed")
     if agent_id:
         query = query.where(Session.agent_id == agent_id)
     if channel:
@@ -118,11 +132,21 @@ async def list_sessions(
 @router.get("/{session_id}", response_model=SessionOut)
 async def get_session(session_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.deleted_at.is_(None), Session.status != "closed")
+        select(Session).where(
+            Session.id == session_id,
+            Session.deleted_at.is_(None),
+            Session.status != "closed",
+        )
     )
     sess = result.scalar_one_or_none()
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Enrich persisted attachment metadata with fresh signed URLs for the UI.
+    if sess.messages:
+        sess.messages = [
+            _enrich_message_attachments(msg) for msg in sess.messages
+        ]
     return sess
 
 
@@ -140,15 +164,14 @@ class SessionHistoryOut(BaseModel):
 
 @router.get("/{session_id}/history", response_model=SessionHistoryOut)
 async def get_session_history(session_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.deleted_at.is_(None))
-    )
+    result = await db.execute(select(Session).where(Session.id == session_id))
     sess = result.scalar_one_or_none()
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
 
     all_messages = (sess.archived_messages or []) + (sess.messages or [])
     all_messages.sort(key=lambda m: m.get("timestamp", ""))
+    all_messages = [_enrich_message_attachments(msg) for msg in all_messages]
 
     return SessionHistoryOut(
         session_id=sess.id,
@@ -166,11 +189,16 @@ async def create_session(
     payload: SessionCreateIn,
     db: AsyncSession = Depends(get_db),
 ):
-    agent_check = await db.execute(select(Agent).where(Agent.id == payload.agent_id, Agent.deleted_at.is_(None)))
+    agent_check = await db.execute(
+        select(Agent).where(Agent.id == payload.agent_id, Agent.deleted_at.is_(None))
+    )
     if not agent_check.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail=f"Agent '{payload.agent_id}' not found or deleted")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Agent '{payload.agent_id}' not found or deleted",
+        )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sess = Session(
         id=str(uuid4()),
         agent_id=payload.agent_id,
@@ -195,13 +223,17 @@ async def send_human_message(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.deleted_at.is_(None), Session.status != "closed")
+        select(Session).where(
+            Session.id == session_id,
+            Session.deleted_at.is_(None),
+            Session.status != "closed",
+        )
     )
     sess = result.scalar_one_or_none()
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Append human message
     sess.messages = (sess.messages or []) + [
@@ -298,22 +330,165 @@ async def send_human_message(
     return {"status": "queued", "session_id": session_id}
 
 
+MAX_REPLY_ATTACHMENTS = 5
+
+_CHANNEL_ATTACHMENT_LIMITS: dict[str, dict[str, Any]] = {
+    "telegram": {
+        "max_size_bytes": 20 * 1024 * 1024,
+        "allowed_types": {"image", "video", "audio", "document", "voice"},
+    },
+    "whatsapp": {
+        "max_size_bytes": 16 * 1024 * 1024,
+        "allowed_types": {"image", "video", "audio", "document"},
+    },
+    "email": {
+        "max_size_bytes": 25 * 1024 * 1024,
+        "allowed_types": {"image", "video", "audio", "document"},
+    },
+    "web": {
+        "max_size_bytes": 100 * 1024 * 1024,
+        "allowed_types": {"image", "video", "audio", "document"},
+    },
+}
+
+
+def _media_category_from_mime(mime_type: str) -> str:
+    mime = mime_type.lower().strip()
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/"):
+        return "audio"
+    return "document"
+
+
+def _attachment_fits_channel(attachment: dict[str, Any], channel: str | None) -> tuple[bool, str]:
+    if not channel or channel == "web":
+        return True, ""
+    limits = _CHANNEL_ATTACHMENT_LIMITS.get(channel, _CHANNEL_ATTACHMENT_LIMITS["web"])
+    cat = _media_category_from_mime(attachment.get("mime_type", "application/octet-stream"))
+    if cat not in limits["allowed_types"]:
+        return False, f"media type '{cat}' not allowed on {channel}"
+    size = attachment.get("size_bytes", 0) or 0
+    if size > limits["max_size_bytes"]:
+        return False, f"{size / (1024 * 1024):.1f}MB exceeds {channel} limit"
+    return True, ""
+
+
+async def _resolve_attachment_scope(
+    attachment: AttachmentIn,
+    agent_id: str,
+    db: AsyncSession,
+) -> tuple[str, str]:
+    """Return (scope, scope_id) for an attachment, validating shared workspace membership."""
+    if attachment.workspace_id:
+        scope_id = attachment.workspace_id
+        result = await db.execute(
+            select(SharedWorkspace).where(
+                SharedWorkspace.id == scope_id,
+                SharedWorkspace.deleted_at.is_(None),
+            )
+        )
+        workspace = result.scalar_one_or_none()
+        if not workspace:
+            raise HTTPException(status_code=404, detail=f"Shared workspace not found: {scope_id}")
+        if agent_id != workspace.owner_id and agent_id not in (workspace.members or []):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access denied to shared workspace {scope_id}",
+            )
+        return "shared", scope_id
+    return "agent", agent_id
+
+
+async def _build_attachment_metadata(
+    attachment: AttachmentIn,
+    agent_id: str,
+    db: AsyncSession,
+) -> dict[str, Any]:
+    """Resolve and fetch metadata for a single attachment (no signed URLs)."""
+    scope, scope_id = await _resolve_attachment_scope(attachment, agent_id, db)
+    valid_path = _validate_path(attachment.path)
+    if not valid_path:
+        raise HTTPException(status_code=400, detail="Attachment path is required")
+    meta = await fetch_file_metadata(agent_id, scope, scope_id, valid_path)
+    return {
+        "agent_id": agent_id,
+        "path": valid_path,
+        "scope": scope,
+        "scope_id": scope_id,
+        "filename": meta["filename"],
+        "mime_type": meta["mime_type"],
+        "size_bytes": meta["size_bytes"],
+        "caption": attachment.caption,
+        "media_type": _media_category_from_mime(meta["mime_type"]),
+    }
+
+
+def _sign_attachment_url(
+    attachment: dict[str, Any],
+    core_api_url: str | None = None,
+    expires_minutes: int = 10,
+) -> dict[str, Any]:
+    """Return a copy of the attachment metadata enriched with a fresh signed download URL.
+
+    When ``core_api_url`` is omitted, a relative path is returned for browser clients
+    that proxy through the Board UI (``/api/...``). Services inside the Docker network
+    should pass the absolute internal URL (e.g. ``http://core:8000``).
+    """
+    token = _create_file_download_token(
+        agent_id=attachment["agent_id"],
+        scope=attachment["scope"],
+        scope_id=attachment["scope_id"],
+        path=attachment["path"],
+        expires_minutes=expires_minutes,
+    )
+    base = core_api_url.rstrip("/") if core_api_url else ""
+    signed = dict(attachment)
+    signed["download_url"] = f"{base}/v1/internal/files/download?token={token}"
+    signed["expires_at"] = (
+        datetime.now(UTC) + timedelta(minutes=expires_minutes)
+    ).isoformat()
+    return signed
+
+
+def _enrich_message_attachments(message: dict[str, Any]) -> dict[str, Any]:
+    """Add fresh signed download URLs to any attachment metadata in a message."""
+    attachments = message.get("attachments")
+    if not attachments:
+        return message
+    message = dict(message)
+    message["attachments"] = [
+        _sign_attachment_url(att) if "download_url" not in att else att
+        for att in attachments
+    ]
+    return message
+
+
 @router.post("/{session_id}/reply")
 async def reply_to_session(
     session_id: str,
     payload: SessionReplyIn,
     db: AsyncSession = Depends(get_db),
-    auth: dict = Depends(require_internal_auth),
-):
+    auth: dict[str, Any] = Depends(require_internal_auth),
+) -> dict[str, Any]:
     result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.deleted_at.is_(None), Session.status != "closed")
+        select(Session).where(
+            Session.id == session_id,
+            Session.deleted_at.is_(None),
+            Session.status != "closed",
+        )
     )
     sess = result.scalar_one_or_none()
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
 
     if auth.get("sub") != sess.agent_id:
-        raise HTTPException(status_code=403, detail="Not authorized to reply to this session")
+        raise HTTPException(
+            status_code=403,
+            detail="Not authorized to reply to this session",
+        )
 
     # ── PII Mesh defense-in-depth validation ──
     agent_result = await db.execute(select(Agent).where(Agent.id == sess.agent_id))
@@ -323,32 +498,39 @@ async def reply_to_session(
     if agent_config.get("pii_mesh_enabled", False):
         pii_token_pattern = r"\{\{PII:[a-z_]+:[a-f0-9]+\}\}"
         if re.search(pii_token_pattern, reply_text):
-            logger.critical("sessions.pii_tokens_in_reply", session_id=session_id, agent_id=sess.agent_id)
+            logger.critical(
+                "sessions.pii_tokens_in_reply",
+                session_id=session_id,
+                agent_id=sess.agent_id,
+            )
             from isli_core.compliance.pii_keeper_client import PIIKeeperClient
             rehydrated = await PIIKeeperClient().rehydrate(reply_text, session_id)
             reply_text = rehydrated
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # --- Audio handling ---
     audio_b64_for_channels: str | None = payload.audio_b64
 
     # Phase 2: Auto-TTS when voice_mode is enabled and no explicit audio provided
-    if not audio_b64_for_channels and sess.session_metadata and sess.session_metadata.get("voice_mode_enabled"):
+    session_metadata = sess.session_metadata or {}
+    voice_mode = session_metadata.get("voice_mode_enabled")
+    if not audio_b64_for_channels and voice_mode:
         try:
             settings = get_settings()
+            voice = payload.audio_voice or session_metadata.get("voice_preference")
+            tts_token = create_internal_token(
+                "core-api", scopes=["audio:tts"], expires_minutes=1
+            )
             async with httpx.AsyncClient(timeout=30.0) as client:
                 tts_resp = await client.post(
                     f"{settings.audio_url}/tts/synthesize",
-                    json={
-                        "text": payload.text,
-                        "voice": payload.audio_voice or sess.session_metadata.get("voice_preference"),
-                    },
-                    headers={"X-Internal-Auth": create_internal_token("core-api", scopes=["audio:tts"], expires_minutes=1)},
+                    json={"text": payload.text, "voice": voice},
+                    headers={"X-Internal-Auth": tts_token},
                 )
                 tts_resp.raise_for_status()
                 tts_data = tts_resp.json()
-                
+
                 # Check if it returned a reference (new pattern) or b64 (legacy)
                 if tts_data.get("audio_ref"):
                     # It's already in Redis! We just use the ref.
@@ -362,7 +544,7 @@ async def reply_to_session(
             logger.warning("sessions.auto_tts_failed", session_id=session_id, error=str(exc))
 
     # If audio is provided as Base64 (legacy or explicit), store in Redis and get a token
-    audio_ref: str | None = locals().get("audio_ref")
+    audio_ref = locals().get("audio_ref")
     if audio_b64_for_channels and not audio_ref:
         try:
             MAX_AUDIO_BYTES = 5 * 1024 * 1024
@@ -373,18 +555,67 @@ async def reply_to_session(
                 audio_ref = f"blob:audio:{blob_id}"
                 redis = await get_blob_redis()
                 await redis.setex(audio_ref, 86400, audio_bytes)
-                logger.info("sessions.audio_blob_stored", session_id=session_id, ref=audio_ref)
+                logger.info(
+                    "sessions.audio_blob_stored",
+                    session_id=session_id,
+                    ref=audio_ref,
+                )
             else:
-                logger.warning("sessions.audio_too_large", session_id=session_id, size=len(audio_bytes))
+                logger.warning(
+                    "sessions.audio_too_large",
+                    session_id=session_id,
+                    size=len(audio_bytes),
+                )
         except Exception as exc:
-            logger.warning("sessions.audio_blob_store_failed", session_id=session_id, error=str(exc))
+            logger.warning(
+                "sessions.audio_blob_store_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+
+    # --- Attachments handling (metadata only; signed URLs generated at forward/UI time) ---
+    attachment_records: list[dict[str, Any]] = []
+    if payload.attachments:
+        raw_attachments = payload.attachments[:MAX_REPLY_ATTACHMENTS]
+        if len(payload.attachments) > MAX_REPLY_ATTACHMENTS:
+            logger.warning(
+                "sessions.too_many_attachments",
+                session_id=session_id,
+                agent_id=sess.agent_id,
+                requested=len(payload.attachments),
+                kept=MAX_REPLY_ATTACHMENTS,
+            )
+        for att in raw_attachments:
+            try:
+                record = await _build_attachment_metadata(att, sess.agent_id, db)
+                attachment_records.append(record)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "sessions.attachment_metadata_failed",
+                    session_id=session_id,
+                    agent_id=sess.agent_id,
+                    path=att.path,
+                    workspace_id=att.workspace_id,
+                    error=str(exc),
+                )
 
     # Prepare message dict
-    msg = {"role": "assistant", "content": reply_text, "timestamp": now.isoformat()}
+    msg: dict[str, Any] = {
+        "id": str(uuid4()),
+        "role": "assistant",
+        "content": reply_text,
+        "timestamp": now.isoformat(),
+        "agent_id": sess.agent_id,
+        "agent_name": agent.name if agent else "Unknown Agent",
+    }
     if payload.components:
         msg["components"] = [c.model_dump() for c in payload.components]
     if audio_ref:
         msg["audio_ref"] = audio_ref
+    if attachment_records:
+        msg["attachments"] = attachment_records
 
     # --- Blob Token Rewrite for Web UI & Promotion Trigger ---
     text_tokens = re.findall(r"(blob:(?:audio|browser):[a-f0-9-]+)", reply_text)
@@ -406,13 +637,22 @@ async def reply_to_session(
     api_msg_content = reply_text
     for token in text_tokens:
         blob_uuid = token.split(":")[-1]
-        api_msg_content = api_msg_content.replace(token, f"{settings.core_api_url}/v1/blobs/{blob_uuid}")
+        api_msg_content = api_msg_content.replace(
+            token, f"{settings.core_api_url}/v1/blobs/{blob_uuid}"
+        )
 
-    api_response_msg = dict(msg)
+    api_response_msg: dict[str, Any] = dict(msg)
     api_response_msg["content"] = api_msg_content
     if audio_ref:
         blob_uuid = audio_ref.split(":")[-1]
-        api_response_msg["audio_url"] = f"{settings.core_api_url}/v1/blobs/{blob_uuid}"
+        api_response_msg["audio_url"] = (
+            f"{settings.core_api_url}/v1/blobs/{blob_uuid}"
+        )
+    if attachment_records:
+        # Relative URL so browser clients download through the Board UI /api proxy.
+        api_response_msg["attachments"] = [
+            _sign_attachment_url(rec) for rec in attachment_records
+        ]
 
     sess.last_activity_at = now
     sess.status = "ready"
@@ -424,8 +664,8 @@ async def reply_to_session(
         if payload.components and payload.components[0].text_fallback:
             channel_text = payload.components[0].text_fallback
 
-        async def _send_to_channels():
-            payload_channels = {
+        async def _send_to_channels() -> None:
+            payload_channels: dict[str, Any] = {
                 "channel": sess.channel,
                 "channel_user_id": sess.user_id,
                 "text": channel_text,
@@ -433,30 +673,90 @@ async def reply_to_session(
             }
             if audio_ref:
                 payload_channels["audio_ref"] = audio_ref
+
+            # Build channel-specific attachment payload with fresh signed URLs
+            channel_attachments: list[dict[str, Any]] = []
+            for rec in attachment_records:
+                ok, reason = _attachment_fits_channel(rec, sess.channel)
+                if not ok:
+                    logger.warning(
+                        "sessions.attachment_dropped_for_channel",
+                        session_id=session_id,
+                        channel=sess.channel,
+                        filename=rec.get("filename"),
+                        reason=reason,
+                    )
+                    continue
+                signed = _sign_attachment_url(rec, settings.core_api_url)
+                channel_attachments.append(signed)
+
+            if channel_attachments:
+                payload_channels["attachments"] = channel_attachments
+
             async with httpx.AsyncClient() as client:
+                channels_token = create_internal_token(
+                    "core", scopes=["channels:send"], expires_minutes=5
+                )
                 resp = await client.post(
                     f"{settings.channels_url}/send",
                     json=payload_channels,
-                    headers={"X-Internal-Auth": create_internal_token("core", scopes=["channels:send"], expires_minutes=5)},
-                    timeout=10.0,
+                    headers={"X-Internal-Auth": channels_token},
+                    timeout=30.0,
                 )
                 resp.raise_for_status()
 
         try:
             from isli_core.dynamic_config import get_setting
-            max_retries = await get_setting(db, "default_max_retries", scope="general", default=3)
-            base_delay = await get_setting(db, "default_base_delay_seconds", scope="general", default=1.0)
-            max_delay = await get_setting(db, "default_max_delay_seconds", scope="general", default=10.0)
-            await exponential_backoff(_send_to_channels, max_retries=max_retries, base_delay=base_delay, max_delay=max_delay)
+            max_retries = await get_setting(
+                db, "default_max_retries", scope="general", default=3
+            )
+            base_delay = await get_setting(
+                db, "default_base_delay_seconds", scope="general", default=1.0
+            )
+            max_delay = await get_setting(
+                db, "default_max_delay_seconds", scope="general", default=10.0
+            )
+            _ = await exponential_backoff(
+                _send_to_channels,
+                max_retries=max_retries,
+                base_delay=base_delay,
+                max_delay=max_delay,
+            )
         except Exception as exc:
             logger.error("sessions.reply_send_failed", session_id=session_id, error=str(exc))
+
+    # Outbound channel audit record
+    try:
+        outbound_audit = ChannelMessage(
+            session_id=session_id,
+            sequence_number=len(sess.messages or []) + 1,
+            channel=sess.channel or "web",
+            direction="outbound",
+            content=api_msg_content[:2000],
+            raw_payload={
+                "agent_id": sess.agent_id,
+                "attachments": [
+                    {
+                        "filename": r.get("filename"),
+                        "mime_type": r.get("mime_type"),
+                        "size_bytes": r.get("size_bytes"),
+                    }
+                    for r in attachment_records
+                ],
+                "audio_ref": audio_ref,
+            },
+        )
+        db.add(outbound_audit)
+        await db.commit()
+    except Exception as exc:
+        logger.warning("sessions.outbound_audit_failed", session_id=session_id, error=str(exc))
 
     await EventManager.emit("session:updated", {"session_id": session_id})
     try:
         redis = await get_redis()
         await redis.delete(f"session:{session_id}:draft")
         await redis.delete(f"session:{session_id}:debug_trace")
-    except:
+    except Exception:
         pass
 
     return {"status": "sent", "session_id": session_id, "message": api_response_msg}
@@ -488,7 +788,7 @@ async def update_session_status(
         raise HTTPException(status_code=403, detail="Not authorized to update this session")
 
     sess.status = payload.status
-    sess.last_activity_at = datetime.now(timezone.utc)
+    sess.last_activity_at = datetime.now(UTC)
     await db.commit()
 
     await EventManager.emit("session:updated", {"session_id": session_id})
@@ -531,7 +831,7 @@ async def session_action(
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Optional deduplication: skip identical action within 1 second window
     existing = sess.messages or []
@@ -602,7 +902,11 @@ async def session_action(
 @router.post("/{session_id}/close")
 async def close_session(session_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.deleted_at.is_(None), Session.status != "closed")
+        select(Session).where(
+            Session.id == session_id,
+            Session.deleted_at.is_(None),
+            Session.status != "closed",
+        )
     )
     sess = result.scalar_one_or_none()
     if not sess:
@@ -685,7 +989,7 @@ async def update_session_journal_text(
 
     old_journal = sess.journal
     sess.journal = data.journal
-    sess.journal_updated_at = datetime.now(timezone.utc)
+    sess.journal_updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(sess)
 
@@ -756,9 +1060,7 @@ async def clear_session_journal(
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Session).where(Session.id == session_id, Session.deleted_at.is_(None))
-    )
+    result = await db.execute(select(Session).where(Session.id == session_id))
     sess = result.scalar_one_or_none()
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -770,3 +1072,26 @@ async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await EventManager.emit("session:updated", {"session_id": session_id})
     return None
+
+
+@router.post("/{session_id}/restore", response_model=SessionOut)
+async def restore_session(session_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    sess = result.scalar_one_or_none()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    agent_result = await db.execute(
+        select(Agent).where(Agent.id == sess.agent_id, Agent.deleted_at.is_(None))
+    )
+    if not agent_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400, detail="Cannot restore session: owning agent is deleted"
+        )
+
+    sess.status = "ready"
+    sess.deleted_at = None
+    await db.commit()
+    await db.refresh(sess)
+    await EventManager.emit("session:updated", {"session_id": session_id})
+    return sess

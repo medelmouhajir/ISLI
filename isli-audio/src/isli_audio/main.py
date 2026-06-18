@@ -152,7 +152,8 @@ async def stt_transcribe(
                     audio_bytes = base64.b64decode(data.audio_b64)
             except HTTPException:
                 raise
-            except Exception:
+            except Exception as exc:
+                logger.error("audio.stt_request_parse_failed", error=str(exc))
                 raise HTTPException(status_code=400, detail="Invalid JSON body; provide multipart, audio_b64, or audio_ref")
 
     if not audio_bytes:

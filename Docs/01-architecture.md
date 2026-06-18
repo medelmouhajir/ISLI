@@ -11,7 +11,7 @@ ISLI is built as a **layered, event-driven multi-agent system**. The architectur
 ```
 ╔══════════════════════════════════════════════════════════════════╗
 ║  LAYER 5 — PRESENTATION                                         ║
-║  React Kanban UI  ·  Observability Hub (/logs)  ·  Workspaces  ·  Shared Workspaces  ·  Notification Inbox  ║
+║  React Kanban UI  ·  Observability Hub (/logs)  ·  Workspaces  ·  Shared Workspaces  ·  Notification Inbox  ·  Council Chat Rooms  ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 ║  LAYER 6 — MANAGEMENT                                           ║
@@ -357,6 +357,48 @@ This design ensures:
 - Full audit trail of every agent interaction
 - No hidden message passing
 - Human can inspect, pause, or redirect any delegation at any time
+
+---
+
+## Council Chat (Multi-Agent Rooms) (Added 2026-06-17)
+
+**Council Chat** is a parallel user-to-agents conversation mode. A user enters a single room thread and addresses one or more agents with `@mention`, `@all`, or the roster bar. Each addressed agent replies in its own independent lane, while all agents share the canonical room thread as read-only context.
+
+### Data Flow
+
+```
+Board UI: user posts "@researcher @coder what do you think?"
+  └─→ POST /v1/rooms/{room_id}/message
+        └─→ RoomService
+              ├─→ parse mentions and resolve addressed agents
+              ├─→ append user message to Room.messages
+              ├─→ mirror Room.messages into every room Session
+              └─→ push one context:requests event per addressed agent
+                    └─→ each agent's deterministic session
+                          room:{room_id}:{agent_id}
+                                └─→ agent runs its own model + tools
+                                      └─→ reply_to_session(text)
+                                            └─→ Core outbox
+                                                  ├─→ append reply to Room.messages
+                                                  ├─→ mirror reply into every room Session
+                                                  └─→ emit room:updated
+```
+
+### Why this preserves the no-orchestrator principle
+
+- The user is the only actor that can address multiple agents at once.
+- Agents do not message each other directly; they only respond to the user.
+- Each agent lane is an ordinary `Session`, so model routing, tool injection, context injection, journal, and memory all work unchanged.
+- The `Room` table is a thin projection layer; it does not run any agent logic.
+
+### Phase 1 limits
+
+- **Web-only.** Telegram, WhatsApp, Email, and other channels are not yet integrated.
+- **Max 6 agents per room** to control cost and context-window pressure.
+- **No cross-room memory.** Each room starts with a fresh context.
+- **30-day expiry.** Closed/expired rooms are not surfaced in the Board UI by default.
+
+See [`Docs/17-council-chat.md`](./17-council-chat.md) for the full specification.
 
 ---
 

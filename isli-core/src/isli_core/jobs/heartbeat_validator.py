@@ -7,9 +7,9 @@ from isli_core.db import get_db_session_manual
 from isli_core.models import Agent
 from sqlalchemy import select
 
-# ANOMALY_THRESHOLD = 3  # ~9 minutes at 3-min heartbeat intervals
-ANOMALY_THRESHOLD = 5    # ~15 minutes at 3-min heartbeat intervals
-ANOMALY_COUNTER_TTL_SECONDS = 600
+# ANOMALY_THRESHOLD = 3  # ~30 minutes at 10-min heartbeat intervals
+ANOMALY_THRESHOLD = 5    # ~50 minutes at 10-min heartbeat intervals
+ANOMALY_COUNTER_TTL_SECONDS = 3600
 
 logger = structlog.get_logger()
 

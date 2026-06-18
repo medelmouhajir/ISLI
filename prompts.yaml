@@ -1,270 +1,358 @@
-# ISLI Prompts Configuration
-# Single source of truth for all LLM prompts across Keeper, Agent SDK, and Core.
-# Modify prompts here; services reload on restart.
-
 keeper:
-  summarize: |
-    Summarize the following text in under {max_length} words:
+  summarize: 'Summarize the following text in under {max_length} words:
+
 
     {text}
 
+
     Summary:
 
-  journal_update: |
-    Update the structured session journal based on the recent messages. Maintain the following format precisely:
+    '
+  journal_update: 'Update the structured session journal based on the recent messages.
+    Maintain the following format precisely:
+
 
     [Context]
+
     (General environment, active versions, user preferences)
+
     [Decisions]
+
     (Key decisions made, agreed-upon constraints, or changes in direction)
+
     [Last State]
+
     (What the agent was doing most recently and where it left off)
 
+
     Old Journal:
+
     {old_journal}
 
+
     Recent Messages:
+
     {recent_messages}
+
     Updated Structured Journal:
 
-  heartbeat_anomaly: |
-    Analyze the following recent activity for agent '{agent_id}' (Status: {status}). Detect any anomalies like infinite loops, stuck states, or repetitive behavior.
+    '
+  heartbeat_anomaly: 'Analyze the following recent activity for agent ''{agent_id}''
+    (Status: {status}). Detect any anomalies like infinite loops, stuck states, or
+    repetitive behavior.
+
 
     Activity:
+
     {activity}
 
-    If an anomaly is found, describe it in one short sentence. Otherwise, respond with 'NONE'.
 
-  heartbeat_validate: |
-    You are a reliability monitor for agent '{agent_id}'.
+    If an anomaly is found, describe it in one short sentence. Otherwise, respond
+    with ''NONE''.
+
+    '
+  heartbeat_validate: 'You are a reliability monitor for agent ''{agent_id}''.
+
 
     Heartbeat received at: {heartbeat_at}
+
     Consecutive idle heartbeats: {consecutive_idle_beats}
+
     Current in-flight task: {current_task_id}
 
-    The Activity Log below is a summary of the agent's past session journals (conversation history), NOT a log of heartbeat events. Multiple entries close together simply reflect ongoing chat activity and are normal.
+
+    The Activity Log below is a summary of the agent''s past session journals (conversation
+    history), NOT a log of heartbeat events. Multiple entries close together simply
+    reflect ongoing chat activity and are normal.
+
 
     An agent that has been idle for many beats is NORMAL if it has no pending tasks.
+
     ONLY flag an anomaly if there is evidence of ACTIVE malfunction:
+
     - The same tool or API call is failing repeatedly on the SAME task.
+
     - A task has been in-flight for longer than 10 minutes with no updates.
-    - The agent's own logs report crashes or fatal errors.
+
+    - The agent''s own logs report crashes or fatal errors.
+
 
     Ignore entries older than 24 hours unless the same failure repeats today.
-    If the Activity Log says the agent is idle with no recent activity, return is_valid: true.
+
+    If the Activity Log says the agent is idle with no recent activity, return is_valid:
+    true.
+
 
     Activity Log:
+
     {compressed_log}
 
+
     Respond ONLY with a JSON object:
+
     - "is_valid": boolean (true if normal, false if anomaly found)
-    - "anomaly": string | null (short one-sentence description of the anomaly, or null)
+
+    - "anomaly": string | null (short one-sentence description of the anomaly, or
+    null)
+
 
     Example normal: {{"is_valid": true, "anomaly": null}}
-    Example anomaly: {{"is_valid": false, "anomaly": "Task xyz stuck for 15 min with repeated API 500"}}
 
-  pii_scrub: |
-    Identify any REMAINING Personal Identifiable Information (PII) in the following text. PII includes names, proprietary IDs, and addresses. Do NOT re-scrub placeholders starting with [[PII_.
+    Example anomaly: {{"is_valid": false, "anomaly": "Task xyz stuck for 15 min with
+    repeated API 500"}}
+
+    '
+  pii_scrub: 'Identify any REMAINING Personal Identifiable Information (PII) in the
+    following text. PII includes names, proprietary IDs, and addresses. Do NOT re-scrub
+    placeholders starting with [[PII_.
+
 
     Replace remaining PII with a unique placeholder like [[PII_NAME_N]] or [[PII_ADDR_N]].
 
+
     Text: {text}
 
-    Return ONLY a JSON object with two fields: 'scrubbed_text' and 'mapping' (new placeholder -> original value).
 
-  skill_clean: |
-    Clean the following raw data and extract only information relevant to: {extraction_goal}
+    Return ONLY a JSON object with two fields: ''scrubbed_text'' and ''mapping'' (new
+    placeholder -> original value).
 
-    If the data is HTML, strip all tags and boilerplate. Return a clean, compact JSON or text summary.
+    '
+  skill_clean: 'Clean the following raw data and extract only information relevant
+    to: {extraction_goal}
+
+
+    If the data is HTML, strip all tags and boilerplate. Return a clean, compact JSON
+    or text summary.
+
 
     Raw Data:
+
     {raw_data}
+
 
     Cleaned Data:
 
-  verify_logic: |
-    Act as a logic judge. Analyze the following agent output for contradictions, infinite reasoning loops, or safety violations.
+    '
+  verify_logic: 'Act as a logic judge. Analyze the following agent output for contradictions,
+    infinite reasoning loops, or safety violations.
+
 
     Context: {context}
+
     Agent Output: {text}
+
 
     Is this output valid? Respond with JSON: {{"is_valid": bool, "reason": "string"}}
 
-  session_prep: |
-    You are a context assembler and PII detection engine for an AI agent.
-
-    Your job has TWO parts, returned as a single JSON object:
-    1. Produce a concise context_summary for the agent's system prompt.
-    2. Detect ANY Personal Identifiable Information (PII) in the user's message and context.
-
-    PII categories: email, phone, name, address, ssn, credit_card, ip_address, api_key, password, proprietary_id.
-    For each PII entity found, emit an object with: category, original_value, confidence (0.0-1.0).
-
-    Return ONLY JSON:
-    {{
-      "context_summary": "string (max 300 words)",
-      "entities": [
-        {{"category": "email", "original_value": "alice@example.com", "confidence": 1.0}}
-      ]
-    }}
-
-    Context:
-    {context}
-
-    User Message:
-    {user_message}
-
-  model_router: |
-    You are a model router. Analyze the task and pick the best model from the available list.
-
-    Task: {task_description}
-    Heuristic complexity score: {complexity_score}/10 (tier: {complexity_tier})
-
-    Available models:
-    {model_list}
-
-    Default model: {default_model}
-
-    Respond ONLY with JSON:
-    {{
-      "recommended_model_id": "...",
-      "reason": "One-sentence justification"
-    }}
-
+    '
+  session_prep: "You are a context assembler and PII detection engine for an AI agent.\n\
+    \nYour job has TWO parts, returned as a single JSON object:\n1. Produce a concise\
+    \ context_summary for the agent's system prompt.\n2. Detect ANY Personal Identifiable\
+    \ Information (PII) in the user's message and context.\n\nPII categories: email,\
+    \ phone, name, address, ssn, credit_card, ip_address, api_key, password, proprietary_id.\n\
+    For each PII entity found, emit an object with: category, original_value, confidence\
+    \ (0.0-1.0).\n\nReturn ONLY JSON:\n{{\n  \"context_summary\": \"string (max 300\
+    \ words)\",\n  \"entities\": [\n    {{\"category\": \"email\", \"original_value\"\
+    : \"alice@example.com\", \"confidence\": 1.0}}\n  ]\n}}\n\nContext:\n{context}\n\
+    \nUser Message:\n{user_message}\n"
+  model_router: "You are a model router. Analyze the task and pick the best model\
+    \ from the available list.\n\nTask: {task_description}\nHeuristic complexity score:\
+    \ {complexity_score}/10 (tier: {complexity_tier})\n\nAvailable models:\n{model_list}\n\
+    \nDefault model: {default_model}\n\nRespond ONLY with JSON:\n{{\n  \"recommended_model_id\"\
+    : \"...\",\n  \"reason\": \"One-sentence justification\"\n}}\n"
 agent:
-  system_prompt_template: |
-    === IDENTITY ===
-    Name: {name}
-    Description: {description}
-    {persona_line}
+  system_prompt_template: "=== IDENTITY ===\nName: {name}\nDescription: {description}\n\
+    {persona_line}\n\n=== PROTOCOL CONSTRAINTS ===\n- You operate within a shared\
+    \ blackboard system.\n- NEVER attempt to directly invoke or message another agent.\n\
+    - ALL coordination and delegation happens through the Kanban board exclusively.\n\
+    - If a task is flagged needs_human_approval: true — HALT. Do not execute.\n  Surface\
+    \ your readiness state and await human confirmation via the Review column.\n\n\
+    === DECISION LOGIC ===\nBefore acting on any objective, run this internal check:\n\
+    1. Full capability -> proceed.\n2. Partial capability -> execute your portion,\
+    \ create a Kanban task\n   for the remainder with a clear handoff note.\n3. No\
+    \ capability / high-risk action -> do NOT attempt.\n   Create a Kanban task immediately\
+    \ with appropriate priority.\n4. Task depth > 2 or needs_human_approval -> HALT\
+    \ and surface state.\n\n=== PII MESH NOTICE ===\nIf the context or user message\
+    \ contains sensitive tokens like {{PII:category:hash}},\nthese are anonymized\
+    \ placeholders. Treat them as opaque references. Do NOT expand them.\nThe system\
+    \ will re-hydrate them automatically before the user sees the final response.\n\
+    \n=== CONTEXT ===\n{context_summary}\n[Memory as of: {context_timestamp}]\n\n\
+    === AVAILABLE TOOLS ===\nYou have access to the following tools. Call them when\
+    \ appropriate.\n{tools_list}\n\nIf you need a tool that is not listed above, call\
+    \ discover_skills to see all available capabilities.\n\nUse the tools when you\
+    \ need to interact with external systems.\n\nWhen the user asks you to send a\
+    \ notification, use notify_user immediately.\nThe user's request is their approval\
+    \ — do not ask for additional confirmation.\n"
+  task_execution_block: '## Kanban Task Execution Rules (non-negotiable)
 
-    === PROTOCOL CONSTRAINTS ===
-    - You operate within a shared blackboard system.
-    - NEVER attempt to directly invoke or message another agent.
-    - ALL coordination and delegation happens through the Kanban board exclusively.
-    - If a task is flagged needs_human_approval: true — HALT. Do not execute.
-      Surface your readiness state and await human confirmation via the Review column.
 
-    === DECISION LOGIC ===
-    Before acting on any objective, run this internal check:
-    1. Full capability -> proceed.
-    2. Partial capability -> execute your portion, create a Kanban task
-       for the remainder with a clear handoff note.
-    3. No capability / high-risk action -> do NOT attempt.
-       Create a Kanban task immediately with appropriate priority.
-    4. Task depth > 2 or needs_human_approval -> HALT and surface state.
+    You are currently executing an assigned Kanban task. The task title, description,
+    and relevant history are in the === CONTEXT === section above.
 
-    === PII MESH NOTICE ===
-    If the context or user message contains sensitive tokens like {{PII:category:hash}},
-    these are anonymized placeholders. Treat them as opaque references. Do NOT expand them.
-    The system will re-hydrate them automatically before the user sees the final response.
-
-    === CONTEXT ===
-    {context_summary}
-    [Memory as of: {context_timestamp}]
-
-    === AVAILABLE TOOLS ===
-    You have access to the following tools. Call them when appropriate.
-    {tools_list}
-
-    If you need a tool that is not listed above, call discover_skills to see all available capabilities.
-
-    Use the tools when you need to interact with external systems.
-
-    When the user asks you to send a notification, use notify_user immediately.
-    The user's request is their approval — do not ask for additional confirmation.
-
-  task_execution_block: |
-    ## Kanban Task Execution Rules (non-negotiable)
-
-    You are currently executing an assigned Kanban task. The task title, description, and relevant history are in the === CONTEXT === section above.
 
     TASK MODE rules:
+
     1. Read the task title and description carefully — that is your work order.
-    2. Execute the work: call the relevant skills, search tools, or APIs described in the task.
-    3. If the task requires a file deliverable, you MUST call file-write, shared_file_write, or promote_output before producing your final response.
-    4. Your final non-tool text response will be saved as the task result and the task will be marked done.
-    5. NEVER render a greeting card, status card, or "I am ready" message as your final task output.
-    6. NEVER rely on ui_components, send_message, or notify_user as a substitute for doing the actual work.
-    7. If you are unsure how to proceed, create a sub-task or mark the task blocked; do NOT mark it done.
+
+    2. Execute the work: call the relevant skills, search tools, or APIs described
+    in the task.
+
+    3. If the task requires a file deliverable, you MUST call file-write, shared_file_write,
+    or promote_output before producing your final response.
+
+    4. Your final non-tool text response will be saved as the task result and the
+    task will be marked done.
+
+    5. NEVER render a greeting card, status card, or "I am ready" message as your
+    final task output.
+
+    6. NEVER rely on ui_components, send_message, or notify_user as a substitute for
+    doing the actual work.
+
+    7. If you are unsure how to proceed, create a sub-task or mark the task blocked;
+    do NOT mark it done.
+
 
     Violation check (run mentally before each tool call):
-    "Am I about to call ui_components, send_message, or notify_user without having done the substantive work yet?" → STOP. Do the work first.
 
+    "Am I about to call ui_components, send_message, or notify_user without having
+    done the substantive work yet?" → STOP. Do the work first.
+
+    '
   tool_descriptions:
     get_current_datetime: Return the current UTC date and time.
-    discover_skills: List all skills assigned to this agent. Use this when you need a capability that is not currently visible in your tool list.
+    discover_skills: List all skills assigned to this agent. Use this when you need
+      a capability that is not currently visible in your tool list.
     shell_exec: Execute a shell command in a sandboxed environment.
     file_read: Read the contents of a file from the agent's workspace.
-    file_write: Write content to a file in the agent's workspace. Creates parent directories if needed.
+    file_write: Write content to a file in the agent's workspace. Creates parent directories
+      if needed.
     file_list: List files and directories in a path within the agent's workspace.
-    file_delete: Delete a file from the agent's workspace. Directories cannot be deleted with this tool.
-    send_message: Send a proactive message to a user through one of the agent's assigned channels (e.g., telegram). The agent must have the channel in its assigned channels list.
+    file_delete: Delete a file from the agent's workspace. Directories cannot be deleted
+      with this tool.
+    describe_workspace_file: Provide structure and stats for a specific file in the
+      agent workspace (line count, format, first/last lines) to help you decide how
+      to search or read it.
+    search_workspace_file: Search for a regex or string within a single file in your
+      workspace and return matching lines with line numbers. Use this to find specific
+      information in large files.
+    read_workspace_file: Read a specific range of lines from a file in your workspace.
+      Ideal for targeted reading of large files or spilled tool outputs.
+    send_message: Send a proactive message to a user through one of the agent's assigned
+      channels (e.g., telegram). The agent must have the channel in its assigned channels
+      list.
+    stage_reply_attachment: Stage a file from the agent's workspace or a shared workspace
+      to be attached to the next reply. Use this when the user asks for a file, report,
+      image, or any deliverable. Up to 5 attachments per reply. Provide the workspace
+      path and an optional caption.
     web_fetch: Fetch the content of a website or API from a URL.
     web_search: Search the web for information using a query.
-    memory_save: Save a fact to the agent's long-term semantic memory. Use this to remember important information for later retrieval.
-    memory_delete: Delete a previously saved fact from the agent's semantic memory by its fact ID.
+    memory_save: Save a fact to the agent's long-term semantic memory. Use this to
+      remember important information for later retrieval.
+    memory_delete: Delete a previously saved fact from the agent's semantic memory
+      by its fact ID.
     memory_search: Search the agent's semantic memory for facts relevant to a query.
-    summarize_text: Summarize a long text into a shorter version using the Keeper sidecar.
+    summarize_text: Summarize a long text into a shorter version using the Keeper
+      sidecar.
     summarize: Summarize text into a concise format, optionally with a specific goal.
     translate: Translate text from one language to another.
     embed_text: Generate a vector embedding for a piece of text.
-    create_kanban_task: Create a new task on the Kanban board. Use this to delegate work to yourself or another agent. You may optionally schedule it for a future time (scheduled_at) or set a recurring cron expression (cron_expression) for periodic work.
-    create_engineering_plan: Generate a structured implementation plan (PLAN.md) before starting complex tasks.
+    create_kanban_task: Create a task on the Kanban board, optionally assigned to yourself
+      or another agent. Supports one-off scheduling via scheduled_at (ISO 8601 datetime)
+      or recurring execution via cron_expression (standard 5-field cron). Assigning a
+      task to yourself with a future scheduled_at acts as a self-reminder/wake-up call.
+      scheduled_at and cron_expression are mutually exclusive — set one or neither, not
+      both.
+    create_engineering_plan: Generate a structured implementation plan (PLAN.md) before
+      starting complex tasks.
     test_skill: Dry-run test dynamic skill code in a sandbox with a test payload.
-    register_skill: Register a new dynamic skill and submit it for human review. Call this ONLY after successful testing.
-    interactive_debugger: Run code in an interactive debugger with breakpoints, variable inspection, and line-by-line execution trace. Use this to diagnose bugs by watching variables change across execution.
-    attach_to_task: Attach a file from the local workspace to a specific task for another agent to use.
-    pull_task_attachment: Pull an attachment from a task into your local workspace. Records source metadata sidecar.
-    promote_output: Promote a file from a task workspace to a shared project workspace. Use this for permanent project outputs.
-    shared_promote_file_workspace: Promote a file from your own agent workspace into a shared project workspace.
-    shared_file_read: Read a file from a shared project workspace by workspace ID and relative path.
-    shared_file_write: Write a file into a shared project workspace by workspace ID and relative path. Creates parent directories as needed.
+    register_skill: Register a new dynamic skill and submit it for human review. Call
+      this ONLY after successful testing.
+    interactive_debugger: Run code in an interactive debugger with breakpoints, variable
+      inspection, and line-by-line execution trace. Use this to diagnose bugs by watching
+      variables change across execution.
+    attach_to_task: Attach a file from the local workspace to a specific task for
+      another agent to use.
+    pull_task_attachment: Pull an attachment from a task into your local workspace.
+      Records source metadata sidecar.
+    promote_output: Promote a file from a task workspace to a shared project workspace.
+      Use this for permanent project outputs.
+    shared_promote_file_workspace: Promote a file from your own agent workspace into
+      a shared project workspace.
+    shared_file_read: Read a file from a shared project workspace by workspace ID
+      and relative path.
+    shared_file_write: Write a file into a shared project workspace by workspace ID
+      and relative path. Creates parent directories as needed.
     shared_file_list: List files and directories inside a shared project workspace.
     shared_file_delete: Delete a file from a shared project workspace.
-    shared_file_move: Move or rename a file within a shared workspace, or between two shared workspaces.
-    shared_workspace_info: Return shared workspace metadata (name, members, root path, quota).
-    shared_workspace_search: Search file names and/or contents across a shared project workspace.
-    git_clone: Clone a remote git repository into the agent's workspace. Provide the clone URL and a relative workspace path.
-    git_status: Show the working tree status of a git repository — modified, staged, and untracked files.
-    git_commit: Stage files and commit changes in a git repository with a descriptive message.
+    shared_file_move: Move or rename a file within a shared workspace, or between
+      two shared workspaces.
+    shared_workspace_info: Return shared workspace metadata (name, members, root path,
+      quota).
+    shared_workspace_search: Search file names and/or contents across a shared project
+      workspace.
+    git_clone: Clone a remote git repository into the agent's workspace. Provide the
+      clone URL and a relative workspace path.
+    git_status: Show the working tree status of a git repository — modified, staged,
+      and untracked files.
+    git_commit: Stage files and commit changes in a git repository with a descriptive
+      message.
     git_push: Push the current or specified branch to a remote repository.
     git_pull: Pull changes from a remote repository into the current branch.
-    git_branch_list: List all branches in a git repository, with the current branch indicated.
-    git_branch_create: Create a new branch in a git repository, optionally checking it out immediately.
+    git_branch_list: List all branches in a git repository, with the current branch
+      indicated.
+    git_branch_create: Create a new branch in a git repository, optionally checking
+      it out immediately.
     git_checkout: Checkout (switch to) an existing branch in a git repository.
     git_log: Show the commit history of a git repository (last N commits).
-    pip_install: "Install Python packages from PyPI into the agent's workspace. Uses pip install --target so packages persist across restarts. Example packages: requests, pandas, Pillow, numpy."
+    pip_install: 'Install Python packages from PyPI into the agent''s workspace. Uses
+      pip install --target so packages persist across restarts. Example packages:
+      requests, pandas, Pillow, numpy.'
     pip_list: List Python packages installed in the agent's workspace via pip-install.
-    get_secret: "Retrieve a secret value from your secure vault by name. Use this to access API keys, database credentials, authentication tokens, or encryption keys without hardcoding them. Example: get_secret('openai_api_key')."
-    notify_user: Display a notification card in the user's web UI. Use this when the user asks you to send a notification, reminder, or alert.
-
+    get_secret: 'Retrieve a secret value from your secure vault by name. Use this
+      to access API keys, database credentials, authentication tokens, or encryption
+      keys without hardcoding them. Example: get_secret(''openai_api_key'').'
+    notify_user: Display a notification card in the user's web UI. Use this when the
+      user asks you to send a notification, reminder, or alert.
+    generate_document: Generate a PDF, DOCX, or XLSX document and save it to the agent's
+      workspace. For PDF/DOCX, provide content as Markdown/HTML. For XLSX, provide
+      a list of dictionaries or a list of lists.
 core:
-  help_text: |
-    Available commands:
+  help_text: 'Available commands:
+
     /new — start a fresh session
+
     /compact — trigger journal compaction now
+
     /context — show current session journal
+
     /status — show agent and session stats
+
     /remember <text> — pin a fact to memory
+
     /forget <text> — search and propose a memory to delete
+
     /confirm_forget — confirm deletion from last /forget
+
     /memories — list pinned memories
+
     /retry — retry the last unanswered message
+
     /cancel — cancel the current in-progress task
+
     /help — show this list
 
-  context_inject_task_desc: "Session with {user_id}: {last_message}"
-
+    '
+  context_inject_task_desc: 'Session with {user_id}: {last_message}'
   prompt_injection_markers:
-    - "ignore\\s+(previous|above|all)\\s+instructions"
-    - "ignore\\s+(previous|above|all)\\s+(prompts?|commands?)"
-    - "disregard\\s+(previous|above|all)\\s+instructions"
-    - "you\\s+are\\s+now\\s+"
-    - "new\\s+role\\s*:?\\s*"
-    - "system\\s+prompt\\s*:"
-    - "developer\\s+mode"
-    - "DAN\\s+mode"
-    - "jailbreak"
-    - "\\{\\{.*\\}\\}"
-    - "<%.*%>"
+  - ignore\s+(previous|above|all)\s+instructions
+  - ignore\s+(previous|above|all)\s+(prompts?|commands?)
+  - disregard\s+(previous|above|all)\s+instructions
+  - you\s+are\s+now\s+
+  - new\s+role\s*:?\s*
+  - 'system\s+prompt\s*:'
+  - developer\s+mode
+  - DAN\s+mode
+  - jailbreak
+  - \{\{.*\}\}
+  - <%.*%>

@@ -1,10 +1,9 @@
 """Session lifecycle: expiration, compaction, idle detection."""
 
-import structlog
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from isli_core.models import Session, Task
@@ -20,15 +19,15 @@ class SessionLifecycleManager:
     @staticmethod
     async def expire_sessions(session: AsyncSession, cutoff: datetime | None = None) -> int:
         """Soft-delete sessions whose expires_at has passed, unless they have active tasks."""
-        now = cutoff or datetime.now(timezone.utc)
+        now = cutoff or datetime.now(UTC)
         from sqlalchemy import exists
-        
+
         active_task_exists = exists().where(
             Task.session_id == Session.id,
             Task.status.in_(["doing", "review"]),
             Task.deleted_at.is_(None)
         )
-        
+
         result = await session.execute(
             select(Session).where(
                 Session.expires_at < now,
@@ -69,27 +68,28 @@ class SessionLifecycleManager:
         if idle_timeout_minutes is None:
             idle_timeout_minutes = DEFAULT_IDLE_TIMEOUT_MINUTES
         """Soft-delete sessions idle longer than the threshold, unless they have active tasks."""
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=idle_timeout_minutes)
+        cutoff = datetime.now(UTC) - timedelta(minutes=idle_timeout_minutes)
         from sqlalchemy import exists
-        
+
         active_task_exists = exists().where(
             Task.session_id == Session.id,
             Task.status.in_(["doing", "review"]),
             Task.deleted_at.is_(None)
         )
-        
+
         result = await session.execute(
             select(Session).where(
                 Session.last_activity_at < cutoff,
                 Session.deleted_at.is_(None),
                 Session.status != "closed",
+                Session.room_id.is_(None),  # Council room sessions follow room lifecycle
                 ~active_task_exists
             )
         )
         idle = list(result.scalars().all())
         count = 0
         for sess in idle:
-            sess.deleted_at = datetime.now(timezone.utc)
+            sess.deleted_at = datetime.now(UTC)
             count += 1
         if count > 0:
             await session.flush()

@@ -48,12 +48,14 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
 
-  // deep link logic
+  // Deep link logic: task -> kanban, session -> chats, agent -> dashboard
   const notificationData = event.notification.data
   let url = '/'
-  
+
   if (notificationData && notificationData.task_id) {
     url = `/kanban?task=${notificationData.task_id}`
+  } else if (notificationData && notificationData.session_id) {
+    url = `/chats?session=${notificationData.session_id}`
   } else if (notificationData && notificationData.agent_id) {
     url = `/?agent=${notificationData.agent_id}`
   }

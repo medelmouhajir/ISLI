@@ -18,6 +18,8 @@ async def db_query(
     schema: str | None = None,
     max_rows: int = 50,
     max_cell_chars: int = 500,
+    password: str | None = None,
+    connection_string: str | None = None,
 ) -> dict[str, Any]:
     """Execute a read-only SQL query via the db-query skill and return structured tabular results."""
     payload: dict[str, Any] = {
@@ -28,6 +30,10 @@ async def db_query(
     }
     if schema is not None:
         payload["schema"] = schema
+    if password:
+        payload["password"] = password
+    if connection_string:
+        payload["connection_string"] = connection_string
     resp = await core_client.client.post(
         "/v1/skills/db-query/query",
         json=payload,
@@ -43,7 +49,7 @@ DB_QUERY_DEF = {
         "name": "db_query",
         "description": _get_tool_desc(
             "db_query",
-            "Run a read-only SQL query against the ISLI database. Returns structured tabular results. Only SELECT statements on allowed schemas are permitted.",
+            "Run a read-only SQL query against the database. Returns structured tabular results. For credentials, pass [[secret:NAME]].",
         ),
         "parameters": {
             "type": "object",
@@ -60,6 +66,14 @@ DB_QUERY_DEF = {
                     "type": "integer",
                     "description": "Maximum rows to return (default 100, server-enforced cap).",
                     "default": 100,
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Optional database password reference (e.g., [[secret:db_pass]]).",
+                },
+                "connection_string": {
+                    "type": "string",
+                    "description": "Optional full connection string reference (e.g., [[secret:db_url]]).",
                 },
             },
             "required": ["query"],

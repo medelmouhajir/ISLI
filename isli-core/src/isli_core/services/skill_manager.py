@@ -34,6 +34,7 @@ class SkillToolManifest(BaseModel):
     method: str = "POST"
     parameters: dict[str, Any] = Field(default_factory=dict)
     returns: dict[str, Any] = Field(default_factory=dict)
+    secret_fields: list[str] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -735,8 +736,18 @@ class SkillContainerManager:
             # Pull / checkout new source under git lock
             async with self._git_lock(skill_id):
                 if os.path.exists(os.path.join(skill_dir, ".git")):
-                    await self._git_cmd(skill_id, "fetch", "origin", cwd=skill_dir, timeout=30.0)
+                    await self._git_cmd(
+                        skill_id, "fetch", "origin", target_ref, cwd=skill_dir, timeout=30.0
+                    )
                     await self._git_cmd(skill_id, "checkout", target_ref, cwd=skill_dir, timeout=30.0)
+                    # For branch refs, checkout alone leaves the local branch stale.
+                    # Hard-reset to the fetched remote tip so the source actually advances.
+                    is_tag = target_ref.startswith("v") or target_ref.startswith("refs/tags/")
+                    if not is_tag:
+                        await self._git_cmd(
+                            skill_id, "reset", "--hard", f"origin/{target_ref}",
+                            cwd=skill_dir, timeout=30.0,
+                        )
                 else:
                     if os.path.exists(skill_dir):
                         shutil.rmtree(skill_dir, ignore_errors=True)
@@ -814,7 +825,7 @@ class SkillContainerManager:
                     pass
                 raise RuntimeError(f"Docker build failed for skill {skill_id}: {exc}") from exc
 
-            # Run next container on ephemeral port
+            # Run next container on the shared skill network
             try:
                 next_container = await asyncio.to_thread(
                     self._docker.containers.run,
@@ -822,7 +833,6 @@ class SkillContainerManager:
                     name=next_container_name,
                     network=get_settings().skill_network,
                     detach=True,
-                    ports={f"{port}/tcp": None},
                     environment={
                         "PORT": str(port),
                         "JWT_SECRET": get_settings().jwt_secret,
@@ -831,17 +841,9 @@ class SkillContainerManager:
                     labels={"isli.skill.id": skill_id, "isli.managed": "true"},
                     restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
                 )
-                # Find ephemeral port
-                next_container.reload()
-                port_bindings = next_container.attrs.get("NetworkSettings", {}).get("Ports", {})
-                host_port = None
-                for container_port, bindings in port_bindings.items():
-                    if bindings:
-                        host_port = int(bindings[0]["HostPort"])
-                        break
-                if not host_port:
-                    raise RuntimeError("Could not determine ephemeral host port for next container")
-                next_base_url = f"http://localhost:{host_port}"
+                # Probe via the container's Docker DNS name on the skill network.
+                # localhost does not work because Core itself runs in a container.
+                next_base_url = f"http://{next_container_name}:{port}"
             except Exception as exc:
                 logger.error("scm.update_run_failed", skill_id=skill_id, error=str(exc))
                 try:
@@ -966,7 +968,7 @@ class SkillContainerManager:
 
             await self.disable(skill_id)
 
-            # Try to run previous image
+            # Try to run previous image on the shared skill network
             try:
                 next_container = await asyncio.to_thread(
                     self._docker.containers.run,
@@ -974,7 +976,6 @@ class SkillContainerManager:
                     name=next_container_name,
                     network=get_settings().skill_network,
                     detach=True,
-                    ports={f"{port}/tcp": None},
                     environment={
                         "PORT": str(port),
                         "JWT_SECRET": get_settings().jwt_secret,
@@ -983,16 +984,8 @@ class SkillContainerManager:
                     labels={"isli.skill.id": skill_id, "isli.managed": "true"},
                     restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
                 )
-                next_container.reload()
-                port_bindings = next_container.attrs.get("NetworkSettings", {}).get("Ports", {})
-                host_port = None
-                for container_port, bindings in port_bindings.items():
-                    if bindings:
-                        host_port = int(bindings[0]["HostPort"])
-                        break
-                if not host_port:
-                    raise RuntimeError("Could not determine ephemeral host port for rollback container")
-                next_base_url = f"http://localhost:{host_port}"
+                # Probe via the container's Docker DNS name on the skill network.
+                next_base_url = f"http://{next_container_name}:{port}"
             except Exception as exc:
                 raise RuntimeError(f"Docker run failed during rollback for skill {skill_id}: {exc}") from exc
 

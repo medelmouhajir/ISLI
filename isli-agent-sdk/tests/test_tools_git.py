@@ -231,7 +231,7 @@ class TestGitLog:
 
 
 class TestAgentRunnerGitTools:
-    def test_auto_register_from_skills(self):
+    async def test_auto_register_from_skills(self):
         config = AgentConfig(
             id="test-agent",
             name="Test Agent",
@@ -250,7 +250,7 @@ class TestAgentRunnerGitTools:
             ],
         )
         runner = AgentRunner(config, "http://localhost:8000")
-        runner._auto_register_tools_from_skills()
+        await runner._auto_register_tools_from_skills()
         names = {d["function"]["name"] for d in runner.tool_definitions}
         expected = {
             "git_clone", "git_status", "git_commit", "git_push",

@@ -229,7 +229,7 @@ export function KanbanBoard({ tasks, onMove, onSchedule, onDelete, onShowDetail,
 
         {/* Desktop: horizontal scroll columns */}
         <div className="hidden md:flex flex-1 overflow-x-auto overflow-y-hidden">
-          <div className="flex gap-4 h-full p-4 min-w-max">
+          <div className="flex gap-4 h-full p-4 min-w-max w-full justify-evenly">
             {COLUMNS.map((col, index) => {
               const colTasks = filteredTasks.filter((t) => t.status === col)
               return (

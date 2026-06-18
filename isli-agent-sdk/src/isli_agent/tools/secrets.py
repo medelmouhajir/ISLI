@@ -24,7 +24,7 @@ async def get_secret(
     name: str,
     core_client: CoreClient,
 ) -> str:
-    """Retrieve a secret value from the agent's secure vault by name."""
+    """Retrieve a secure reference ID for a secret from the vault. Returns a placeholder [[secret:name]]."""
     payload: dict[str, Any] = {
         "agent_id": agent_id,
         "name": name,
@@ -49,7 +49,7 @@ GET_SECRET_DEF = {
         "name": "get_secret",
         "description": _get_tool_desc(
             "get_secret",
-            "Retrieve a secret value from your secure vault by name. Use this to access API keys, database credentials, or tokens without hardcoding them.",
+            "Retrieve a secure reference ID for a secret from your vault. Returns [[secret:name]] to be passed to other tools.",
         ),
         "parameters": {
             "type": "object",

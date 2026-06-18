@@ -1,5 +1,6 @@
 """API tests for /v1/secrets endpoints and inline get-secret skill."""
 
+import json
 import pytest
 from httpx import AsyncClient
 
@@ -75,7 +76,7 @@ class TestSecretsAPI:
         assert data["status"] == "ok"
 
     @pytest.mark.asyncio
-    async def test_get_secret_value_via_skill_proxy(self, client: AsyncClient):
+    async def test_get_secret_reference_via_skill_proxy(self, client: AsyncClient):
         await self._ensure_agent(client, "secret-agent")
         await client.post("/v1/secrets", json={
             "agent_id": "secret-agent",
@@ -90,7 +91,73 @@ class TestSecretsAPI:
         data = resp.json()
         assert data["status"] == "ok"
         assert data["name"] == "get_key"
-        assert data["value"] == "expected-value"
+        # Must return placeholder, not value
+        assert data["value"] == "[[secret:get_key]]"
+
+    @pytest.mark.asyncio
+    async def test_server_side_secret_injection(self, client: AsyncClient):
+        import respx
+        from httpx import Response
+        
+        await self._ensure_agent(client, "secret-agent")
+        # Create a secret
+        await client.post("/v1/secrets", json={
+            "agent_id": "secret-agent",
+            "name": "search_api_key",
+            "value": "real-api-token",
+        })
+
+        # Mock the external web-search skill
+        with respx.mock:
+            # The core proxies web-search to _SKILLS_URL (localhost:8100)
+            respx.post("http://localhost:8100/search").mock(return_value=Response(200, json={"success": True, "results": []}))
+
+            # Call web-search with the placeholder
+            # Note: web-search has secret_fields: ["api_key"]
+            resp = await client.post("/v1/skills/web-search/search", json={
+                "agent_id": "secret-agent",
+                "query": "test query",
+                "api_key": "[[secret:search_api_key]]",
+            })
+            
+            assert resp.status_code == 200
+            
+            # Verify the OUTGOING request to the skill had the plaintext secret
+            # respx.calls[0] is the internal auth check (token creation), 
+            # or maybe it's the actual skill call if auth is mocked or skipped.
+            # Let's find the call to the search skill.
+            search_call = next(c for c in respx.calls if "/search" in str(c.request.url))
+            sent_body = json.loads(search_call.request.content)
+            assert sent_body["api_key"] == "real-api-token"
+            assert "[[secret:search_api_key]]" not in str(search_call.request.content)
+
+    @pytest.mark.asyncio
+    async def test_injection_rejected_on_non_authorized_field(self, client: AsyncClient):
+        import respx
+        from httpx import Response
+        
+        await self._ensure_agent(client, "secret-agent")
+        await client.post("/v1/secrets", json={
+            "agent_id": "secret-agent",
+            "name": "private_data",
+            "value": "sensitive-info",
+        })
+
+        with respx.mock:
+            respx.post("http://localhost:8100/search").mock(return_value=Response(200, json={"success": True, "results": []}))
+
+            # web-search does NOT authorize 'query' as a secret field
+            resp = await client.post("/v1/skills/web-search/search", json={
+                "agent_id": "secret-agent",
+                "query": "Who is [[secret:private_data]]?",
+            })
+            
+            assert resp.status_code == 200
+            search_call = next(c for c in respx.calls if "/search" in str(c.request.url))
+            sent_body = json.loads(search_call.request.content)
+            # Placeholder must NOT be substituted in 'query'
+            assert sent_body["query"] == "Who is [[secret:private_data]]?"
+            assert "sensitive-info" not in sent_body["query"]
 
     @pytest.mark.asyncio
     async def test_get_secret_not_found(self, client: AsyncClient):

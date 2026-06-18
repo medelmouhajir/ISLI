@@ -21,6 +21,7 @@ import { getJSON, postJSON, putJSON, deleteJSON } from '../lib/api'
 import { Button } from './ui/Button'
 import { Badge } from './ui/Badge'
 import { Label } from './ui/Label'
+import { Toggle } from './ui/Toggle'
 import { ConfirmationModal } from './ui/ConfirmationModal'
 import { cn } from '@/lib/utils'
 
@@ -36,6 +37,7 @@ interface KeeperConfig {
   embed: string
   num_ctx: number
   num_batch: number
+  think: boolean
 }
 
 export function LocalModelSettings() {
@@ -71,7 +73,7 @@ export function LocalModelSettings() {
   const fetchConfig = async () => {
     try {
       const json = await getJSON<{ config: KeeperConfig }>('/v1/model-management/config')
-      setKeeperConfig(json.config)
+      setKeeperConfig({ ...json.config, think: json.config.think ?? false })
     } catch (err) {
       console.error('Failed to fetch keeper config:', err)
     }
@@ -348,6 +350,23 @@ export function LocalModelSettings() {
                   Tokens processed in parallel. Higher values speed up inference but use more memory.
                 </p>
               </div>
+
+              <div className="space-y-2 md:col-span-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-[10px] font-mono font-bold uppercase tracking-widest">Thinking Mode</Label>
+                  <Toggle
+                    checked={keeperConfig?.think ?? false}
+                    onChange={checked => {
+                      setKeeperConfig(prev => prev ? { ...prev, think: checked } : null)
+                    }}
+                    label={keeperConfig?.think ? 'Enabled' : 'Disabled'}
+                  />
+                </div>
+                <p className="text-[9px] font-mono text-text-muted opacity-60">
+                  Disable thinking to stop the model emitting internal reasoning traces
+                  (&lt;think&gt;...&lt;/think&gt;) and reduce latency for Keeper tasks.
+                </p>
+              </div>
             </div>
 
             <div className="px-5 py-3 border-t border-border-dim bg-bg-elevated/20 flex items-center justify-between">
@@ -367,6 +386,7 @@ export function LocalModelSettings() {
                     handleUpdateConfig({
                       num_ctx: keeperConfig.num_ctx,
                       num_batch: keeperConfig.num_batch,
+                      think: keeperConfig.think,
                     })
                   }
                 }}

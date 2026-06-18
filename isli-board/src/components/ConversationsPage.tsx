@@ -22,6 +22,7 @@ import { UiComponentRenderer } from '@/components/ui/registry/UiComponentRegistr
 import { StreamingMessageBubble } from '@/components/StreamingMessageBubble'
 import { ToolCallBar } from '@/components/ToolCallCard'
 import { ProcessTracePane } from '@/components/ProcessTracePane'
+import { AttachmentList } from '@/components/AttachmentList'
 import type { ComponentPayload, ToolCallEvent, ProcessTraceEvent } from '@/types'
 
 export function ConversationsPage() {
@@ -518,13 +519,13 @@ export function ConversationsPage() {
                         </div>
                         <div
                           className={cn(
-                            'space-y-1',
+                            'space-y-1 min-w-0',
                             msg.role === 'user' || msg.role === 'action' ? 'text-right' : ''
                           )}
                         >
                           <div
                             className={cn(
-                              'p-3 md:p-4 rounded-none text-sm leading-relaxed border font-mono',
+                              'p-3 md:p-4 rounded-none text-sm leading-relaxed border font-mono break-all whitespace-pre-wrap max-w-full',
                               msg.role === 'user'
                                 ? 'bg-accent-purple/5 border-accent-purple/20 text-text-primary'
                                 : msg.role === 'action'
@@ -553,7 +554,7 @@ export function ConversationsPage() {
                           )}
                           {/* Components inline below assistant message */}
                           {msg.role === 'assistant' && msg.components && msg.components.length > 0 && (
-                            <div className="mt-2 space-y-2">
+                            <div className="mt-2 space-y-2 max-w-full overflow-x-auto">
                               {msg.components.map((comp: ComponentPayload, ci: number) => (
                                 <UiComponentRenderer
                                   key={ci}
@@ -563,6 +564,10 @@ export function ConversationsPage() {
                                 />
                               ))}
                             </div>
+                          )}
+                          {/* Attachments inline below assistant message */}
+                          {msg.role === 'assistant' && msg.attachments && msg.attachments.length > 0 && (
+                            <AttachmentList attachments={msg.attachments} />
                           )}
                           <div
                             className={cn(

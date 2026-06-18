@@ -313,7 +313,7 @@ The SDK supports three input formats for tool calls:
 2. **Anthropic-style XML** (`<function_calls>...</invoke>`) — fallback for Qwen 2.5 via Ollama
 3. **JSON-in-text blob** (`{"name":"...","arguments":{...}}`) — fallback for models that output raw JSON inline
 
-Both fallback parsers are implemented in `isli-agent-sdk/src/isli_agent/runner.py` using only stdlib (`xml.etree.ElementTree` and `json`). They activate automatically when `message.tool_calls` is empty, validate extracted calls against the registered tool registry, strip markup from the final response, and inject synthetic `tool_calls` into conversation history to preserve LiteLLM replay compatibility.
+Both fallback parsers are implemented in `isli-agent-sdk/src/isli_agent/runner/parsing.py` using only stdlib (`xml.etree.ElementTree` and `json`). `runner/core.py` exposes them as `AgentRunner` methods for backward compatibility. They activate automatically when `message.tool_calls` is empty, validate extracted calls against the registered tool registry, strip markup from the final response, and inject synthetic `tool_calls` into conversation history to preserve LiteLLM replay compatibility.
 
 ---
 

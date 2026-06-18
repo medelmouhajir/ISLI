@@ -55,7 +55,7 @@ async def main():
         model_provider=model_provider,
         model_id=model_id,
         skills=["web-search", "file-read", "file-write", "file-list", "file-delete"],
-        heartbeat_interval=180
+        heartbeat_interval=600
     )
 
     runner = AgentRunner(config, core_url)

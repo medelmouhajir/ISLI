@@ -236,7 +236,7 @@ POST /v1/sessions/{id}/action
 ### `isli-agent-sdk/`
 - `src/isli_agent/tools/ui_renderer.py` — new `ui_components` tool + `UI_RENDERING_INSTRUCTIONS`
 - `src/isli_agent/tools/__init__.py` — register in `SKILL_TOOL_REGISTRY`
-- `src/isli_agent/runner.py` — stash pattern, system prompt injection
+- `src/isli_agent/runner/tool_engine.py` — stash pattern, system prompt injection in `prompt_assembler.py`
 - `src/isli_agent/client.py` — `reply_to_session` accepts `components` param
 
 ### `isli-board/`
@@ -389,9 +389,25 @@ Components and streaming are **orthogonal** — an agent can emit both live `tok
 
 ---
 
+## Session Archive (Added 2026-06-15)
+
+The Board includes a separate **Archive** page (`/archive/sessions`) for managing closed and soft-deleted sessions. It reuses the same message-rendering patterns as the live session view but is strictly read-only:
+
+- Archived sessions are listed with agent, channel, status (`CLOSED`/`DELETED`), message count, and timestamp.
+- Clicking **View** opens a modal showing the full session history rendered with the same assistant/user/action bubbles as the live chat.
+- **Restore** re-opens the session via `POST /v1/sessions/{id}/restore`.
+- **Delete** permanently removes the session via `DELETE /v1/sessions/{id}` after a confirmation prompt.
+
+Files added:
+- `isli-board/src/components/ArchivedSessionsPage.tsx`
+- Archive hooks in `isli-board/src/hooks/useSessions.ts`
+
+---
+
 ## See Also
 
 - [`04-agents.md`](./04-agents.md) — Agent lifecycle, tool registration, and streaming modes
 - [`06-skills.md`](./06-skills.md) — Skills system and registry
 - [`07-channels.md`](./07-channels.md) — Session message flow
 - [`10-roadmap.md`](./10-roadmap.md) — Implementation roadmap
+- [`17-council-chat.md`](./17-council-chat.md) — Multi-agent room threads with parallel agent lanes

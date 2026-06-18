@@ -19,6 +19,7 @@ import {
   Bot,
   FolderGit2,
   Users,
+  Home,
   Settings,
   Gauge,
   ScrollText,
@@ -28,6 +29,7 @@ import {
   Plus,
   Play,
   Pause,
+  Archive,
 } from 'lucide-react'
 import { motion, AnimatePresence, animate, useMotionValue, type PanInfo } from 'framer-motion'
 import { useState, useEffect, useRef, useCallback } from 'react'
@@ -39,13 +41,15 @@ interface SidebarProps {
   onToggle: () => void
   mobileOpen?: boolean
   onCloseMobile?: () => void
+  initialMobilePage?: number
 }
 
-export function Sidebar({ agents, cost, collapsed, onToggle, mobileOpen, onCloseMobile }: SidebarProps) {
+export function Sidebar({ agents, cost, collapsed, onToggle, mobileOpen, onCloseMobile, initialMobilePage = 0 }: SidebarProps) {
   const location = useLocation()
 
   const navItems = [
-    { label: 'Dashboard', icon: Gauge, path: '/' },
+    { label: 'Council', icon: Home, path: '/' },
+    { label: 'Dashboard', icon: Gauge, path: '/dashboard' },
     { label: 'Kanban', icon: LayoutGrid, path: '/kanban' },
     { label: 'Calendar', icon: Calendar, path: '/calendar' },
     { label: 'Agents', icon: Bot, path: '/agents' },
@@ -53,6 +57,7 @@ export function Sidebar({ agents, cost, collapsed, onToggle, mobileOpen, onClose
     { label: 'Workspaces', icon: FolderGit2, path: '/workspaces' },
     { label: 'Shared', icon: Users, path: '/shared-workspaces' },
     { label: 'Sessions', icon: MessageSquare, path: '/sessions' },
+    { label: 'Archive', icon: Archive, path: '/archive/sessions' },
     { label: 'Chats', icon: MessageCircle, path: '/chats' },
     { label: 'Digests', icon: Newspaper, path: '/digests' },
     { label: 'Costs', icon: BarChart3, path: '/costs' },
@@ -66,7 +71,7 @@ export function Sidebar({ agents, cost, collapsed, onToggle, mobileOpen, onClose
       {/* Desktop / Tablet Sidebar */}
       <aside
         className={cn(
-          'relative z-10 border-r border-border-dim bg-bg-surface/70 backdrop-blur-xl',
+          'relative z-30 border-r border-border-dim bg-bg-surface/70 backdrop-blur-xl',
           'hidden md:flex flex-col transition-all duration-300 ease-out',
           collapsed ? 'w-16' : 'w-72'
         )}
@@ -92,17 +97,7 @@ export function Sidebar({ agents, cost, collapsed, onToggle, mobileOpen, onClose
         </button>
 
         {/* Sidebar Header */}
-        <div className={cn(
-          'flex items-center border-b border-border-dim',
-          collapsed ? 'justify-center py-4 px-2' : 'px-4 py-3.5 gap-2.5'
-        )}>
-          <img src="/favicon.png" alt="ISLI" className="w-5 h-5 rounded-none shrink-0" />
-          {!collapsed && (
-            <span className="text-sm font-display font-bold tracking-wider text-text-primary">
-              ISLI
-            </span>
-          )}
-        </div>
+        <div className="pt-8" />
 
         {/* Navigation */}
         <nav className={cn('p-2 space-y-1', collapsed ? 'flex flex-col items-center' : '')}>
@@ -152,6 +147,7 @@ export function Sidebar({ agents, cost, collapsed, onToggle, mobileOpen, onClose
             navItems={navItems}
             currentPath={location.pathname}
             onClose={onCloseMobile ?? (() => {})}
+            initialPage={initialMobilePage}
           />
         )}
       </AnimatePresence>
@@ -330,15 +326,17 @@ function MobileNavMenu({
   navItems,
   currentPath,
   onClose,
+  initialPage = 0,
 }: {
   agents: Agent[]
   cost: CostDashboard | null
   navItems: NavItemDef[]
   currentPath: string
   onClose: () => void
+  initialPage?: number
 }) {
   const navigate = useNavigate()
-  const [page, setPage] = useState(0)
+  const [page, setPage] = useState(initialPage)
   const [dragPage, setDragPage] = useState<number | null>(null)
   const activePage = dragPage ?? page
 
@@ -435,15 +433,7 @@ function MobileNavMenu({
       style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
     >
       {/* ── Top Bar ── */}
-      <div className="shrink-0 flex items-center justify-between px-5 pt-5 pb-2">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-2xl bg-bg-elevated border border-border-dim flex items-center justify-center overflow-hidden shadow-sm">
-            <img src="/favicon.png" alt="ISLI" className="w-5 h-5" />
-          </div>
-          <span className="text-base font-display font-bold tracking-wider text-text-primary">
-            ISLI<span className="text-accent-cyan">.</span>BOARD
-          </span>
-        </div>
+      <div className="shrink-0 flex items-center justify-end px-5 pt-5 pb-2">
         <motion.button
           whileTap={{ scale: 0.88 }}
           onClick={onClose}

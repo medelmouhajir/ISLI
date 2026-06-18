@@ -1,6 +1,5 @@
 import json
-import pytest
-from isli_agent.runner import AgentRunner, _ParsedToolCall, _ParsedFunction
+from isli_agent.runner import AgentRunner, _ParsedToolCall
 
 
 def _make_runner_with_tools():

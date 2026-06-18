@@ -114,6 +114,7 @@ services:
       dockerfile: Dockerfile
     environment:
       ISLI_ENV: production
+      REDIS_URL: redis://redis:6379/10
       AUDIO_STT_MODEL: ${AUDIO_STT_MODEL:-whisper-tiny}
       AUDIO_TTS_MODEL: ${AUDIO_TTS_MODEL:-piper-en-us-lessac-medium}
       AUDIO_LANGUAGE: ${AUDIO_LANGUAGE:-en}
@@ -280,12 +281,15 @@ services:
     labels:
     - traefik.enable=true
     - traefik.http.routers.channels.rule=Host(`${ISLI_DOMAIN}`) && PathPrefix(`/webhook`)
+    - traefik.http.routers.channels.priority=200
     - traefik.http.routers.channels.entrypoints=websecure
     - traefik.http.routers.channels.tls.certresolver=letsencrypt
     - traefik.http.routers.channels-http.rule=Host(`${ISLI_DOMAIN}`) && PathPrefix(`/webhook`)
+    - traefik.http.routers.channels-http.priority=200
     - traefik.http.routers.channels-http.entrypoints=web
     - traefik.http.routers.channels-http.middlewares=redirect-to-https
     - traefik.http.services.channels.loadbalancer.server.port=8200
+    - traefik.docker.network=isli_isli-mesh
     secrets:
     - jwt_secret
     networks:
@@ -355,7 +359,7 @@ services:
       JWT_SECRET: /run/secrets/jwt_secret
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       BROWSER_REDIS_URL: redis://redis:6379/5
-      BROWSER_SESSION_TTL: 600
+      BROWSER_SESSION_TTL: 1800
       BROWSER_HEADLESS: 'true'
       BROWSER_SESSION_DIR: /data/browser-sessions
       BROWSER_MAX_CONCURRENT_SESSIONS: 5

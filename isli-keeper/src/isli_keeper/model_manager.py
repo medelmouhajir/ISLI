@@ -15,6 +15,7 @@ class ModelManager:
             "embed": self.settings.ollama_embed_model,
             "num_ctx": 4096,
             "num_batch": 512,
+            "think": self.settings.ollama_think,
         }
         self.load()
 
@@ -45,6 +46,15 @@ class ModelManager:
 
     def get_model(self, slot: str) -> str:
         return self.config.get(slot, "")
+
+    def set_think(self, enabled: bool) -> bool:
+        self.config["think"] = bool(enabled)
+        self.save()
+        logger.info("model_manager.think_updated", think=self.config["think"])
+        return self.config["think"]
+
+    def get_think(self) -> bool:
+        return bool(self.config.get("think", self.settings.ollama_think))
 
     def set_generation_options(
         self, num_ctx: int | None = None, num_batch: int | None = None

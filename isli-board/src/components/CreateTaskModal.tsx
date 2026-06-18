@@ -55,13 +55,13 @@ export function CreateTaskModal({ open, onClose, agents, onAuthRequired }: Creat
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="" className="max-w-md bg-black border-zinc-800">
+    <Modal open={open} onClose={onClose} title="" className="max-w-md bg-bg-surface border-border-dim">
       <div className="flex items-center gap-3 mb-6">
         <div className="w-8 h-8 rounded-none bg-accent-cyan/10 flex items-center justify-center border border-accent-cyan/20">
           <FilePlus className="w-4 h-4 text-accent-cyan" />
         </div>
         <div>
-          <h2 className="text-sm font-mono font-bold uppercase tracking-[0.2em] text-white">Init_Task_Sequence</h2>
+          <h2 className="text-sm font-mono font-bold uppercase tracking-[0.2em] text-text-primary">Init_Task_Sequence</h2>
           <p className="text-[10px] font-mono text-text-muted">MANUAL_ENTRY_V1.0</p>
         </div>
       </div>
@@ -75,19 +75,19 @@ export function CreateTaskModal({ open, onClose, agents, onAuthRequired }: Creat
             name="title" 
             placeholder="PRIMARY_IDENTIFIER" 
             required 
-            className="bg-zinc-950 border-zinc-800 font-mono text-sm rounded-none focus:border-accent-cyan/50"
+            className="bg-bg-base border-border-dim font-mono text-sm rounded-none focus:border-accent-cyan/50"
           />
         </div>
 
         <div className="space-y-1.5">
           <label className="text-[10px] font-mono uppercase tracking-widest text-text-secondary flex items-center gap-2">
-            <span className="w-1 h-1 bg-zinc-600" /> Instructions_Data
+            <span className="w-1 h-1 bg-border-focus" /> Instructions_Data
           </label>
           <Textarea 
             name="description" 
             placeholder="DETAILED_EXECUTION_PARAMETERS" 
             rows={3} 
-            className="bg-zinc-950 border-zinc-800 font-mono text-sm rounded-none focus:border-accent-cyan/50 resize-none"
+            className="bg-bg-base border-border-dim font-mono text-sm rounded-none focus:border-accent-cyan/50 resize-none"
           />
         </div>
 
@@ -96,7 +96,7 @@ export function CreateTaskModal({ open, onClose, agents, onAuthRequired }: Creat
             <label className="text-[10px] font-mono uppercase tracking-widest text-text-secondary flex items-center gap-2">
               <span className="w-1 h-1 bg-accent-cyan" /> Assign_Unit
             </label>
-            <Select name="agent_id" className="bg-zinc-950 border-zinc-800 font-mono text-xs rounded-none">
+            <Select name="agent_id" className="bg-bg-base border-border-dim font-mono text-xs rounded-none">
               <option value="">STANDALONE_BUS</option>
               {agents.map((a) => (
                 <option key={a.id} value={a.id}>{a.name.toUpperCase()}</option>
@@ -113,17 +113,17 @@ export function CreateTaskModal({ open, onClose, agents, onAuthRequired }: Creat
               min={1} 
               max={5} 
               defaultValue={3} 
-              className="bg-zinc-950 border-zinc-800 font-mono text-sm rounded-none"
+              className="bg-bg-base border-border-dim font-mono text-sm rounded-none"
             />
           </div>
         </div>
 
-        <div className="border border-zinc-800 p-4 space-y-4 bg-zinc-950/50">
+        <div className="border border-border-dim p-4 space-y-4 bg-bg-elevated/50">
           <div className="flex items-center justify-between">
             <label className="text-[10px] font-mono uppercase tracking-widest text-text-secondary flex items-center gap-2">
               <span className="w-1.5 h-1.5 bg-accent-amber animate-pulse" /> Scheduling_Matrix
             </label>
-            <div className="flex border border-zinc-800 p-0.5">
+            <div className="flex border border-border-dim p-0.5">
               <button
                 type="button"
                 onClick={() => setScheduleType('onetime')}
@@ -154,7 +154,7 @@ export function CreateTaskModal({ open, onClose, agents, onAuthRequired }: Creat
                 <Input 
                   name="scheduled_at" 
                   type="datetime-local" 
-                  className="bg-black border-zinc-800 pl-10 font-mono text-xs rounded-none h-9"
+                  className="bg-bg-base border-border-dim pl-10 font-mono text-xs rounded-none h-9"
                 />
               </div>
             </div>
@@ -163,19 +163,19 @@ export function CreateTaskModal({ open, onClose, agents, onAuthRequired }: Creat
               <CronBuilder 
                 value={cronExpression} 
                 onChange={setCronExpression}
-                className="bg-black border border-zinc-800 p-3 rounded-none"
+                className="bg-bg-base border border-border-dim p-3 rounded-none"
               />
             </div>
           )}
 
           {/* Differentiator: The Signal Ticker */}
-          <div className="bg-black border-t border-zinc-800 -mx-4 -mb-4 px-4 py-2 flex items-center gap-3 overflow-hidden">
+          <div className="bg-bg-surface border-t border-border-dim -mx-4 -mb-4 px-4 py-2 flex items-center gap-3 overflow-hidden">
             <div className="shrink-0 flex items-center gap-1.5">
-              <div className="w-1.5 h-1.5 rounded-full bg-[#C6FF4A] shadow-[0_0_8px_#C6FF4A]" />
-              <span className="text-[9px] font-mono font-bold text-[#C6FF4A] uppercase tracking-widest">Signal_Live</span>
+              <div className="w-1.5 h-1.5 rounded-full bg-accent-green shadow-glow-green" />
+              <span className="text-[9px] font-mono font-bold text-accent-green uppercase tracking-widest">Signal_Live</span>
             </div>
             <div className="flex-1 whitespace-nowrap overflow-hidden">
-              <div className="inline-block animate-marquee font-mono text-[9px] text-[#C6FF4A]/80 tracking-tight">
+              <div className="inline-block animate-marquee font-mono text-[9px] text-accent-green/80 tracking-tight">
                 {scheduleType === 'recurring' && cronExpression 
                   ? `RECURRENCE_ACTIVE_ON_BUS: [${cronExpression}] -- WAITING_FOR_NEXT_TICK -- ID: ${Math.random().toString(36).substring(7).toUpperCase()}`
                   : scheduleType === 'onetime' 
@@ -197,7 +197,7 @@ export function CreateTaskModal({ open, onClose, agents, onAuthRequired }: Creat
               variant="ghost" 
               onClick={onClose} 
               disabled={loading}
-              className="font-mono text-[10px] uppercase tracking-widest rounded-none border border-transparent hover:border-zinc-800"
+              className="font-mono text-[10px] uppercase tracking-widest rounded-none border border-transparent hover:border-border-bright"
             >
               Abort
             </Button>

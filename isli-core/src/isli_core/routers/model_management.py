@@ -48,6 +48,7 @@ class ModelPullRequest(BaseModel):
 class KeeperConfigUpdateRequest(BaseModel):
     num_ctx: int | None = None
     num_batch: int | None = None
+    think: bool | None = None
 
 
 def _keeper_headers() -> dict[str, str]:

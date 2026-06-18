@@ -178,6 +178,31 @@ This roadmap is derived from the comprehensive 12-agent research review document
 
 ---
 
+## Post-Roadmap — Session Archive Page (2026-06-15) ✅
+
+**Goal:** Give operators a dedicated Board UI page to inspect, restore, or permanently delete closed and soft-deleted sessions.
+
+| Task | Effort | Deliverable |
+|------|--------|-------------|
+| Backend archive listing | 0.2 day | `GET /v1/sessions?archived=true` returns closed + soft-deleted sessions |
+| Backend restore endpoint | 0.2 day | `POST /v1/sessions/{id}/restore` re-opens session; rejects if owning agent deleted |
+| Backend delete/history relax | 0.1 day | `DELETE /v1/sessions/{id}` can hard-delete soft-deleted rows; history endpoint no longer filters by `deleted_at` |
+| Backend tests | 0.2 day | `TestSessionArchiveAPI` covering list, restore, restore-failure, permanent delete, agent filter |
+| Frontend archive hooks | 0.2 day | `useArchivedSessions`, `useRestoreSession`, `useArchivedSessionHistory` |
+| Frontend archive page | 0.5 day | `ArchivedSessionsPage.tsx` with agent filter, list, view-history modal, restore, permanent-delete |
+| Frontend routing + nav | 0.1 day | `/archive/sessions` route; `Archive` sidebar item |
+| Docker rebuild + restart | 0.3 day | `docker compose build --no-cache core board`; `docker compose up -d --force-recreate core board`; verify healthy |
+| Docs update | 0.1 day | Update `Docs/07-channels.md`, `Docs/13-immersive-chat-ui.md`, `Docs/10-roadmap.md` |
+
+**Exit criteria:**
+- Closed sessions and soft-deleted sessions appear on `/archive/sessions`.
+- Operator can view read-only history for any archived session.
+- Operator can restore a session; it reappears as active on `/sessions`.
+- Operator can permanently delete an archived session after confirmation.
+- All containers healthy after rebuild.
+
+---
+
 ## Milestone Summary
 
 | Phase | Weeks | Theme | Status |
@@ -453,7 +478,7 @@ This roadmap is derived from the comprehensive 12-agent research review document
 
 | Task | Effort | Deliverable |
 |------|--------|-------------|
-| Agent SDK streaming hooks | 1 day | `_emit_stream_event()`, `_stream_text()`, `_drain_outgoing_queue()` in `runner.py`; 10 event types instrumented across `_execute_session_message` and `_execute_task` |
+| Agent SDK streaming hooks | 1 day | `_emit_stream_event()`, `_stream_text()`, `_drain_outgoing_queue()` in `runner/streaming.py`; 10 event types instrumented across `react_loop.py` |
 | Core bidirectional WS | 0.5 day | `agent_ws()` parses `agent:stream_event`, appends to Redis draft, stores debug events in Redis trace list, fans out everything else as `session:stream_event` |
 | Core REST endpoints | 0.5 day | `GET /v1/sessions/{id}/draft`, `GET /v1/sessions/{id}/debug-trace` (admin-only); `SessionReplyIn` accepts `metadata` for per-session override |
 | Agent config validation | 0.3 day | Pydantic validators for `streaming_mode`, `stream_chunk_size`, `stream_delay_ms` in `agents.py`; `AgentOut.streaming_mode` computed field |
@@ -728,7 +753,7 @@ This roadmap is derived from the comprehensive 12-agent research review document
 | Backend enriched list endpoint | 0.1 day | `SkillMetadataOut` adds `status`, `last_probe_status`, `last_probe_at`, `version`, `author`, `tools`; populated from DB rows |
 | Backend startup resurrection | 0.2 day | `startup/skills.py` — `initialize_skills()` re-enables `status='active'` rows on boot; wired into `startup/__init__.py` lifespan |
 | WebSocket dispatch | 0.1 day | `ws.py redis_listener` broadcasts `skill:enabled` to all connected agent sockets + Board sockets |
-| SDK re-sync handler | 0.1 day | `runner.py _ws_loop` handles `skill:enabled` → triggers `_sync_config()` |
+| SDK re-sync handler | 0.1 day | `runner/lifecycle.py _ws_loop` handles `skill:enabled` → triggers `_sync_config()` |
 | Board UI polling + status | 0.5 day | `SkillsStorePage.tsx` calls `install-and-enable`, polls `GET /v1/skills/{id}` every 3s, shows status badges (Running/Building/Build Failed/Unhealthy/Stopped), adds **Start**/**Stop** toggle, **Retry Enable**, and **Uninstall** buttons |
 | Board UI type updates | 0.1 day | `SkillMetadata` interface extended with new fields; `tsc --noEmit` clean |
 | Admin CLI skill commands | 0.3 day | `scripts/isli.py` — `skill` Typer sub-app with `install`, `enable`, `disable`, `uninstall`, `list` commands; stdlib `urllib.request` + `X-Admin-Key` |
@@ -771,3 +796,76 @@ This roadmap is derived from the comprehensive 12-agent research review document
 - The next Keeper summarization/journal/heartbeat inference call uses the new `num_ctx` value (observable in Ollama logs).
 - Values survive Keeper container restart because they are persisted to `/app/data/model_config.json`.
 - All containers healthy after rebuild.
+
+---
+
+## Post-Roadmap — Council Chat (Multi-Agent Rooms) (2026-06-17) ✅
+
+**Goal:** Enable a user to address multiple agents simultaneously in a single room thread. Each addressed agent responds in its own parallel lane using a deterministic per-agent session. Agents see the canonical room thread as read-only context but do not coordinate with each other, preserving ISLI's no-orchestrator principle.
+
+**Architecture decision:** Keep the canonical message list in a new `Room` table and mirror it into deterministic `Session` rows (`room:{room_id}:{agent_id}`). This reuses the existing context-injection pipeline, journal worker, memory worker, and outbox persistence without modification. When an agent replies via `reply_to_session`, the outbox appends the assistant message to `Room.messages` and mirrors it back into all room sessions, then emits `room:updated`.
+
+### Phase 1 (2026-06-17) — Web-only parallel lanes
+
+| Task | Effort | Deliverable |
+|------|--------|-------------|
+| Room data model + Alembic migration | 1 day | `Room` table (`id`, `name`, `user_id`, `channel`, `status`, `messages`, `agent_ids`, `pins`, `room_metadata`, `expires_at`, `last_activity_at`); `sessions.room_id` nullable FK; idempotent migration using SQLAlchemy `inspect()` |
+| Mention parser | 0.5 day | `isli-core/src/isli_core/rooms/mentions.py` — resolve `@agent_id`, `@agent_first_name`, `@all`, `@everyone`; sticky `last_addressed_agent_ids` in `room_metadata` |
+| Room service | 1 day | `isli-core/src/isli_core/rooms/service.py` — `RoomService` with create, message, add-agent, close, pin, export-pins; `_mirror_messages_to_sessions()` |
+| Rooms router | 0.5 day | `isli-core/src/isli_core/routers/rooms.py` — 10 endpoints under `/v1/rooms`; `DBSession = Annotated[AsyncSession, Depends(get_db)]` |
+| Outbox room reply handler | 0.5 day | `isli-core/src/isli_core/startup/outbox.py` — `handle_session_persist` mirrors room replies to `Room.messages` and all room sessions; tags `parent_id` for UI grouping |
+| Context worker room routing | 0.3 day | `isli-core/src/isli_core/jobs/context_worker.py` — include `room_id` in `session:message` payload; exclude room sessions from idle detection |
+| Agent SDK council prompt block | 0.5 day | `prompts.yaml` `agent.council_mode_block`; `isli-agent-sdk/src/isli_agent/runner/prompt_assembler.py` injects block when `session_info["room_id"]` is present |
+| Board UI Council page | 1.5 days | `CouncilPage.tsx`, `CouncilRoom.tsx`, `CouncilThread.tsx`, `CouncilResponseCard.tsx`, `CouncilInput.tsx`, `CouncilRosterBar.tsx`, `CouncilPinBoard.tsx`, `CouncilRoomList.tsx`; `useRooms.ts` TanStack Query hooks; route `/council` + sidebar item |
+| WebSocket room events | 0.3 day | `room:updated`, `room:agent_joined` schemas, Redis broadcast, Board invalidation |
+| Backend tests | 1 day | `isli-core/tests/test_council_rooms.py` — 18 tests covering mentions, service logic, mirroring, lifecycle, and API endpoints |
+| Docker rebuild + restart | 0.5 day | Rebuild `core`, `agent-runner`, `board`; apply migration; verify healthy stack |
+| Docs update | 0.2 day | `Docs/17-council-chat.md`; updates to `README.md`, `01-architecture.md`, `04-agents.md`, `07-channels.md`, `10-roadmap.md`, `13-immersive-chat-ui.md` |
+
+**Exit criteria:**
+- User creates a room with 2–6 agents from the Board UI and posts a message mentioning `@all`.
+- Each addressed agent receives a `session:message` event on its deterministic room session and replies independently.
+- All replies appear in side-by-side response cards in the Board UI, grouped under the user message.
+- Closing a room marks all room sessions closed and stops further turns.
+- `docker compose build --no-cache board agent-runner core` and `docker compose up -d --force-recreate` leaves all containers healthy.
+
+---
+
+## Post-Roadmap — Files Generation (PDF, DOCX, XLSX) (2026-06-17) ✅
+
+**Goal:** Empower agents to generate professional documents in standard formats and save them natively to their workspace, enabling report generation and data export.
+
+| Task | Effort | Deliverable |
+|------|--------|-------------|
+| Generator module | 0.5 day | `isli-skills/src/isli_skills/document_manager.py` using `weasyprint`, `python-docx`, and `openpyxl` |
+| Skills API endpoint | 0.2 day | `POST /generate` in `isli-skills/main.py` |
+| Core registration | 0.1 day | Skill and metadata entries in `isli-core/src/isli_core/routers/skills.py` |
+| SDK tool wrapper | 0.2 day | `isli-agent-sdk/src/isli_agent/tools/document_manager.py` + registry integration |
+| Docker hardening | 0.2 day | `Dockerfile` update for system dependencies (`libpango`, `libcairo`, etc.) |
+| Documentation update | 0.1 day | `Docs/06-skills.md`, `README.md`, `10-roadmap.md` |
+
+**Exit criteria:**
+- Agent calls `generate_document` and receiving a valid workspace path.
+- PDF, DOCX, and XLSX files are generated with correct magic bytes and content.
+- All containers healthy after `docker compose up --build`.
+
+---
+
+## Post-Roadmap — Secure File Injection (2026-06-18) ✅
+
+**Goal:** Enable secure, single-use, proxied file delivery from agent workspaces to skill containers, avoiding context bloat and network exposure.
+
+| Task | Effort | Deliverable |
+|------|--------|-------------|
+| Redis Token Management | 0.2 day | `isli-core/src/isli_core/file_tokens.py` — Atomic `GETDEL` for UUID tokens |
+| Core Proxy Endpoint | 0.2 day | `GET /v1/skills/consume-file` — Streams file from workspace to skill |
+| Interceptor Middleware | 0.3 day | `skill_proxy` in `skills.py` — Detects `file_fields` and replaces `[[file:...]]` markers |
+| Audit Logging | 0.1 day | `file.inject` audit entries for full lifecycle traceability |
+| Security Verification | 0.2 day | Unit tests for token expiration, single-use enforcement, and directory traversal protection |
+| Documentation update | 0.1 day | `Docs/06-skills.md`, `10-roadmap.md` |
+
+**Exit criteria:**
+- Agents can pass `[[file:scope:id:path]]` to skills with `file_fields` defined.
+- Core replaces markers with opaque, single-use URLs.
+- Files stream successfully from workspace to skill without skill-to-workspace direct network access.
+- Tokens are atomically invalidated after one use or 300s TTL.

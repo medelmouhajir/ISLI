@@ -32,7 +32,7 @@ State transitions are managed by Core API (and the internal **Agent Process Mana
 - **ONLINE**: The agent has successfully connected via WebSocket and is sending heartbeats.
 - **STOPPED**: The agent process has been manually terminated via the Core API/Board.
 - **CRASHED**: The agent process exited with a non-zero return code.
-- **OFFLINE**: The agent failed to send heartbeats for more than 180 seconds.
+- **OFFLINE**: The agent failed to send heartbeats for more than 25 minutes.
 - **REBUILDING**: The agent-runner Docker image is being rebuilt in the background before a fresh container is spawned (triggered by **Rebuild & Restart** in the Board UI).
 
 ### Live SDK Reloading (Development)
@@ -124,6 +124,8 @@ agent:
     - file-write
     - file-list
     - file-delete
+    - file-search         # search within a single workspace file
+    - file-describe       # get file stats and line preview
     - speech-to-text      # transcribe audio via isli-audio
     - text-to-speech      # synthesize voice via isli-audio
     - interactive-debugger  # run code with breakpoints and variable inspection
@@ -159,7 +161,7 @@ agent:
       - isli_preferences
 
   heartbeat:
-    interval_seconds: 180
+    interval_seconds: 600
 
   task_types:
     - research
@@ -493,6 +495,36 @@ final_text = await self._post_process_response(final_text, session_id)
 
 ---
 
+## Agent Runner Package Structure (Updated 2026-06-18)
+
+The agent runtime in `isli-agent-sdk` is now organized as a `runner` package instead of the previous monolithic `runner.py` module. The public `AgentRunner` API remains unchanged; the refactor only moves implementation details into focused modules.
+
+```
+isli-agent-sdk/src/isli_agent/runner/
+  __init__.py          # public re-exports (AgentRunner, helpers)
+  core.py              # AgentRunner façade; convenience add_*_tools()
+  constants.py         # turn limits, thresholds
+  providers.py         # provider normalization + Ollama Cloud constants
+  errors.py            # ModelErrorCategory + error classification
+  sanitize.py          # tool-result sanitization
+  parsing.py           # XML/JSON/legacy tool-call parsers
+  model_client.py      # LiteLLM routing, auth, retry, fallback, circuit breaker
+  tool_engine.py       # tool registry, execution, dynamic discovery, filtering
+  prompt_assembler.py  # system prompt + fallback summary
+  streaming.py         # WebSocket event queue and streaming modes
+  pii_manager.py       # PII mesh anonymization / rehydration
+  lifecycle.py         # heartbeat, WebSocket listener, config sync
+  react_loop.py        # ReAct execution loops for tasks and sessions
+```
+
+**Compatibility notes:**
+- `from isli_agent import AgentRunner` and `from isli_agent.runner import AgentRunner` continue to work.
+- `AgentRunner` keeps the same method names (`_execute_tool`, `_filter_tools_by_relevance`, `_extract_xml_tool_calls`, `_assemble_system_prompt`, etc.) as thin delegates.
+- All `AgentRunner` attributes used by existing code (`config`, `tools`, `tool_definitions`, `_model_circuit_open`, `_pending_components`, etc.) are preserved.
+- Old file paths like `src/isli_agent/runner.py` no longer exist; update any runbooks or examples that reference that path.
+
+---
+
 ## Dynamic Skill & Configuration Sync (Added 2026-05-24)
 
 Agents now support real-time configuration updates without requiring a process restart. This allows users to add/remove skills or modify personas via the Board UI and have those changes take effect immediately.
@@ -662,7 +694,7 @@ The `isli-agent-sdk` uses `websockets` to connect to Core's WebSocket gateway. I
 BaseEventLoop.create_connection() got an unexpected keyword argument 'extra_headers'
 ```
 
-**Fix:** In `isli-agent-sdk/src/isli_agent/runner.py`, change:
+**Fix:** In `isli-agent-sdk/src/isli_agent/runner/lifecycle.py`, change:
 ```python
 # BEFORE (websockets <14)
 async with websockets.connect(
@@ -829,6 +861,28 @@ def _assemble_system_prompt(
 - `_execute_session_message()` uses the default `task_mode=False`.
 
 > **Note:** The `task_execution_block` is mounted via `prompts.yaml`, but the SDK code that applies it is baked into the `isli-agent-runner` image. After editing the block, restart the agent-runner and recreate agent containers; after changing the injection logic, rebuild the agent-runner image.
+
+### Council Mode (Added 2026-06-17)
+
+When an agent receives a `session:message` event whose payload contains `room_id`, the SDK enters **Council Mode**. This happens when the agent is participating in a multi-agent room on the Board UI.
+
+1. The runner injects the `agent.council_mode_block` prompt block from `prompts.yaml` into the system prompt.
+2. The block instructs the agent:
+   - This is a Council room; the user may have addressed multiple agents.
+   - Messages from other agents are read-only context.
+   - Respond only to the user, not to other agents.
+   - Do not attempt to delegate or coordinate with other agents.
+
+Each agent still runs its normal ReAct loop, uses its own model and tools, and calls `reply_to_session()` — there is no special runtime beyond the prompt injection. The independent per-agent `room:{room_id}:{agent_id}` sessions and the room mirroring layer in Core handle the rest.
+
+**Prompt key:** `agent.council_mode_block`
+
+**Why a prompt block rather than a tool?**
+- It keeps the existing session execution path unchanged.
+- It avoids giving the LLM a coordination primitive that could break the no-orchestrator rule.
+- It is hot-reloadable via `prompts.yaml` once the runner restarts.
+
+See [`Docs/17-council-chat.md`](./17-council-chat.md) for architecture and Board UI details.
 
 ### Prompt Configuration (`prompts.yaml`)
 
@@ -1396,7 +1450,7 @@ Agents can also participate in long-lived chat sessions. When a `session:message
 3. **Reply Submission**: The agent sends the response via `POST /v1/sessions/{id}/reply`.
 4. **UI Update**: Core API broadcasts `session:updated` to trigger frontend refreshes.
 
-**Implementation** (`runner.py`):
+**Implementation** (`runner/lifecycle.py` and `runner/react_loop.py`):
 
 ```python
 # In _ws_loop() — non-blocking task spawn, same pattern as task events

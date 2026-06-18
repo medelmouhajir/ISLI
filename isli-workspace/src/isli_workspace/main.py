@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import os
 import shutil
 from contextlib import asynccontextmanager
@@ -14,6 +15,29 @@ from pydantic import BaseModel
 
 from .auth import require_internal_auth
 from .config import settings
+from .git_ops import (
+    GitAuthError,
+    GitConflictError,
+    GitInvalidOperationError,
+    GitNotRepoError,
+    GitRemoteError,
+    git_branch_create,
+    git_branch_list,
+    git_checkout,
+    git_clone,
+    git_commit,
+    git_log,
+    git_pull,
+    git_push,
+    git_status,
+)
+from .package_ops import (
+    PackageInstallError,
+    PackageInvalidError,
+    PackageTimeoutError,
+    pip_install,
+    pip_list,
+)
 from .sandbox import (
     check_quota,
     create_dir,
@@ -25,29 +49,8 @@ from .sandbox import (
     search_workspace,
     write_file,
     write_file_bytes,
-)
-from .git_ops import (
-    git_clone,
-    git_status,
-    git_commit,
-    git_push,
-    git_pull,
-    git_branch_list,
-    git_branch_create,
-    git_checkout,
-    git_log,
-    GitNotRepoError,
-    GitAuthError,
-    GitConflictError,
-    GitRemoteError,
-    GitInvalidOperationError,
-)
-from .package_ops import (
-    pip_install,
-    pip_list,
-    PackageInstallError,
-    PackageInvalidError,
-    PackageTimeoutError,
+    describe_file,
+    search_file,
 )
 
 SERVICE_NAME = "isli-workspace"
@@ -72,6 +75,17 @@ class ReadRequest(BaseWorkspaceRequest):
     line_end: int | None = None
 
 
+class SearchFileRequest(BaseWorkspaceRequest):
+    path: str
+    query: str
+    case_sensitive: bool = False
+    max_results: int = 100
+
+
+class DescribeRequest(BaseWorkspaceRequest):
+    path: str
+
+
 class WriteRequest(BaseWorkspaceRequest):
     path: str
     content: str
@@ -86,6 +100,10 @@ class DeleteRequest(BaseWorkspaceRequest):
 
 
 class MkdirRequest(BaseWorkspaceRequest):
+    path: str
+
+
+class MetadataRequest(BaseWorkspaceRequest):
     path: str
 
 
@@ -273,6 +291,37 @@ async def read(body: ReadRequest, auth: dict = Depends(require_internal_auth)):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/describe")
+async def describe(body: DescribeRequest, auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = describe_file(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
+        return {"status": "ok", **result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/search")
+async def search(body: SearchFileRequest, auth: dict = Depends(require_internal_auth)):
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        result = search_file(
+            body.scope, body.effective_scope_id, settings.workspace_base_path, body.path,
+            query=body.query, case_sensitive=body.case_sensitive, max_results=body.max_results
+        )
+        return {"status": "ok", **result}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/write")
 async def write(body: WriteRequest, quota_bytes: int | None = None, auth: dict = Depends(require_internal_auth)):
     await check_access(body.agent_id, body.scope, body.effective_scope_id)
@@ -313,6 +362,36 @@ async def delete(body: DeleteRequest, auth: dict = Depends(require_internal_auth
         raise HTTPException(status_code=404, detail=str(exc))
     except PermissionError as exc:
         logger.error("workspace.permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/metadata")
+async def metadata(body: MetadataRequest, auth: dict = Depends(require_internal_auth)):
+    """Return metadata for a single file without reading its contents."""
+    await check_access(body.agent_id, body.scope, body.effective_scope_id)
+    try:
+        file_path = resolve_path(body.scope, body.effective_scope_id, settings.workspace_base_path, body.path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {body.path}")
+        if file_path.is_dir():
+            raise IsADirectoryError(f"Path is a directory: {body.path}")
+
+        stat = file_path.stat()
+        mime_type, _ = mimetypes.guess_type(str(file_path))
+        return {
+            "status": "ok",
+            "path": body.path,
+            "filename": file_path.name,
+            "size_bytes": stat.st_size,
+            "mime_type": mime_type or "application/octet-stream",
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+        }
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        logger.error("workspace.metadata_permission_denied", agent_id=body.agent_id, path=body.path, error=str(exc))
         raise HTTPException(status_code=403, detail=str(exc))
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -505,7 +584,7 @@ async def shared_move(body: MoveRequest, auth: dict = Depends(require_internal_a
         raise HTTPException(status_code=403, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except (OSError,) as exc:
+    except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
 

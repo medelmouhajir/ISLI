@@ -190,7 +190,7 @@ The updated structured journal string, which is then persisted to the `sessions`
 
 ### 6. Agent Heartbeats
 
-Each registered agent sends a heartbeat signal to the Core API every 180 seconds. Instead of a simple `200 OK` ping, ISLI uses **intelligent heartbeats**:
+Each registered agent sends a heartbeat signal to the Core API every 600 seconds. Instead of a simple `200 OK` ping, ISLI uses **intelligent heartbeats**:
 
 ```
 Agent → Core API: { agent_id, status, current_task_id, last_action_ts }
@@ -516,7 +516,7 @@ The Keeper is ISLI's silent backbone, but the following production gaps were ide
 ### Fixed (2026-05-18)
 - **Timeout chain too short for slow hardware** — Core→Keeper timeouts increased to 180s (journal/heartbeat validate) and 120s (context injection); Keeper→Ollama to 120s; Ollama client timeout raised to 300s. This prevents ReadTimeout cascades on hardware where `qwen3:1.7b` takes 30-90+s per inference.
 - **Chat sessions never got journals** — `JournalWorker` now triggers on `last_activity_at > journal_updated_at` for sessions without completed tasks.
-- **Task path ignores pre-computed context** — Agent SDK `runner.py` now reads `task.context_summary` instead of making redundant HTTP calls.
+- **Task path ignores pre-computed context** — Agent SDK `runner/react_loop.py` now reads `task.context_summary` instead of making redundant HTTP calls.
 - **Checkpoint recovery crashes every 5 min** — `CheckpointRecoveryWorker` in `isli_core/jobs/checkpoint_recovery.py` had a tuple unpacking bug: `rows_map[task.id] = (task, agent)` was iterated with `for _, agent in rows_map.items()`, so `agent` received the tuple instead of the Agent object. Fixed by unpacking `for _, (task, agent) in rows_map.items()`.
 
 > **Recommendation:** The Keeper should be treated as a Tier-0 critical service — not "silent" to operators. Add RED metrics, latency SLOs, structured logging, and tighten exception handling in `ollama_client.py`.

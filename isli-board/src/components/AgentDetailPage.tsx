@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAgents, useUpdateAgent, useDeleteAgent } from '@/hooks/useAgents'
@@ -182,38 +182,6 @@ export function AgentDetailPage() {
     variant: 'primary',
   })
 
-  useEffect(() => {
-    if (agent) {
-      setForm(buildForm(agent, agents))
-      setJsonError(null)
-    }
-  }, [agent, agents])
-
-  const setField = useCallback((key: string, value: unknown) => {
-    setForm((prev: Record<string, unknown>) => ({ ...prev, [key]: value }))
-  }, [])
-
-  const toggleKnownAgent = useCallback((peerId: string) => {
-    setForm((prev: Record<string, unknown>) => {
-      const current = (prev.known_agent_ids as string[]) || []
-      const next = current.includes(peerId)
-        ? current.filter((id) => id !== peerId)
-        : [...current, peerId]
-      return { ...prev, known_agent_ids: next }
-    })
-  }, [])
-
-  const handleJsonBlur = useCallback(() => {
-    try {
-      JSON.parse(String(form.config || '{}'))
-      setJsonError(null)
-    } catch (e) {
-      setJsonError(e instanceof Error ? e.message : 'Invalid JSON')
-    }
-  }, [form.config])
-
-  // ── Per-section dirty detection ────────────────────────────────────────────
-
   const overviewDirty = useMemo(() => {
     if (!agent) return false
     return (
@@ -247,6 +215,40 @@ export function AgentDetailPage() {
       return true
     }
   }, [form, agent])
+
+  const isAnyDirty = useMemo(() => overviewDirty || peersDirty || advancedDirty, [overviewDirty, peersDirty, advancedDirty])
+  const lastLoadedId = useRef<string | undefined>(undefined)
+
+  useEffect(() => {
+    if (agent && (id !== lastLoadedId.current || !isAnyDirty)) {
+      setForm(buildForm(agent, agents))
+      setJsonError(null)
+      lastLoadedId.current = id
+    }
+  }, [agent, agents, id, isAnyDirty])
+
+  const setField = useCallback((key: string, value: unknown) => {
+    setForm((prev: Record<string, unknown>) => ({ ...prev, [key]: value }))
+  }, [])
+
+  const toggleKnownAgent = useCallback((peerId: string) => {
+    setForm((prev: Record<string, unknown>) => {
+      const current = (prev.known_agent_ids as string[]) || []
+      const next = current.includes(peerId)
+        ? current.filter((id) => id !== peerId)
+        : [...current, peerId]
+      return { ...prev, known_agent_ids: next }
+    })
+  }, [])
+
+  const handleJsonBlur = useCallback(() => {
+    try {
+      JSON.parse(String(form.config || '{}'))
+      setJsonError(null)
+    } catch (e) {
+      setJsonError(e instanceof Error ? e.message : 'Invalid JSON')
+    }
+  }, [form.config])
 
   // ── Per-section save handlers ──────────────────────────────────────────────
 

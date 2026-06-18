@@ -68,6 +68,8 @@ skill:
 | `file-write` | Write file to agent's workspace | Path-scoped, per-agent isolation |
 | `file-list` | List directory entries in agent's workspace | Path-scoped, per-agent isolation |
 | `file-delete` | Delete a file from agent's workspace | Path-scoped, per-agent isolation |
+| `file-search` | Search within a single workspace file | Regex support; returns line numbers |
+| `file-describe` | File stats and structure (preview) | Line count, format, first/last 5 lines |
 | `db-query` | Run read-only SQL query | Row limiting (50) and cell truncation (500 chars) |
 | `shell-exec` | Execute shell command in sandbox | Ephemeral Docker container; network isolated; no privileges |
 | `send-email` | Send email via SMTP | Requires SMTP config |
@@ -101,7 +103,7 @@ skill:
 | `update-skill` | Update metadata of an existing dynamic skill | No review gate; preserves `usage_count` / `created_at` |
 | `interactive-debugger` | Run code with breakpoints, variable inspection, and line-by-line trace | Batch trace via `sys.settrace()`; modes: `trace`, `breakpoints`, `run`; watch expressions; stdout/stdin capture |
 | `ui-components` | Render tables, cards, buttons, forms, JSON, timelines, metrics inline in chat | Inline in Core; Board renders React components; user interactions fire back as action messages (see Docs/13-immersive-chat-ui.md) |
-| `get-secret` | Retrieve a secret value from the agent's encrypted vault by name | Inline in Core; AES-256-GCM encrypted at rest; per-agent scoped; every read is audit-logged |
+| `get-secret` | Retrieve a secure reference ID (`[[secret:NAME]]`) for a vault secret | Inline in Core; supports server-side injection into authorized tool fields |
 | `git-clone` | Clone a remote git repository into the agent's workspace | URL validation blocks `file://`; atomic temp-dir clone; sandboxed via `resolve_path()` |
 | `git-status` | Show working tree status (modified, staged, untracked) | Returns structured JSON with `is_dirty` flag and file lists |
 | `git-commit` | Stage files and commit with a message | Supports explicit file list or `git add -A`; returns `commit_hash` |
@@ -122,6 +124,7 @@ skill:
 | `web-browse-console` | Return browser console logs | Delta since last call; cursor-based pagination; resets on navigate |
 | `web-browse-vision` | Screenshot as base64 PNG | Returns `screenshot_b64`; flagged as `HEAVY_SKILL` |
 | `web-browse-images` | List images with src/alt/dimensions | `eval_on_selector_all` over `<img>` tags |
+| `files-documents-manager` | Generate PDF, DOCX, XLSX documents | Saves directly to agent workspace; uses `weasyprint`, `python-docx`, `openpyxl` |
 
 ### Shared Workspace Skills — Added 2026-06-15
 
@@ -893,47 +896,64 @@ result = await interactive_debugger(
 )
 ```
 
-### Secret Vault (`get-secret`) — Added 2026-05-31
+### Secret Vault (`get-secret`) — Updated 2026-06-18
 
-ISLI provides a **per-agent encrypted secret vault** so agents can access API keys, database credentials, authentication tokens, and encryption keys at runtime without hardcoding them in source code or agent config.
+ISLI provides a **per-agent encrypted secret vault** so agents can access credentials securely. The system uses a **Server-Side Injection** model to prevent secrets from ever appearing in the LLM's context window or the agent's memory.
 
 **Architecture:**
-- **Storage:** PostgreSQL `secrets` table with `value_encrypted` using existing `PIIEncryption` (AES-256-GCM) under the `PII_ENCRYPTION_KEY` environment variable.
-- **Scope:** Strictly per-agent. The `(agent_id, name)` pair has a unique DB index preventing namespace collisions. Agents cannot read other agents' secrets.
-- **Access Control:**
-  - **Admin write** — `POST /v1/secrets` and `DELETE /v1/secrets/{name}` require `ADMIN_API_KEY`.
-  - **Agent read** — `POST /v1/skills/get-secret/get` requires the agent's own JWT (enforced via `agent_id` body parameter matching token `sub`).
-- **Audit Trail:** Every `get-secret` read writes an `AuditLog` row with `actor_id`, `secret_name`, and timestamp. The decrypted value is **never** logged, printed, or returned in list endpoints.
-- **Board UI:** `/agents/:id/secrets` page lists secret names and metadata; admins can create secrets (value masked) and delete them. Values are never displayed in the UI.
-
-**Endpoints:**
-| Method | Path | Auth | Purpose |
-|--------|------|------|---------|
-| POST | `/v1/secrets` | admin | Create or overwrite a secret for an agent |
-| GET | `/v1/secrets?agent_id=` | admin | List secret names/metadata (values never exposed) |
-| DELETE | `/v1/secrets/{name}?agent_id=` | admin | Delete a secret |
-| POST | `/v1/skills/get-secret/get` | agent JWT | Retrieve decrypted secret value (audit-logged) |
+- **Storage:** PostgreSQL `secrets` table with `value_encrypted` using AES-256-GCM.
+- **Reference IDs:** The `get_secret` tool does **not** return the actual secret value. It returns a placeholder in the format `[[secret:NAME]]`.
+- **Server-Side Injection:** When an agent calls a tool that requires a secret (e.g., `web-search`), it passes the placeholder. The Core API's `skill_proxy` intercepts the request, fetches the real secret, and injects it into the request payload *after* it leaves the agent and *before* it reaches the skill container.
+- **Confused Deputy Protection:** Injection only happens in fields explicitly authorized in the skill's manifest (e.g., `api_key`). Placeholders in unauthorized fields (like a search `query`) are ignored to prevent secret extraction via prompt injection.
+- **Audit Trail:** Every secret reference and injection is audit-logged. Decrypted values are **never** logged.
 
 **SDK Usage:**
 ```python
 from isli_agent import get_secret
 
-api_key = await get_secret("openai_api_key", core_client=client)
-# Returns the decrypted string value
-```
+# Returns "[[secret:openai_api_key]]"
+secret_ref = await get_secret("openai_api_key", core_client=client)
 
-**Typed Exceptions:**
-- `SecretNotFoundError` — Secret name does not exist for this agent.
-- `SecretAccessError` — Agent lacks permission (rare; usually caught by JWT scoping first).
+# Pass the reference to another tool
+await agent.web_search(query="...", api_key=secret_ref)
+```
 
 **Security Design:**
 | Concern | Mitigation |
 |---------|-----------|
-| Encryption at rest | AES-256-GCM via `PIIEncryption` with `PII_ENCRYPTION_KEY` |
-| Cross-agent isolation | Unique `(agent_id, name)` DB index + JWT `sub` enforcement |
-| Audit trail | Every read logged to `AuditLog`; value never included |
-| No source-code leaks | Agents call `get_secret("name")` at runtime; keys live only in encrypted DB |
-| No UI exposure | List endpoint returns names only; create form masks value input |
+| Secret Leakage in Context | LLM only sees the opaque reference ID `[[secret:NAME]]`. |
+| Observability Leaks | Placeholders are logged in tool arguments; raw values are never broadcast over Redis. |
+| Memory Persistence | Keeper only saves placeholders to vector DB; secrets are never indexed for RAG. |
+| Cross-agent isolation | JWT `sub` enforcement ensures agents only access their own vault. |
+| Confused Deputy | Explicit allow-list for `secret_fields` prevents extraction via unauthorized fields. |
+
+### Secure File Injection (`[[file:...]]`) — Updated 2026-06-18
+
+Mirroring the secret injection model, ISLI provides a **Secure File Injection** mechanism for agents to pass large or sensitive files from their isolated workspaces to skills without loading the content into the context window or exposing the workspace service to skill containers.
+
+**Architecture:**
+- **Opaque Single-Use Tokens:** Instead of direct paths or JWTs, `isli-core` generates cryptographically secure random UUIDs (tokens) stored in Redis with a 300s TTL.
+- **Reference IDs:** Tokens are mapped to specific file metadata: `{"scope": "...", "scope_id": "...", "path": "..."}`.
+- **Marker Syntax:** Agents pass files using the format `[[file:<scope>:<scope_id>:<path>]]`.
+- **Core Proxy:** The `skill_proxy` intercepts the request and replaces the marker with an opaque URL: `https://<core_url>/v1/skills/consume-file?token=<uuid>`.
+- **Atomic Single-Use:** The first `GET` request to this URL atomically deletes the token from Redis. Any subsequent attempt (even a leak) fails instantly.
+- **Network Isolation:** Skill containers only communicate with `isli-core`. Core streams the file from `isli-workspace` internally, keeping the workspace service airgapped from the skill network.
+
+**Manifest Configuration:**
+To enable injection, a skill must define `file_fields` in its manifest:
+```yaml
+tools:
+  - name: process-document
+    file_fields: ["document_url"]
+```
+
+**Security Design:**
+| Concern | Mitigation |
+|---------|-----------|
+| SSRF / Internal Scanning | Skill containers never see internal workspace hostnames. |
+| Directory Traversal | Token is rigidly locked to one specific path during creation. |
+| Credential Leakage | URLs contain nonces, not credentials; tokens expire and are deleted after one use. |
+| Context Bloat | Large files are streamed directly to the skill via HTTP GET, skipping the LLM context. |
 
 ### System Tools
 

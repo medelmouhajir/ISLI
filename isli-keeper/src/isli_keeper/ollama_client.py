@@ -40,7 +40,16 @@ class OllamaClient:
             await self._client.aclose()
             self._client = None
 
-    async def generate(self, model: str, prompt: str, options: dict | None = None, timeout: float | None = None, format: str | None = None, keep_alive: int | str | None = None) -> dict:
+    async def generate(
+        self,
+        model: str,
+        prompt: str,
+        options: dict | None = None,
+        timeout: float | None = None,
+        format: str | None = None,
+        keep_alive: int | str | None = None,
+        think: bool | None = None,
+    ) -> dict:
         if self._client is None:
             raise RuntimeError("OllamaClient session not started")
 
@@ -64,6 +73,10 @@ class OllamaClient:
             payload["format"] = format
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
+        # Thinking must be a top-level field; inside options it is silently ignored.
+        # See https://github.com/ollama/ollama/issues/14793
+        if think is not None:
+            payload["think"] = think
         # Use provided timeout or fall back to client's default (300s)
         resp = await self._client.post("/api/generate", json=payload, timeout=timeout)
         resp.raise_for_status()

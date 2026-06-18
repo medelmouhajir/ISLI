@@ -3,6 +3,7 @@
 Provides inbox CRUD, unread badge count, and preference management.
 """
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -27,6 +28,7 @@ AGENT_NOTIFY_RATE_LIMIT = 20  # per agent per user per hour
 
 
 # ─── Schemas ──────────────────────────────────────────────────────────────────
+
 
 class NotificationOut(BaseModel):
     id: str
@@ -83,6 +85,9 @@ class NotificationPreferencesOut(BaseModel):
     categories: dict[str, Any]
 
 
+VALID_NOTIFICATION_CHANNELS = {"in_app", "web_push", "telegram", "whatsapp", "email"}
+
+
 class UpdatePreferencesIn(BaseModel):
     global_enabled: bool | None = None
     quiet_hours_enabled: bool | None = None
@@ -101,6 +106,31 @@ class UpdatePreferencesIn(BaseModel):
             ZoneInfo(v)
         except ZoneInfoNotFoundError as exc:
             raise ValueError(f"Invalid timezone: {v}") from exc
+        return v
+
+    @field_validator("categories")
+    @classmethod
+    def _validate_categories(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is None:
+            return v
+        for cat_key, cat_val in v.items():
+            if not isinstance(cat_val, dict):
+                continue
+            channels = cat_val.get("channels")
+            if channels is not None:
+                if not isinstance(channels, list) or not all(isinstance(c, str) for c in channels):
+                    raise ValueError(f"Category '{cat_key}': channels must be a list of strings")
+                unknown = set(channels) - VALID_NOTIFICATION_CHANNELS
+                if unknown:
+                    raise ValueError(
+                        f"Category '{cat_key}': unknown channels {sorted(unknown)}. "
+                        f"Allowed: {sorted(VALID_NOTIFICATION_CHANNELS)}"
+                    )
+            priority = cat_val.get("priority")
+            if priority is not None and priority not in {"critical", "high", "normal", "low"}:
+                raise ValueError(
+                    f"Category '{cat_key}': priority must be one of critical, high, normal, low"
+                )
         return v
 
 
@@ -124,6 +154,7 @@ class WebPushPublicKeyOut(BaseModel):
 
 # ─── Endpoints ──────────────────────────────────────────────────────────────────
 
+
 @router.get("/web-push/public-key", response_model=WebPushPublicKeyOut)
 async def get_vapid_public_key():
     """Returns the VAPID public key for frontend subscription."""
@@ -131,7 +162,7 @@ async def get_vapid_public_key():
     if not settings.vapid_public_key:
         raise HTTPException(
             status_code=503,
-            detail="Web Push is not configured on this server (missing VAPID keys)."
+            detail="Web Push is not configured on this server (missing VAPID keys).",
         )
     return WebPushPublicKeyOut(public_key=settings.vapid_public_key)
 
@@ -157,7 +188,7 @@ async def subscribe_web_push(
             user_id=user_id,
             endpoint=subscription.endpoint,
             p256dh=subscription.p256dh,
-            auth=subscription.auth
+            auth=subscription.auth,
         )
         db.add(new_sub)
 
@@ -169,16 +200,17 @@ async def subscribe_web_push(
     pref = pref_result.scalar_one_or_none()
 
     if pref:
-        # If user has existing preferences, ensure web_push is in the channel list for enabled categories
+        # If user has existing preferences, ensure web_push is in the channel list
+        # for enabled categories.
         updated_categories = dict(pref.categories or {})
         changed = False
         for cat_key, cat_val in updated_categories.items():
-            if "web_push" not in cat_val.get("channels", []):
-                # Only add if the system default for this category supports it
-                if "web_push" in DEFAULT_CATEGORIES.get(cat_key, {}).get("channels", []):
-                    cat_val["channels"] = cat_val.get("channels", []) + ["web_push"]
-                    changed = True
-        
+            if "web_push" not in cat_val.get("channels", []) and (
+                "web_push" in DEFAULT_CATEGORIES.get(cat_key, {}).get("channels", [])
+            ):
+                cat_val["channels"] = cat_val.get("channels", []) + ["web_push"]
+                changed = True
+
         if changed:
             pref.categories = updated_categories
             await db.commit()
@@ -189,7 +221,9 @@ async def subscribe_web_push(
                 redis = await get_redis()
                 await redis.delete(f"notif:pref:{user_id}")
             except Exception as exc:
-                logger.warning("web_push.pref_cache_invalidate_failed", user_id=user_id, error=str(exc))
+                logger.warning(
+                    "web_push.pref_cache_invalidate_failed", user_id=user_id, error=str(exc)
+                )
 
     return {"status": "subscribed"}
 
@@ -201,22 +235,26 @@ async def unsubscribe_web_push(
 ):
     """Remove a web push subscription."""
     from sqlalchemy import delete
-    
+
     # Get user_id before deleting
     stmt = select(WebPushSubscription).where(WebPushSubscription.endpoint == endpoint)
     result = await db.execute(stmt)
     sub = result.scalar_one_or_none()
-    
+
     if not sub:
         return {"status": "not_found"}
-        
+
     user_id = sub.user_id
 
     await db.execute(delete(WebPushSubscription).where(WebPushSubscription.endpoint == endpoint))
     await db.commit()
 
     # Check if user has any remaining subscriptions
-    count_stmt = select(func.count()).select_from(WebPushSubscription).where(WebPushSubscription.user_id == user_id)
+    count_stmt = (
+        select(func.count())
+        .select_from(WebPushSubscription)
+        .where(WebPushSubscription.user_id == user_id)
+    )
     count_result = await db.execute(count_stmt)
     remaining_count = count_result.scalar() or 0
 
@@ -229,11 +267,13 @@ async def unsubscribe_web_push(
         if pref:
             updated_categories = dict(pref.categories or {})
             changed = False
-            for cat_key, cat_val in updated_categories.items():
+            for _cat_key, cat_val in updated_categories.items():
                 if "web_push" in cat_val.get("channels", []):
-                    cat_val["channels"] = [c for c in cat_val.get("channels", []) if c != "web_push"]
+                    cat_val["channels"] = [
+                        c for c in cat_val.get("channels", []) if c != "web_push"
+                    ]
                     changed = True
-            
+
             if changed:
                 pref.categories = updated_categories
                 await db.commit()
@@ -266,8 +306,8 @@ async def list_notifications(
     result = await db.execute(stmt)
     items = [NotificationOut.from_orm(r) for r in result.scalars().all()]
 
-    total_stmt = select(func.count()).select_from(Notification).where(
-        Notification.dismissed_at.is_(None)
+    total_stmt = (
+        select(func.count()).select_from(Notification).where(Notification.dismissed_at.is_(None))
     )
     if filter_status == "unread":
         total_stmt = total_stmt.where(Notification.read_at.is_(None))
@@ -278,9 +318,13 @@ async def list_notifications(
     total_result = await db.execute(total_stmt)
     total = total_result.scalar() or 0
 
-    unread_stmt = select(func.count()).select_from(Notification).where(
-        Notification.read_at.is_(None),
-        Notification.dismissed_at.is_(None),
+    unread_stmt = (
+        select(func.count())
+        .select_from(Notification)
+        .where(
+            Notification.read_at.is_(None),
+            Notification.dismissed_at.is_(None),
+        )
     )
     if event_type:
         unread_stmt = unread_stmt.where(Notification.event_type == event_type)
@@ -304,9 +348,13 @@ async def unread_count(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("notification.unread_redis_failed", error=str(exc))
 
-    stmt = select(func.count()).select_from(Notification).where(
-        Notification.read_at.is_(None),
-        Notification.dismissed_at.is_(None),
+    stmt = (
+        select(func.count())
+        .select_from(Notification)
+        .where(
+            Notification.read_at.is_(None),
+            Notification.dismissed_at.is_(None),
+        )
     )
     result = await db.execute(stmt)
     count = result.scalar() or 0
@@ -377,11 +425,7 @@ async def dismiss_notification(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     now = datetime.now(UTC)
-    stmt = (
-        update(Notification)
-        .where(Notification.id == notification_id)
-        .values(dismissed_at=now)
-    )
+    stmt = update(Notification).where(Notification.id == notification_id).values(dismissed_at=now)
     await db.execute(stmt)
     await db.commit()
     return {"ok": True, "notification_id": notification_id}
@@ -405,15 +449,31 @@ async def get_preferences(
             quiet_hours_exceptions=[],
             categories=DEFAULT_CATEGORIES,
         )
+
+    # asyncpg may return JSON columns as strings; guard with json.loads().
+    categories = row.categories or DEFAULT_CATEGORIES
+    if isinstance(categories, str):
+        try:
+            categories = json.loads(categories)
+        except json.JSONDecodeError:
+            logger.warning(
+                "notification.pref_categories_json_parse_failed",
+                user_id=user_id,
+                raw=categories[:200],
+            )
+            categories = DEFAULT_CATEGORIES
+
     return NotificationPreferencesOut(
         user_id=row.user_id,
         global_enabled=row.global_enabled,
         quiet_hours_enabled=row.quiet_hours_enabled,
-        quiet_hours_start=row.quiet_hours_start.strftime("%H:%M") if row.quiet_hours_start else None,
+        quiet_hours_start=row.quiet_hours_start.strftime("%H:%M")
+        if row.quiet_hours_start
+        else None,
         quiet_hours_end=row.quiet_hours_end.strftime("%H:%M") if row.quiet_hours_end else None,
         timezone=row.timezone,
         quiet_hours_exceptions=row.quiet_hours_exceptions or [],
-        categories=row.categories or DEFAULT_CATEGORIES,
+        categories=categories,
     )
 
 
@@ -472,7 +532,12 @@ async def update_preferences(
             pref.quiet_hours_end = updates["quiet_hours_end"]
         db.add(pref)
 
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as exc:
+        logger.error("notification.pref_save_failed", user_id=user_id, error=str(exc))
+        await db.rollback()
+        raise HTTPException(500, f"Failed to save preferences: {exc}") from exc
 
     # Invalidate Redis cache
     try:
@@ -517,6 +582,7 @@ async def send_notification(
     await db.refresh(notif)
 
     from isli_core.event_manager import EventManager
+
     await EventManager.emit(
         "notification:new",
         {

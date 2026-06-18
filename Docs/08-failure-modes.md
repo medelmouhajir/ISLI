@@ -198,6 +198,7 @@ The **MAST (Multi-Agent System Failure Taxonomy)** from UC Berkeley (NeurIPS 202
 **ISLI mitigation**:
 - Per-agent token budget enforcement: Core API tracks cumulative tokens per session
 - Keeper's context injection is capped at `max_injection_tokens` (500 by default)
+- **Hybrid Threshold Spill (2026-06-17)**: The Agent SDK intercepts all tool outputs. If a result exceeds 2,000 characters (e.g., large web fetch or DB dump), it is automatically saved to a file in the agent's workspace. The LLM receives a structured JSON "spill envelope" with a 300-char preview and a path. This prevents massive context bloat and forces the agent to use targeted search/read tools to extract only necessary information.
 - Skill large-output summarization prevents skill results from bloating context
 - Kanban card shows token usage in real-time
 - Optional: per-agent daily token cap with automatic pause
@@ -421,10 +422,10 @@ The 2026 research review identified structural resilience patterns that ISLI cur
 | Short task lease reclaims long-running work | F7 | **Fixed 2026-05-18** | `task_lease_minutes` increased from 5 to 30 |
 | Core→Channels delivery swallowed with no retry | F10 | **Fixed 2026-05-18** | `reply_to_session` now uses `exponential_backoff` with 3 retries; Telegram adapter retries 3× with backoff |
 | Checkpoint recovery crashes on tuple unpacking | F7, F11 | **Fixed 2026-05-18** | `rows_map[task.id] = (task, agent)` comprehension now unpacks `for _, (task, agent) in rows_map.items()` |
-| Agent runner opaque error messages | F10 | **Fixed 2026-05-18** | `runner.py` catch-all now classifies overloaded/timeout vs generic; `acompletion` has `timeout=120` |
+| Agent runner opaque error messages | F10 | **Fixed 2026-05-18** | `runner/errors.py` `_classify_model_error()` now classifies overloaded/timeout vs generic; `acompletion` has `timeout=120` |
 | Gemini API key sync issues | F14, F17 | **Fixed 2026-05-22** | `client.py` now explicitly calls `/v1/agents/{id}/config` after registration to prevent `api_key` stripping during sanitized sync. |
-| Gemini 400 Bad Request on message history | F17 | **Fixed 2026-05-22** | `runner.py` now strips `function_call: None` and empty `tool_calls: []` using `model_dump(exclude_none=True)`. |
-| Gemini crashes on tool argument types | F17 | **Fixed 2026-05-22** | `runner.py` argument parser now handles both raw JSON strings and pre-parsed Python dicts from Gemini. |
+| Gemini 400 Bad Request on message history | F17 | **Fixed 2026-05-22** | `runner/react_loop.py` now strips `function_call: None` and empty `tool_calls: []` using `model_dump(exclude_none=True)`. |
+| Gemini crashes on tool argument types | F17 | **Fixed 2026-05-22** | `runner/parsing.py` argument parser now handles both raw JSON strings and pre-parsed Python dicts from Gemini. |
 | Agent crash status not persisted to DB | F7, F10 | **Fixed 2026-05-28** | `AgentProcessManager._watch_docker()` now calls `_update_agent_status()` to write `"crashed"` or `"stopped"` to PostgreSQL on exit |
 | Docker container logs lost on crash | F10 | **Fixed 2026-05-28** | `_stream_docker_logs()` streams container stdout/stderr to Redis (`agent:{id}:logs` and `:history`) so Board shows crash output |
 | Stale container 409 conflict blocks restart | F7 | **Fixed 2026-05-28** | `_spawn_docker()` defensively force-removes any existing container with the same name before creating a new one |
@@ -445,10 +446,10 @@ The 2026 research review identified structural resilience patterns that ISLI cur
 | Core hardcodes wrong webhook secret for WhatsApp | F22 | **Fixed 2026-05-29** | `config.py` reads `WEBHOOK_SECRET` from env; `docker-compose.yml` passes it to `core` service |
 | WhatsApp replies lost due to LID JID mismatch | F23 | **Fixed 2026-05-29** | `WhatsAppAdapter` preserves original `remote_jid` and uses it for outbound `send_message()` |
 | `/new` command crashes on `datetime.UTC` | F24 | **Fixed 2026-05-29** | Replaced `datetime.UTC` with `timezone.utc` in `commands.py` |
-| Agent ignores tool calls from XML/JSON models | F17 | **Fixed 2026-05-29** | `runner.py` added `_extract_xml_tool_calls()` and `_extract_json_tool_calls()` with `_ParsedToolCall` normalization; strips markup from final response; injects synthetic `tool_calls` into history |
+| Agent ignores tool calls from XML/JSON models | F17 | **Fixed 2026-05-29** | `runner/parsing.py` added `extract_xml_tool_calls()` and `extract_json_tool_calls()` with `_ParsedToolCall` normalization; `runner/core.py` exposes them via `AgentRunner` methods; strips markup from final response; injects synthetic `tool_calls` into history |
 | Board UI 502 because `core` unresolvable from `board` container | F22 | **Fixed 2026-06-03** | `board` service added to `isli-mesh` network in `docker-compose.yml` so nginx `proxy_pass` to `core:8000` resolves via Docker DNS |
 | Agents orphaned on wrong Docker network | F7, F22 | **Fixed 2026-06-03** | `AGENT_NETWORK` changed from `isli_isli` to `isli_isli-mesh` in `docker-compose.yml`; ensures spawned agents share a network with Core |
-| `websockets` 14+ `extra_headers` API break | F17 | **Fixed 2026-06-03** | `runner.py` changed `extra_headers=` to `additional_headers=` in `websockets.connect()` call; agent-runner image rebuilt |
+| `websockets` 14+ `extra_headers` API break | F17 | **Fixed 2026-06-03** | `runner/lifecycle.py` changed `extra_headers=` to `additional_headers=` in `websockets.connect()` call; agent-runner image rebuilt |
 | Ollama-init cannot reach internet | F15 | **Fixed 2026-06-03** | `ollama-init` added to `isli-mesh` network (in addition to `isli-data`) so `registry.ollama.ai` is resolvable |
 | Missing `WEBHOOK_SECRET` causes 401 everywhere | F14, F22 | **Fixed 2026-06-03** | Added `WEBHOOK_SECRET` and `SKILL_REGISTRY_TOKEN` to `.env` and `docker-compose.yml`; verified both are passed to Core and Skills services |
 | `.env.example` missing required secrets | F22 | **Fixed 2026-06-03** | `.env.example` updated to document `WEBHOOK_SECRET`, `SKILL_REGISTRY_TOKEN`, and `AGENT_ID` |

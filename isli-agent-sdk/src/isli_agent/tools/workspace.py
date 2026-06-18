@@ -182,7 +182,60 @@ async def shared_promote_file_workspace(agent_id: str, workspace_id: str, source
     return resp.json()
 
 
-async def shared_file_read(agent_id: str, workspace_id: str, path: str, core_client: CoreClient, max_chars: int = 16000, line_start: int = 1, line_end: int | None = None) -> dict[str, Any]:
+async def describe_workspace_file(agent_id: str, path: str, core_client: CoreClient) -> dict[str, Any]:
+    """Provide structure and stats for a specific file in the agent workspace to aid navigation."""
+    resp = await core_client.client.post(
+        "/v1/skills/file-describe/describe",
+        json={"agent_id": agent_id, "path": path, "scope": "agent", "scope_id": agent_id},
+        headers=core_client._get_headers(),
+    )
+    if resp.status_code == 404:
+        raise WorkspaceNotFoundError(f"File not found: {path}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def search_workspace_file(
+    agent_id: str,
+    path: str,
+    query: str,
+    core_client: CoreClient,
+    case_sensitive: bool = False,
+    max_results: int = 100
+) -> dict[str, Any]:
+    """Search for a regex or string within a single file in the agent workspace and return line matches."""
+    resp = await core_client.client.post(
+        "/v1/skills/file-search/search",
+        json={
+            "agent_id": agent_id,
+            "path": path,
+            "query": query,
+            "scope": "agent",
+            "scope_id": agent_id,
+            "case_sensitive": case_sensitive,
+            "max_results": max_results,
+        },
+        headers=core_client._get_headers(),
+    )
+    if resp.status_code == 404:
+        raise WorkspaceNotFoundError(f"File not found: {path}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def read_workspace_file(
+    agent_id: str,
+    path: str,
+    core_client: CoreClient,
+    line_start: int = 1,
+    line_end: int | None = None
+) -> dict[str, Any]:
+    """Read a specific range of lines from a file in the agent workspace. Ideal for targeted reading of large files."""
+    return await file_read(agent_id, path, core_client, line_start=line_start, line_end=line_end)
+
+
+async def shared_file_read(
+agent_id: str, workspace_id: str, path: str, core_client: CoreClient, max_chars: int = 16000, line_start: int = 1, line_end: int | None = None) -> dict[str, Any]:
     """Read a file from a shared workspace."""
     resp = await core_client.client.post(
         "/v1/skills/shared-file-read/read",
@@ -491,6 +544,56 @@ SHARED_PROMOTE_FILE_WORKSPACE_DEF = {
                 "target_path": {"type": "string", "description": "Relative destination path in the shared workspace"},
             },
             "required": ["workspace_id", "source_path", "target_path"],
+        },
+    },
+}
+
+DESCRIBE_WORKSPACE_FILE_DEF = {
+    "type": "function",
+    "function": {
+        "name": "describe_workspace_file",
+        "description": _get_tool_desc("describe_workspace_file", "Provide structure and stats for a specific file in the agent workspace to aid navigation."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path to the file within the workspace"}
+            },
+            "required": ["path"],
+        },
+    },
+}
+
+SEARCH_WORKSPACE_FILE_DEF = {
+    "type": "function",
+    "function": {
+        "name": "search_workspace_file",
+        "description": _get_tool_desc("search_workspace_file", "Search for a regex or string within a single file in the agent workspace and return line matches."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path to the file within the workspace"},
+                "query": {"type": "string", "description": "Regex or string to search for"},
+                "case_sensitive": {"type": "boolean", "description": "Case-sensitive matching (default false)"},
+                "max_results": {"type": "integer", "description": "Maximum number of matches to return (default 100)"},
+            },
+            "required": ["path", "query"],
+        },
+    },
+}
+
+READ_WORKSPACE_FILE_DEF = {
+    "type": "function",
+    "function": {
+        "name": "read_workspace_file",
+        "description": _get_tool_desc("read_workspace_file", "Read a specific range of lines from a file in the agent workspace. Ideal for targeted reading of large files."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path to the file within the workspace"},
+                "line_start": {"type": "integer", "description": "Starting line number (1-based, default 1)"},
+                "line_end": {"type": "integer", "description": "Ending line number (optional)"},
+            },
+            "required": ["path"],
         },
     },
 }

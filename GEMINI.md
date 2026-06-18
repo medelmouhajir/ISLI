@@ -76,6 +76,7 @@ pytest
 ### 1. Architectural Integrity
 *   **Shared Blackboard (Protocol Mandate)**: Agents MUST NOT communicate directly. All coordination, delegation, and sub-task creation MUST happen through the Kanban board. This is enforced via the `system_prompt_template` protocol constraints.
 *   **Keeper First**: Use the Keeper for summarization and context injection to minimize latency and token costs on primary agent models.
+*   **Token Efficiency (Hybrid Spill)**: Agents use a Hybrid Threshold mechanism to spill large tool outputs to their workspace, preventing context bloat and enabling surgical data extraction via `file-search` and `file-describe`.
 *   **Rich Agent Identity**: All agents possess a unique name, description, and persona. This identity is stored in `isli-core` and automatically injected into the agent's context by the Keeper during every turn.
 *   **Resilience Modules**: Leverage built-in `isli_core` modules for `circuit_breaker`, `bulkhead`, `retry`, and `checkpoint` to ensure system stability.
 *   **Autonomous Skill Creation (Skill Smith)**: Specialized "Engineer" agents can expand system capabilities by generating, testing (AST-validated sandbox), and submitting new dynamic skills for review. All such additions are gated by the Kanban review process and tracked for usage hygiene.

@@ -23,17 +23,69 @@ logger = structlog.get_logger()
 
 # Default preferences for new users
 DEFAULT_CATEGORIES: dict[str, Any] = {
-    "agent_crash":      {"enabled": True,  "channels": ["in_app", "telegram", "web_push"], "priority": "critical"},
-    "task_completed":   {"enabled": True,  "channels": ["in_app", "telegram"], "priority": "high"},
-    "task_failed":      {"enabled": True,  "channels": ["in_app", "telegram", "web_push"], "priority": "high"},
-    "task_assigned":    {"enabled": True,  "channels": ["in_app"],           "priority": "high"},
-    "session_message":  {"enabled": True,  "channels": ["in_app", "web_push"], "priority": "high", "in_app_style": "badge_only"},
-    "agent_online":     {"enabled": True,  "channels": ["in_app"],           "priority": "normal"},
-    "agent_offline":    {"enabled": True,  "channels": ["in_app", "telegram", "web_push"], "priority": "high"},
-    "memory_write":     {"enabled": True,  "channels": ["in_app"],           "priority": "normal"},
-    "workspace_update": {"enabled": True,  "channels": ["in_app"],           "priority": "normal"},
-    "task_created":     {"enabled": True,  "channels": ["in_app"],           "priority": "normal"},
-    "system_digest":    {"enabled": True,  "channels": ["in_app", "telegram"], "priority": "low", "digest_window_minutes": 60},
+    "agent_crash": {
+        "enabled": True,
+        "channels": ["in_app", "telegram", "web_push"],
+        "priority": "critical",
+    },
+    "task_completed": {
+        "enabled": True,
+        "channels": ["in_app", "telegram"],
+        "priority": "high",
+    },
+    "task_failed": {
+        "enabled": True,
+        "channels": ["in_app", "telegram", "web_push"],
+        "priority": "high",
+    },
+    "task_assigned": {
+        "enabled": True,
+        "channels": ["in_app"],
+        "priority": "high",
+    },
+    "session_message": {
+        "enabled": True,
+        "channels": ["in_app", "web_push"],
+        "priority": "high",
+        "in_app_style": "badge_only",
+    },
+    "channel_message": {
+        "enabled": True,
+        "channels": ["in_app", "web_push"],
+        "priority": "high",
+        "in_app_style": "badge_only",
+    },
+    "agent_online": {
+        "enabled": True,
+        "channels": ["in_app"],
+        "priority": "normal",
+    },
+    "agent_offline": {
+        "enabled": True,
+        "channels": ["in_app", "telegram", "web_push"],
+        "priority": "high",
+    },
+    "memory_write": {
+        "enabled": True,
+        "channels": ["in_app"],
+        "priority": "normal",
+    },
+    "workspace_update": {
+        "enabled": True,
+        "channels": ["in_app"],
+        "priority": "normal",
+    },
+    "task_created": {
+        "enabled": True,
+        "channels": ["in_app"],
+        "priority": "normal",
+    },
+    "system_digest": {
+        "enabled": True,
+        "channels": ["in_app", "telegram"],
+        "priority": "low",
+        "digest_window_minutes": 60,
+    },
 }
 
 # Event types that should be accumulated into digests instead of immediate delivery.
@@ -90,7 +142,7 @@ class NotificationEngine:
         },
         "session:message": {
             "category": "high",
-            "title_template": "New message from ISLI",
+            "title_template": "New message{channel_suffix} from ISLI",
             "body_template": None,
             "recipients": "alert_target",
             "channels": ["in_app", "web_push"],
@@ -142,9 +194,16 @@ class NotificationEngine:
             return
 
         # Category-level check
-        cat_key = _event_category_key(event_type)
+        cat_key = _event_category_key(event_type, payload)
         cat_pref = prefs.get("categories", {}).get(cat_key, {})
-        if not cat_pref.get("enabled", True):
+        category_enabled = cat_pref.get("enabled", True)
+
+        # Channel messages are always recorded in the in-app activity ledger
+        # so the user never loses an inbound message entirely. The per-category
+        # toggle controls disruptive/external channels only.
+        always_in_app = cat_key == "channel_message"
+
+        if not category_enabled and not always_in_app:
             return
 
         # Quiet hours (skip for critical)
@@ -161,11 +220,15 @@ class NotificationEngine:
         # Low-priority digest accumulation
         if category == "low" and event_type in digest_eligible_events:
             from isli_core.notification.digest import accumulate_digest
+
             await accumulate_digest(user_id, event_type, payload)
             return
 
         # Deduplication (24h window for identical events)
-        dedup_key = f"{user_id}:{event_type}:{payload.get('task_id','')}:{payload.get('agent_id','')}:{_today()}"
+        dedup_key = (
+            f"{user_id}:{event_type}:"
+            f"{payload.get('task_id', '')}:{payload.get('agent_id', '')}:{_today()}"
+        )
 
         # Stage to Outbox for in_app delivery
         # We use the Outbox table for durability; delivery.py handles the actual insert + WS emit
@@ -187,6 +250,7 @@ class NotificationEngine:
                 # Deduplication: skip if identical notification exists today
                 if mapping.get("dedup") is not False:
                     from sqlalchemy import select as sa_select
+
                     dup_stmt = sa_select(Notification).where(
                         Notification.dedup_key == dedup_key,
                         Notification.dismissed_at.is_(None),
@@ -203,29 +267,36 @@ class NotificationEngine:
                 )
                 session.add(outbox)
 
-                # Stage external delivery if user has external channels enabled
-                external_channels = _external_channels_for_event(cat_pref)
-                if external_channels:
-                    for channel in external_channels:
-                        topic = "notification:external"
-                        if channel == "web_push":
-                            topic = "notification:web_push"
-                        
-                        ext_payload = {
-                            **outbox_payload,
-                            "channels": [channel],
-                        }
-                        ext_outbox = Outbox(
-                            topic=topic,
-                            payload=ext_payload,
-                            headers={"user_id": user_id, "category": category},
-                        )
-                        session.add(ext_outbox)
+                # Stage external delivery only when the category is explicitly enabled.
+                # For channel_message, disabling the category suppresses push/external
+                # noise while still leaving the drawer entry above.
+                if category_enabled:
+                    external_channels = _external_channels_for_event(cat_pref)
+                    if external_channels:
+                        for channel in external_channels:
+                            topic = "notification:external"
+                            if channel == "web_push":
+                                topic = "notification:web_push"
+
+                            ext_payload = {
+                                **outbox_payload,
+                                "channels": [channel],
+                            }
+                            ext_outbox = Outbox(
+                                topic=topic,
+                                payload=ext_payload,
+                                headers={"user_id": user_id, "category": category},
+                            )
+                            session.add(ext_outbox)
 
                 await session.commit()
-                logger.info("notification.staged", user_id=user_id, event_type=event_type, category=category)
+                logger.info(
+                    "notification.staged", user_id=user_id, event_type=event_type, category=category
+                )
         except Exception as exc:
-            logger.error("notification.stage_failed", user_id=user_id, event_type=event_type, error=str(exc))
+            logger.error(
+                "notification.stage_failed", user_id=user_id, event_type=event_type, error=str(exc)
+            )
 
     @staticmethod
     async def _resolve_recipients(
@@ -240,9 +311,8 @@ class NotificationEngine:
                     agent_id = payload.get("agent_id")
                     if agent_id:
                         from sqlalchemy import select as sa_select
-                        result = await session.execute(
-                            sa_select(Agent).where(Agent.id == agent_id)
-                        )
+
+                        result = await session.execute(sa_select(Agent).where(Agent.id == agent_id))
                         agent = result.scalar_one_or_none()
                         if agent and agent.user_id:
                             recipients.append(agent.user_id)
@@ -253,9 +323,8 @@ class NotificationEngine:
                         task_id = payload["task"].get("id")
                     if task_id:
                         from sqlalchemy import select as sa_select
-                        result = await session.execute(
-                            sa_select(Task).where(Task.id == task_id)
-                        )
+
+                        result = await session.execute(sa_select(Task).where(Task.id == task_id))
                         task = result.scalar_one_or_none()
                         if task:
                             recipients.append(task.created_by)
@@ -267,14 +336,15 @@ class NotificationEngine:
                         recipients.append(user_id)
                     elif agent_id:
                         from sqlalchemy import select as sa_select
-                        result = await session.execute(
-                            sa_select(Agent).where(Agent.id == agent_id)
-                        )
+
+                        result = await session.execute(sa_select(Agent).where(Agent.id == agent_id))
                         agent = result.scalar_one_or_none()
                         if agent and agent.user_id:
                             recipients.append(agent.user_id)
         except Exception as exc:
-            logger.error("notification.resolve_recipients_failed", event_type=event_type, error=str(exc))
+            logger.error(
+                "notification.resolve_recipients_failed", event_type=event_type, error=str(exc)
+            )
 
         return recipients
 
@@ -299,16 +369,23 @@ class NotificationEngine:
         try:
             async with get_db_session_manual() as session:
                 from sqlalchemy import select as sa_select
+
                 result = await session.execute(
-                    sa_select(NotificationPreference).where(NotificationPreference.user_id == user_id)
+                    sa_select(NotificationPreference).where(
+                        NotificationPreference.user_id == user_id
+                    )
                 )
                 row = result.scalar_one_or_none()
                 if row:
                     prefs = {
                         "global_enabled": row.global_enabled,
                         "quiet_hours_enabled": row.quiet_hours_enabled,
-                        "quiet_hours_start": row.quiet_hours_start.isoformat() if row.quiet_hours_start else None,
-                        "quiet_hours_end": row.quiet_hours_end.isoformat() if row.quiet_hours_end else None,
+                        "quiet_hours_start": row.quiet_hours_start.isoformat()
+                        if row.quiet_hours_start
+                        else None,
+                        "quiet_hours_end": row.quiet_hours_end.isoformat()
+                        if row.quiet_hours_end
+                        else None,
                         "timezone": row.timezone,
                         "quiet_hours_exceptions": row.quiet_hours_exceptions or [],
                         "categories": row.categories or DEFAULT_CATEGORIES,
@@ -327,7 +404,8 @@ class NotificationEngine:
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def _event_category_key(event_type: str) -> str:
+
+def _event_category_key(event_type: str, payload: dict[str, Any] | None = None) -> str:
     mapping = {
         "agent:crash": "agent_crash",
         "agent:offline": "agent_offline",
@@ -336,9 +414,13 @@ def _event_category_key(event_type: str) -> str:
         "task:failed": "task_failed",
         "task:assigned": "task_assigned",
         "task:context_failed": "agent_crash",  # treated as critical
-        "session:message": "session_message",
         "system:alert": "system_alert",
     }
+    if event_type == "session:message":
+        channel = (payload or {}).get("channel") if payload else None
+        if channel and channel != "web":
+            return "channel_message"
+        return "session_message"
     return mapping.get(event_type, event_type.replace(":", "_"))
 
 
@@ -380,7 +462,10 @@ def _render(mapping: dict[str, Any], payload: dict[str, Any]) -> tuple[str, str 
 
 
 def _flatten_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Extract scalar fields from payload and nested task dict for template rendering."""
+    """Extract scalar fields from payload and nested task dict for template rendering.
+
+    Also injects a human-readable ``channel_suffix`` for notification titles.
+    """
     flat: dict[str, Any] = dict(payload)
     if "task" in payload and isinstance(payload["task"], dict):
         for k, v in payload["task"].items():
@@ -388,6 +473,12 @@ def _flatten_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if "agent" in payload and isinstance(payload["agent"], dict):
         for k, v in payload["agent"].items():
             flat.setdefault(k, v)
+
+    channel = payload.get("channel")
+    if channel and channel != "web":
+        flat["channel_suffix"] = f" on {channel.capitalize()}"
+    else:
+        flat["channel_suffix"] = ""
     return flat
 
 
@@ -415,7 +506,11 @@ def _in_quiet_hours(prefs: dict[str, Any]) -> bool:
     if not start_str or not end_str:
         return False
     try:
-        start = datetime.strptime(start_str, "%H:%M:%S").time() if isinstance(start_str, str) else start_str
+        start = (
+            datetime.strptime(start_str, "%H:%M:%S").time()
+            if isinstance(start_str, str)
+            else start_str
+        )
         end = datetime.strptime(end_str, "%H:%M:%S").time() if isinstance(end_str, str) else end_str
     except Exception:
         return False

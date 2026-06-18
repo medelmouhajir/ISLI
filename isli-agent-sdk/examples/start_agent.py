@@ -64,7 +64,7 @@ async def main():
         turn_token_cap=data.get("turn_token_cap"),
         api_key=data.get("api_key"),
         api_base=data.get("api_base"),
-        heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "180")),
+        heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "600")),
     )
 
     runner = AgentRunner(config, core_url, admin_key=admin_key)

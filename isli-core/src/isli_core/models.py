@@ -1,14 +1,25 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, Float, Integer, String, Text, ForeignKey, DateTime, Index, func, CheckConstraint, Boolean
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -347,6 +358,9 @@ class Session(Base):
     routed_model_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     routed_model_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     session_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
+    room_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("rooms.id"), nullable=True
+    )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
@@ -354,6 +368,39 @@ class Session(Base):
         Index("ix_sessions_expires_at", "expires_at"),
         Index("ix_sessions_last_activity_at", "last_activity_at"),
         Index("ix_sessions_last_message_at", "last_message_at"),
+        Index("ix_sessions_room_id", "room_id"),
+    )
+
+
+class Room(Base):
+    __tablename__ = "rooms"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    channel: Mapped[str] = mapped_column(String(32), default="web", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    messages: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    agent_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    pins: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    room_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    last_activity_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=now_utc
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_rooms_user_id", "user_id"),
+        Index("ix_rooms_status", "status"),
+        Index("ix_rooms_last_activity_at", "last_activity_at"),
     )
 
 

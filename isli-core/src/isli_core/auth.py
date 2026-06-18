@@ -23,16 +23,24 @@ def verify_webhook_signature(channel: str, request: Request, body: bytes) -> boo
     return hmac.compare_digest(signature, expected)
 
 
-def create_internal_token(agent_id: str, scopes: list[str], expires_minutes: int = 60, iat: datetime | None = None) -> str:
+def create_internal_token(
+    agent_id: str,
+    scopes: list[str],
+    expires_minutes: int = 60,
+    iat: datetime | None = None,
+    extra_claims: dict[str, Any] | None = None,
+) -> str:
     settings = get_settings()
     now = iat if iat is not None else datetime.now(timezone.utc)
-    payload = {
+    payload: dict[str, Any] = {
         "sub": agent_id,
         "scopes": scopes,
         "iat": now,
         "exp": now + timedelta(minutes=expires_minutes),
         "type": "internal",
     }
+    if extra_claims:
+        payload.update(extra_claims)
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 

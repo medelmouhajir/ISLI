@@ -13,7 +13,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const PORT = process.env.PORT || 3001;
@@ -231,16 +231,21 @@ app.delete('/session/:agentId', requireAuth, async (req, res) => {
 });
 
 app.post('/send', requireAuth, async (req, res) => {
-    const { type, agentId, jid, text, audio_b64, caption } = req.body;
+    const { type, agentId, jid, text, audio_b64, caption, media_b64, mimetype, filename } = req.body;
     const sock = sessions.get(agentId);
 
     if (!sock) {
         return res.status(404).json({ error: 'Session not found' });
     }
 
+    function writeMediaTmp(ext) {
+        const name = filename || `isli_media_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`;
+        return path.join('/tmp', name);
+    }
+
     try {
         if (type === 'audio' && audio_b64) {
-            const tmpPath = path.join('/tmp', `isli_audio_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
+            const tmpPath = writeMediaTmp('.wav');
             try {
                 fs.writeFileSync(tmpPath, Buffer.from(audio_b64, 'base64'));
                 const sentMsg = await sock.sendMessage(jid, {
@@ -248,6 +253,35 @@ app.post('/send', requireAuth, async (req, res) => {
                     ptt: true,
                     caption: caption || undefined,
                 });
+                res.json({ success: true, messageId: sentMsg.key.id });
+            } finally {
+                try {
+                    fs.unlinkSync(tmpPath);
+                } catch (e) {
+                    // ignore cleanup errors
+                }
+            }
+        } else if (['image', 'video', 'document', 'audio'].includes(type) && media_b64) {
+            const ext = path.extname(filename || '') || (type === 'image' ? '.jpg' : type === 'video' ? '.mp4' : type === 'audio' ? '.mp3' : '.bin');
+            const tmpPath = writeMediaTmp(ext);
+            try {
+                fs.writeFileSync(tmpPath, Buffer.from(media_b64, 'base64'));
+                const msgPayload = {};
+                if (type === 'image') {
+                    msgPayload.image = { url: tmpPath };
+                } else if (type === 'video') {
+                    msgPayload.video = { url: tmpPath };
+                } else if (type === 'audio') {
+                    msgPayload.audio = { url: tmpPath };
+                    msgPayload.ptt = false;
+                } else {
+                    msgPayload.document = { url: tmpPath };
+                    msgPayload.fileName = filename || 'document';
+                }
+                if (caption) {
+                    msgPayload.caption = caption;
+                }
+                const sentMsg = await sock.sendMessage(jid, msgPayload);
                 res.json({ success: true, messageId: sentMsg.key.id });
             } finally {
                 try {

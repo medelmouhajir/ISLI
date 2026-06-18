@@ -26,8 +26,8 @@ export function StreamingMessageBubble({ text, agentPicture, agentName }: Stream
           <Bot className="w-4 h-4" />
         )}
       </div>
-      <div className="bg-bg-elevated border border-border-dim p-3 md:p-4 rounded-none">
-        <span className="text-sm leading-relaxed font-mono whitespace-pre-wrap text-text-primary">
+      <div className="bg-bg-elevated border border-border-dim p-3 md:p-4 rounded-none min-w-0 max-w-full">
+        <span className="text-sm leading-relaxed font-mono whitespace-pre-wrap text-text-primary break-all">
           {text}
           <span className="inline-block w-2 h-4 bg-accent-cyan animate-pulse ml-0.5 align-middle" />
         </span>

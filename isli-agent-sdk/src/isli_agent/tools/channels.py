@@ -37,6 +37,64 @@ async def send_message(
     return resp.json()
 
 
+def stage_reply_attachment(
+    runner: Any,
+    session_id: str,
+    path: str,
+    workspace_id: str | None = None,
+    caption: str | None = None,
+) -> dict[str, Any]:
+    """Stage a file from the agent's workspace or a shared workspace to be attached to the next session reply.
+
+    The file will be sent as an attachment when the agent finishes its current turn.
+    Call this tool once per file; up to 5 attachments are allowed per reply.
+    """
+    staged = {
+        "path": path,
+        "workspace_id": workspace_id,
+        "caption": caption,
+    }
+    runner._pending_attachments.setdefault(session_id, []).append(staged)
+    return {
+        "status": "staged",
+        "path": path,
+        "workspace_id": workspace_id,
+        "caption": caption,
+        "total_staged": len(runner._pending_attachments[session_id]),
+    }
+
+
+STAGE_REPLY_ATTACHMENT_DEF = {
+    "type": "function",
+    "x_isli_always_active": True,
+    "function": {
+        "name": "stage_reply_attachment",
+        "description": _get_tool_desc(
+            "stage_reply_attachment",
+            "Stage a file from the agent's workspace (or a shared workspace) to be returned as an attachment in the next reply to the user. Provide the workspace file path and an optional caption. Up to 5 attachments per reply.",
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Workspace file path, e.g. 'reports/summary.pdf'",
+                },
+                "workspace_id": {
+                    "type": "string",
+                    "description": "Optional shared workspace ID. If omitted, the agent's own workspace is used.",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional short caption shown with the attachment.",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+}
+
+
 SEND_MESSAGE_DEF = {
     "type": "function",
     "function": {

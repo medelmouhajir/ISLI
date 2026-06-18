@@ -14,6 +14,7 @@ from isli_core.routers import (
     model_management,
     notifications,
     prompts,
+    rooms,
     secrets,
     security,
     sessions,
@@ -80,6 +81,7 @@ v1.include_router(backups.router)
 v1.include_router(secrets.router)
 v1.include_router(prompts.router)
 v1.include_router(notifications.router)
+v1.include_router(rooms.router)
 v1.include_router(health_router)
 
 app.include_router(v1)

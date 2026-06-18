@@ -91,9 +91,18 @@ export interface ComponentPayload {
     | 'json_viewer'
     | 'status_timeline'
     | 'metric_grid'
+    | 'file_card'
   props: Record<string, unknown>
   action_id?: string
   text_fallback?: string
+}
+
+export interface MessageAttachment {
+  filename?: string
+  mime_type?: string
+  size_bytes?: number
+  caption?: string
+  download_url?: string
 }
 
 export interface Message {
@@ -105,6 +114,7 @@ export interface Message {
   payload?: Record<string, unknown>
   components?: ComponentPayload[]
   audio_url?: string
+  attachments?: MessageAttachment[]
 }
 
 export interface StreamingEvent {
@@ -139,6 +149,8 @@ export interface Session {
   journal?: string | null
   journal_updated_at?: string | null
   session_metadata?: Record<string, unknown> | null
+  room_id: string | null
+  deleted_at?: string | null
 }
 
 export interface SessionHistory {
@@ -347,6 +359,61 @@ export interface NotificationListResponse {
   unread_count: number
 }
 
+export interface RoomMessage {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  agent_id: string | null
+  agent_name: string | null
+  timestamp: string
+  parent_id: string | null
+  mentions?: string[]
+  components?: ComponentPayload[]
+  audio_url?: string
+  audio_ref?: string
+  attachments?: MessageAttachment[]
+}
+
+export interface PinItem {
+  message_id: string
+  agent_id: string | null
+  agent_name: string | null
+  preview: string
+  pinned_at: string
+}
+
+export interface Room {
+  id: string
+  name: string
+  user_id: string
+  channel: string
+  status: string
+  messages: RoomMessage[]
+  agent_ids: string[]
+  pins: PinItem[]
+  room_metadata: Record<string, unknown>
+  expires_at: string
+  last_activity_at: string | null
+  created_at: string
+  deleted_at: string | null
+}
+
+export interface RoomHistory {
+  room_id: string
+  name: string
+  agent_ids: string[]
+  messages: RoomMessage[]
+  pins: PinItem[]
+}
+
+export interface NotificationCategoryPreference {
+  enabled: boolean
+  channels: string[]
+  priority: string
+  in_app_style?: string
+  digest_window_minutes?: number
+}
+
 export interface NotificationPreferences {
   user_id: string
   global_enabled: boolean
@@ -355,6 +422,6 @@ export interface NotificationPreferences {
   quiet_hours_end: string | null
   timezone: string
   quiet_hours_exceptions: string[]
-  categories: Record<string, unknown>
+  categories: Record<string, NotificationCategoryPreference>
 }
 

@@ -1,4 +1,3 @@
-import pytest
 from isli_agent.runner import _normalize_provider
 
 def test_normalize_provider_google():
