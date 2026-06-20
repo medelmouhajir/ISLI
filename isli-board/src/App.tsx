@@ -22,6 +22,7 @@ import { AgentModelPage } from '@/components/AgentModelPage'
 import { AgentSecretsPage } from '@/components/AgentSecretsPage'
 import { AgentSkillsPage } from '@/components/AgentSkillsPage'
 import { AgentJournalsPage } from '@/components/AgentJournalsPage'
+import { AgentConfigPage } from '@/components/AgentConfigPage'
 import { SkillsStorePage } from '@/components/SkillsStorePage'
 import { WorkspacesPage } from '@/components/WorkspacesPage'
 import { WorkspaceDetailPage } from '@/components/WorkspaceDetailPage'
@@ -320,6 +321,7 @@ function AppContent() {
           <Route path="/agents/:id/model" element={<AgentModelPage />} />
           <Route path="/agents/:id/journals" element={<AgentJournalsPage />} />
           <Route path="/agents/:id/secrets" element={<AgentSecretsPage />} />
+          <Route path="/agents/:id/config" element={<AgentConfigPage />} />
 
           <Route path="/agents/:id/skills" element={<AgentSkillsPage />} />
           <Route path="/workspaces" element={<WorkspacesPage />} />

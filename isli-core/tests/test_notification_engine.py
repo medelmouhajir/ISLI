@@ -46,6 +46,33 @@ class TestFlattenPayload:
         flat = _flatten_payload({"message": "hello"})
         assert flat["channel_suffix"] == ""
 
+    def test_flatten_payload_session_messages_list(self):
+        payload = {
+            "channel": "telegram",
+            "user_id": "+12345",
+            "messages": [
+                {"role": "user", "content": "Hello user messages", "timestamp": "2026-06-19T20:00:00Z"}
+            ]
+        }
+        flat = _flatten_payload(payload)
+        assert flat["sender_name"] == "+12345"
+        assert flat["last_message_content"] == "Hello user messages"
+        assert flat["last_message_role"] == "user"
+
+    def test_flatten_payload_session_single_message(self):
+        payload = {
+            "channel": "whatsapp",
+            "user_id": "+54321",
+            "message": {
+                "role": "assistant",
+                "content": "Hi from agent",
+            }
+        }
+        flat = _flatten_payload(payload)
+        assert flat["sender_name"] == "+54321"
+        assert flat["last_message_content"] == "Hi from agent"
+        assert flat["last_message_role"] == "assistant"
+
 
 class TestExternalChannelsForEvent:
     def test_filters_in_app(self):

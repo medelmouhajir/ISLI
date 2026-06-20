@@ -27,7 +27,9 @@ class STTEngine:
         self.settings = get_settings()
 
     def _resolve_size(self, model_name: str) -> str:
-        """Resolve configured model name to faster-whisper size string."""
+        """Resolve configured model name to faster-whisper size string or local directory path."""
+        if model_name == "whisper-base-darija":
+            return f"{self.settings.models_dir}/whisper/whisper-base-darija"
         return _STT_MODEL_MAP.get(model_name, model_name.replace("whisper-", ""))
 
     def load(self, model_name: str) -> None:
@@ -75,6 +77,10 @@ class STTEngine:
         self.ensure_loaded(model_name)
         if self._model is None:
             raise RuntimeError("STT model not loaded")
+
+        # Override auto language detection for whisper-base-darija as it only supports Arabic/Darija script
+        if model_name == "whisper-base-darija" and language == "auto":
+            language = "ar"
 
         lang_hint = None if language == "auto" else language
 

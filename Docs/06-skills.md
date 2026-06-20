@@ -98,9 +98,9 @@ skill:
 | `promote-output` | Copy/move a file from a task attachment into a shared workspace | Task → shared scope promotion |
 | `speech-to-text` | Transcribe audio → text | Proxies to `isli-audio` via Core skill proxy |
 | `text-to-speech` | Synthesize text → audio (URL or base64) | Proxies to `isli-audio` via Core skill proxy; language-aware voice selection; can deliver to Telegram/WhatsApp/Board via `send_voice_message` SDK wrapper |
-| `test-skill` | Dry-run dynamic skill code | Transient sandbox; AST validated |
-| `register-skill` | Register a new dynamic skill | Triggers Kanban review gate |
-| `update-skill` | Update metadata of an existing dynamic skill | No review gate; preserves `usage_count` / `created_at` |
+| `test-skill` | Dry-run build a USR skill from the agent workspace | Validates `isli-skill.yaml` and Dockerfile; no container started |
+| `register-skill` | Install a USR skill from the agent workspace | Copies to `data/installed_skills/{id}`, builds, runs, probes `/health`; enforces per-agent ownership |
+| `update-skill` | Update an installed USR skill from the agent workspace | Clean sync, blue/green container swap, automatic rollback on probe failure |
 | `interactive-debugger` | Run code with breakpoints, variable inspection, and line-by-line trace | Batch trace via `sys.settrace()`; modes: `trace`, `breakpoints`, `run`; watch expressions; stdout/stdin capture |
 | `ui-components` | Render tables, cards, buttons, forms, JSON, timelines, metrics inline in chat | Inline in Core; Board renders React components; user interactions fire back as action messages (see Docs/13-immersive-chat-ui.md) |
 | `get-secret` | Retrieve a secure reference ID (`[[secret:NAME]]`) for a vault secret | Inline in Core; supports server-side injection into authorized tool fields |
@@ -203,17 +203,24 @@ Agent SDK → Core API (skill proxy) → isli-skills:8100/browse/* → Playwrigh
 - Volume: `browser-sessions:/data/browser-sessions`
 
 ### Autonomous Skill Creation (Skill Smith)
-ISLI enables agents (typically with an "Engineer" persona) to autonomously expand the system's capabilities. This follows a strict safety-first lifecycle:
+ISLI enables agents (typically with an "Engineer" persona) to autonomously expand the system's capabilities by scaffolding full **USR-compliant microservices** inside their own workspace. This replaces the legacy single-file AST sandbox with the Universal Skill Runtime lifecycle.
 
-1. **Design & Code**: The agent generates Python code defining an `async def run(payload: dict) -> dict:` function.
-2. **Dry-Run (`test-skill`)**: The code is sent to a transient sandbox in `isli-skills`. It undergoes **AST Validation** (blocking `os`, `sys`, etc.) and is executed with a test payload.
-3. **Registration (`register-skill`)**: Upon success, the agent registers the skill. This automatically:
-   - Saves the code to the agent's workspace.
-   - Creates a persistent entry in the skill registry.
-   - Moves the corresponding Kanban task to the **Review** column.
-4. **Update (`update-skill`)**: After a skill is registered, agents can update its metadata (`description`, `category`, `workspace_path`, `endpoint`, `health_endpoint`, `agent_id`) without triggering a new review cycle. The `usage_count` and `created_at` fields are preserved.
-5. **Human/Auditor Review**: The skill remains "Pending" until a human or an auditor agent approves the Kanban task.
-6. **Hot-Reload**: Once approved, Core emits a config event, and all relevant agents automatically sync the new tool into their toolbox.
+#### Lifecycle
+
+1. **Scaffold**: The agent creates a skill directory in its workspace containing:
+   - `isli-skill.yaml` — USR manifest (see schema above).
+   - `Dockerfile` — container definition.
+   - `main.py` (or any entrypoint) — HTTP service exposing `/health` and tool endpoints.
+2. **Dry-Run (`test-skill`)**: Core validates the manifest and runs a **dry-run Docker build** against the agent's workspace directory. No container is started. Errors are returned to the agent for iteration.
+3. **Registration (`register-skill`)**: Core reads `skill_id` from the manifest, copies the directory to `data/installed_skills/{skill_id}`, initializes or reuses a local git repository, builds the image, starts the container, and probes `/health`. On success it emits `skill:enabled` and agents auto-sync the new tools. The calling agent becomes the skill owner (`owner_agent_id`); subsequent registrations of the same `skill_id` by a different agent are rejected.
+4. **Update (`update-skill`)**: Core performs a **clean sync** from the agent's workspace (deleting stale files while preserving `.git`), commits the new state, builds a new image, and runs a **blue/green swap**. If the new container fails its health probe, the previous container remains active and the git repo is rolled back to the previous commit.
+
+#### Security & Isolation
+
+- **Path containment**: `workspace_path` is resolved inside the calling agent's workspace; traversal outside it is rejected.
+- **Ownership**: `skill_registry.owner_agent_id` records which agent created the skill. Only the owner (or admin) can register/update the same `skill_id`.
+- **Git history**: Every register/update commits the source, enabling rollback via `git reset --hard HEAD~1` or the admin `POST /v1/skills/{id}/rollback` endpoint.
+- **Probe failure handling**: Failed registrations set `status='error'` and stop the container. Failed updates keep the old container running and do not change the active version.
 
 ### Shell Execution (Sandbox) — Added 2026-06-07
 
@@ -251,39 +258,8 @@ result = await agent.shell_exec(command="ls -la && echo 'Ready'")
 
 ### Update Skill (`update-skill`) — Added 2026-06-03
 
-Agents can update metadata of an existing dynamic skill without triggering a review cycle or resetting usage telemetry.
+The legacy metadata-only update endpoint has been replaced by the USR workspace update flow described in the **Autonomous Skill Creation (Skill Smith)** section above. Agents now call `update_skill(workspace_path=...)` to perform a full source sync, rebuild, and blue/green container swap.
 
-**Endpoint:** `POST /v1/skills/update-skill/update` (proxied by Core to `isli-skills:8100/update`).
-
-**Request parameters:**
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | yes | Unique name of the skill to update |
-| `description` | string | no | New description |
-| `category` | string | no | New category (e.g., `web`, `content`, `engineering`) |
-| `workspace_path` | string | no | New relative path to the skill's `.py` file in the agent workspace |
-| `endpoint` | string | no | New HTTP endpoint URL |
-| `health_endpoint` | string | no | New health check URL |
-| `agent_id` | string | no | New owning agent ID |
-
-**Behavior:**
-- Returns `404` if the skill does not exist in the registry.
-- Only fields provided in the request are changed; omitted fields retain their current values.
-- `usage_count`, `created_at`, and `last_used_at` are **preserved**.
-- Persists to `/tmp/skill_registry.json` (or `$REGISTRY_FILE`).
-
-**SDK Usage:**
-```python
-from isli_agent import update_skill
-
-result = await update_skill(
-    name="csv-parser",
-    description="Parse CSV with header inference and type coercion",
-    category="content",
-    core_client=client
-)
-# Returns: {"status": "updated", "skill": { ... }}
-```
 
 ### Skill Hygiene & Janitor
 To prevent code rot, the system tracks usage telemetry:
@@ -436,6 +412,29 @@ All endpoints require `Authorization: Bearer {ADMIN_API_KEY}`.
 | `GET` | `/v1/skills/{id}/versions` | List available git tags |
 | `PATCH` | `/v1/skills/{id}` | Update `update_policy` or `source_ref` |
 | `GET` | `/v1/skills/{id}/logs` | **Optional** — stream last N lines of container logs |
+
+### Agent-Created Skills (Skill Smith) — Added 2026-06-18
+
+These endpoints are called by agents via the SDK. They accept either an agent JWT (`Authorization: Bearer {agent_token}`) or an internal service token (`X-Internal-Auth`) and require a `workspace_path` relative to the agent's own workspace.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/v1/skills/test-skill/test` | Dry-run Docker build from the agent workspace |
+| `POST` | `/v1/skills/register-skill/register` | Copy workspace skill to `data/installed_skills/{id}`, build, run, probe |
+| `POST` | `/v1/skills/update-skill/update` | Clean sync, blue/green swap, rollback on probe failure |
+
+**Request body:**
+```json
+{
+  "workspace_path": "skills/my-skill",
+  "agent_id": "agent-123"
+}
+```
+
+**Ownership model:**
+- The first successful registration sets `skill_registry.owner_agent_id`.
+- A second agent attempting to register the same `skill_id` receives `403`.
+- The owner can update its own skill; the update flow preserves the previous commit/image so it can roll back on failure.
 
 ### One-Click Installation Flow (Added 2026-06-12)
 
@@ -599,7 +598,7 @@ For programmatic or troubleshooting use, the two-step flow still works:
 
 ### Legacy Dynamic Skills (File-System Based)
 
-The previous file-system-based dynamic skill system (code stored in `data/installed_skills/` and `exec()`'d by `isli-skills`) is still supported for backward compatibility. It is managed by `DynamicSkillManager` and listed alongside DB-backed skills in `GET /v1/skills`.
+The previous single-file AST-based dynamic skill system (`/register`, `/update`, `/test` in `isli-skills:8100`) is **deprecated**. Those endpoints now return `410 Gone` and direct callers to the USR workspace endpoints in Core. Agents should use the **Skill Smith** workspace-to-USR flow described above to scaffold, test, register, and update full Dockerized microservices.
 
 ---
 

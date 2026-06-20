@@ -282,7 +282,7 @@ async def admin_activate(
     if req.slot == "stt":
         valid_sizes = {"tiny", "base", "small", "medium", "large-v3"}
         size = req.model_name.replace("whisper-", "")
-        if size not in valid_sizes:
+        if size not in valid_sizes and req.model_name != "whisper-base-darija":
             raise HTTPException(status_code=400, detail=f"Unknown STT model: {req.model_name}")
         # Pre-load so it's ready
         try:
@@ -311,7 +311,7 @@ async def admin_pull(
         # For STT, faster-whisper downloads on first use via load(). We just verify it's valid.
         valid_sizes = {"tiny", "base", "small", "medium", "large-v3"}
         size = req.model_name.replace("whisper-", "")
-        if size not in valid_sizes:
+        if size not in valid_sizes and req.model_name != "whisper-base-darija":
             raise HTTPException(status_code=400, detail=f"Unknown STT model: {req.model_name}")
         try:
             stt_engine.load(req.model_name)
@@ -381,6 +381,8 @@ async def list_models(auth: dict = Depends(require_internal_auth)):
             # faster-whisper creates subdirs like models--Systran--faster-whisper-...
             # We just report what sizes have been downloaded
             stt_models.append(f"whisper-{size}")
+        if os.path.exists(os.path.join(whisper_dir, "whisper-base-darija", "model.bin")):
+            stt_models.append("whisper-base-darija")
 
     tts_voices = []
     piper_dir = f"{settings.models_dir}/piper"

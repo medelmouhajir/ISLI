@@ -1,5 +1,7 @@
 """API tests for isli-skills endpoints."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 from httpx import AsyncClient
 
@@ -36,28 +38,33 @@ class TestSkillsAPI:
         assert data["skills"] == []
 
     @pytest.mark.asyncio
-    async def test_register_skill(self, client: AsyncClient):
+    async def test_register_skill_legacy_gone(self, client: AsyncClient):
         resp = await client.post("/skills", json={
             "name": "web-fetch",
             "endpoint": "http://localhost:8100",
             "health_endpoint": "http://localhost:8100/health",
             "description": "Fetch web pages",
         })
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["status"] == "registered"
-        assert data["skill"]["name"] == "web-fetch"
+        assert resp.status_code == 410
 
     @pytest.mark.asyncio
-    async def test_register_skill_duplicate(self, client: AsyncClient):
-        resp = await client.post("/skills", json={
-            "name": "web-fetch",
-            "endpoint": "http://localhost:8100",
-        })
-        assert resp.status_code == 409
+    async def test_update_skill_legacy_gone(self, client: AsyncClient):
+        resp = await client.post("/update", json={"name": "web-fetch"})
+        assert resp.status_code == 410
+
+    @pytest.mark.asyncio
+    async def test_test_skill_legacy_gone(self, client: AsyncClient):
+        resp = await client.post("/test", json={"code": "print(1)", "payload": {}})
+        assert resp.status_code == 410
 
     @pytest.mark.asyncio
     async def test_skill_health(self, client: AsyncClient):
+        from isli_skills.main import SKILL_REGISTRY
+        SKILL_REGISTRY["web-fetch"] = {
+            "name": "web-fetch",
+            "endpoint": "http://localhost:8100",
+            "type": "external",
+        }
         resp = await client.get("/skills/web-fetch/health")
         assert resp.status_code == 200
         data = resp.json()
@@ -71,10 +78,16 @@ class TestSkillsAPI:
 
     @pytest.mark.asyncio
     async def test_invoke_skill(self, client: AsyncClient):
+        from isli_skills.main import SKILL_REGISTRY
+        SKILL_REGISTRY["web-fetch"] = {
+            "name": "web-fetch",
+            "endpoint": "http://localhost:8100",
+            "type": "external",
+        }
         resp = await client.post("/skills/web-fetch/invoke", json={
             "action": "fetch",
             "payload": {"url": "https://example.com"},
-        })
+        }, headers={"X-Internal-Auth": "test-token"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["skill"] == "web-fetch"
@@ -85,19 +98,18 @@ class TestSkillsAPI:
         resp = await client.post("/skills/nonexistent/invoke", json={
             "action": "fetch",
             "payload": {},
-        })
+        }, headers={"X-Internal-Auth": "test-token"})
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_fetch(self, client: AsyncClient):
-        # We mock browse_url via a side effect if possible, but for a unit test
-        # we at least check that the endpoint exists and handles the request.
-        # Given the environment, actual playwright might not run.
-        # But we'll add the test for completeness.
+    async def test_fetch(self, client: AsyncClient, monkeypatch):
+        # Avoid a hard Playwright browser dependency in unit tests.
+        async_mock = AsyncMock(return_value={"url": "https://example.com", "mocked": True})
+        monkeypatch.setattr("isli_skills.main.browse_url", async_mock)
         resp = await client.post("/fetch", json={
             "url": "https://example.com",
             "agent_id": "test-agent"
         }, headers={"X-Internal-Auth": "test-token"})
-        # In this test environment, it might fail if auth is not mocked,
-        # but the request structure is correct.
-        assert resp.status_code in (200, 401, 500) 
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["url"] == "https://example.com"

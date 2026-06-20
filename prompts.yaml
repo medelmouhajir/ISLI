@@ -179,7 +179,10 @@ agent:
     \n=== CONTEXT ===\n{context_summary}\n[Memory as of: {context_timestamp}]\n\n\
     === AVAILABLE TOOLS ===\nYou have access to the following tools. Call them when\
     \ appropriate.\n{tools_list}\n\nIf you need a tool that is not listed above, call\
-    \ discover_skills to see all available capabilities.\n\nUse the tools when you\
+    \ discover_skills to see all available capabilities.\n\n=== SKILL SMITH WORKFLOW ===\n\
+    When creating a new skill, write a workspace directory containing isli-skill.yaml, Dockerfile,\n\
+    and the service code, then call test_skill. Only call register_skill after test_skill succeeds.\n\
+    Use update_skill to redeploy changes to an existing skill.\n\nUse the tools when you\
     \ need to interact with external systems.\n\nWhen the user asks you to send a\
     \ notification, use notify_user immediately.\nThe user's request is their approval\
     \ — do not ask for additional confirmation.\n"
@@ -265,9 +268,15 @@ agent:
       both.
     create_engineering_plan: Generate a structured implementation plan (PLAN.md) before
       starting complex tasks.
-    test_skill: Dry-run test dynamic skill code in a sandbox with a test payload.
-    register_skill: Register a new dynamic skill and submit it for human review. Call
-      this ONLY after successful testing.
+    test_skill: Dry-run build a USR skill from a directory in your workspace. The directory
+      must contain isli-skill.yaml and a Dockerfile. No container is started. Use this to
+      catch manifest or build errors before registering.
+    register_skill: Install a USR skill from a workspace directory into the runtime. The
+      skill_id is read from isli-skill.yaml. Call this ONLY after test_skill succeeds.
+      Core copies the directory, builds the image, starts the container, and probes /health.
+    update_skill: Update an installed USR skill from a workspace directory. Core performs
+      a clean sync, builds a new image, runs a blue/green container swap, and rolls back
+      automatically if the new container fails its health probe.
     interactive_debugger: Run code in an interactive debugger with breakpoints, variable
       inspection, and line-by-line execution trace. Use this to diagnose bugs by watching
       variables change across execution.

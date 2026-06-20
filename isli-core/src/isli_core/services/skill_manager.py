@@ -1,17 +1,17 @@
 import asyncio
+import contextlib
 import json
 import os
 import re
 import shutil
-import subprocess
 import time as _time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
 import structlog
 import yaml
-from packaging.version import Version as SemVer
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
@@ -20,12 +20,12 @@ from isli_core.db import get_db_session_manual
 from isli_core.event_manager import EventManager
 from isli_core.models import SkillRegistry, SkillRun
 from isli_core.redis_client import get_redis
-from isli_core.auth import create_internal_token
 
 logger = structlog.get_logger()
 
 
 # ── Manifest Schema ─────────────────────────────────────────────────────────
+
 
 class SkillToolManifest(BaseModel):
     name: str
@@ -67,9 +67,18 @@ class SkillManifest(BaseModel):
     @classmethod
     def _validate_category(cls, v: str) -> str:
         allowed = {
-            "web", "content", "workspace", "communication",
-            "memory", "kanban", "engineering", "audio",
-            "database", "git", "system", "custom",
+            "web",
+            "content",
+            "workspace",
+            "communication",
+            "memory",
+            "kanban",
+            "engineering",
+            "audio",
+            "database",
+            "git",
+            "system",
+            "custom",
         }
         if v not in allowed:
             raise ValueError(f"Category must be one of {allowed}")
@@ -77,6 +86,7 @@ class SkillManifest(BaseModel):
 
 
 # ── Legacy DynamicSkillManager (file-system based exec skills) ────────────────
+
 
 class DynamicSkillManager:
     def __init__(self):
@@ -103,11 +113,13 @@ class DynamicSkillManager:
             manifest_path = os.path.join(skill_dir, "skill.json")
             if os.path.exists(manifest_path):
                 try:
-                    with open(manifest_path, "r") as f:
+                    with open(manifest_path) as f:
                         meta = json.load(f)
                         new_skills[skill_id] = meta
                 except Exception as e:
-                    logger.error("skill_manager.load_manifest_failed", skill_id=skill_id, error=str(e))
+                    logger.error(
+                        "skill_manager.load_manifest_failed", skill_id=skill_id, error=str(e)
+                    )
             else:
                 new_skills[skill_id] = {
                     "name": skill_id,
@@ -134,6 +146,7 @@ class DynamicSkillManager:
 
         try:
             import importlib.util
+
             spec = importlib.util.spec_from_file_location(f"dynamic_skill_{skill_id}", main_py)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
@@ -146,6 +159,7 @@ class DynamicSkillManager:
 
 # ── SkillContainerManager (DB-backed external skill lifecycle) ──────────────
 
+
 class SkillContainerManager:
     """Manages external skills backed by DB registry + Docker containers."""
 
@@ -157,6 +171,7 @@ class SkillContainerManager:
         if self._use_docker:
             try:
                 import docker as docker_lib
+
                 self._docker = docker_lib.from_env()
                 logger.info("scm.docker_mode_enabled")
             except Exception as exc:
@@ -172,19 +187,24 @@ class SkillContainerManager:
         return self._git_locks[skill_id]
 
     @staticmethod
-    async def _git_cmd(skill_id: str, *args: str, cwd: str | None = None, timeout: float = 30.0) -> str:
+    async def _git_cmd(
+        skill_id: str, *args: str, cwd: str | None = None, timeout: float = 30.0
+    ) -> str:
         """Run a git command in a thread with timeout. Never blocks the event loop."""
         proc = await asyncio.create_subprocess_exec(
-            "git", *args,
+            "git",
+            *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
-            raise RuntimeError(f"git command timed out after {timeout}s for skill {skill_id}")
+            raise RuntimeError(
+                f"git command timed out after {timeout}s for skill {skill_id}"
+            ) from None
         if proc.returncode != 0:
             raise RuntimeError(f"git failed for skill {skill_id}: {stderr.decode().strip()}")
         return stdout.decode().strip()
@@ -204,7 +224,9 @@ class SkillContainerManager:
     # ── Blue/Green Probe ───────────────────────────────────────────────────
 
     @staticmethod
-    async def _probe_swap(skill_id: str, base_url: str, max_attempts: int = 12, interval: float = 2.5) -> dict[str, Any]:
+    async def _probe_swap(
+        skill_id: str, base_url: str, max_attempts: int = 12, interval: float = 2.5
+    ) -> dict[str, Any]:
         """Probe a container before declaring the swap safe.
         Total max time: 12 * 2.5 = 30 seconds.
         """
@@ -233,7 +255,7 @@ class SkillContainerManager:
             path = os.path.join(skill_dir, fname)
             if os.path.exists(path):
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
+                    with open(path, encoding="utf-8") as f:
                         text = f.read()
                     entries = []
                     for match in re.finditer(r"^##\s*\[(.+?)\]\s*-\s*(.+?)$", text, re.MULTILINE):
@@ -242,7 +264,7 @@ class SkillContainerManager:
                         # Capture following paragraph as message
                         start = match.end()
                         end_match = re.search(r"^##\s*\[", text[start:], re.MULTILINE)
-                        snippet = text[start:start + (end_match.start() if end_match else 400)]
+                        snippet = text[start : start + (end_match.start() if end_match else 400)]
                         message = " ".join(snippet.strip().splitlines()[:3])
                         entries.append({"version": version, "date": date, "message": message})
                     return entries[:20]
@@ -264,14 +286,65 @@ class SkillContainerManager:
     @staticmethod
     def _load_manifest(skill_dir: str) -> SkillManifest:
         path = SkillContainerManager._manifest_path(skill_dir)
-        with open(path, "r") as f:
-            raw = yaml.safe_load(f)
-        return SkillManifest.model_validate(raw)
+        try:
+            with open(path) as f:
+                raw = yaml.safe_load(f)
+            return SkillManifest.model_validate(raw)
+        except Exception as exc:
+            raise ValueError(f"Invalid skill manifest at {path}: {exc}") from exc
 
     @staticmethod
     def _skill_dir(skill_id: str) -> str:
         settings = get_settings()
         return os.path.join(settings.installed_skills_path, skill_id)
+
+    @staticmethod
+    def _resolve_agent_workspace_path(agent_id: str, relative_path: str) -> Path:
+        """Resolve a relative path inside an agent's workspace, blocking traversal.
+
+        Mirrors the logic in isli_workspace.sandbox.resolve_path so Core can
+        validate agent-provided paths without a cross-package import.
+        """
+        settings = get_settings()
+        root = Path(settings.workspace_base_path) / "agents" / agent_id
+        root.mkdir(parents=True, exist_ok=True)
+        target = (root / (relative_path or ".")).resolve()
+        try:
+            if not target.is_relative_to(root.resolve()):
+                raise PermissionError(f"Path traversal blocked: {target}")
+        except AttributeError:
+            # Python < 3.9 fallback
+            if not str(target).startswith(str(root.resolve())):
+                raise PermissionError(f"Path traversal blocked: {target}") from None
+        return target
+
+    @staticmethod
+    def _clean_sync(source: Path, target: Path) -> None:
+        """Replace target contents with source, preserving the target .git directory."""
+        if target.exists():
+            for entry in target.iterdir():
+                if entry.name == ".git":
+                    continue
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+        shutil.copytree(
+            source,
+            target,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(".git", ".gitignore"),
+        )
+
+    async def _git_commit_skill(self, skill_id: str, skill_dir: str, message: str) -> None:
+        """Stage all changes and create a commit, ignoring empty-commit errors."""
+        await self._git_cmd(skill_id, "add", "-A", cwd=skill_dir)
+        try:
+            await self._git_cmd(skill_id, "commit", "-m", message, cwd=skill_dir)
+        except RuntimeError as exc:
+            if "nothing to commit" in str(exc).lower() or "empty commit" in str(exc).lower():
+                return
+            raise
 
     # ── DB helpers ─────────────────────────────────────────────────────────
 
@@ -327,6 +400,7 @@ class SkillContainerManager:
                 "previous_image_tag": s.previous_image_tag,
                 "changelog": s.changelog or [],
                 "last_checked_at": s.last_checked_at.isoformat() if s.last_checked_at else None,
+                "owner_agent_id": s.owner_agent_id,
             }
         return out
 
@@ -338,7 +412,9 @@ class SkillContainerManager:
 
     # ── Install ────────────────────────────────────────────────────────────
 
-    async def install_from_git(self, skill_id: str, git_url: str, installed_by: str | None = None) -> SkillRegistry:
+    async def install_from_git(
+        self, skill_id: str, git_url: str, installed_by: str | None = None
+    ) -> SkillRegistry:
         """Clone repo, validate manifest, insert into DB. Does NOT start container."""
         skill_dir = self._skill_dir(skill_id)
 
@@ -350,12 +426,16 @@ class SkillContainerManager:
         logger.info("scm.install_cloning", skill_id=skill_id, url=git_url)
         async with self._git_lock(skill_id):
             await self._git_cmd(skill_id, "clone", git_url, skill_dir, timeout=60.0)
-            commit_sha = await self._git_cmd(skill_id, "rev-parse", "HEAD", cwd=skill_dir, timeout=10.0)
+            commit_sha = await self._git_cmd(
+                skill_id, "rev-parse", "HEAD", cwd=skill_dir, timeout=10.0
+            )
 
         # 3. Validate manifest
         manifest = self._load_manifest(skill_dir)
         if manifest.id != skill_id:
-            raise ValueError(f"Manifest id '{manifest.id}' does not match requested skill_id '{skill_id}'")
+            raise ValueError(
+                f"Manifest id '{manifest.id}' does not match requested skill_id '{skill_id}'"
+            )
 
         # 4. Build base_url from manifest
         port = manifest.runtime.get("port", 8500)
@@ -405,8 +485,482 @@ class SkillContainerManager:
                 db.add(skill)
             await db.commit()
 
-        logger.info("scm.install_success", skill_id=skill_id, version=manifest.version, commit=commit_sha)
+        logger.info(
+            "scm.install_success", skill_id=skill_id, version=manifest.version, commit=commit_sha
+        )
         return existing or skill  # type: ignore[return-value]
+
+    async def install_from_workspace(
+        self,
+        skill_id: str | None,
+        source_dir: str,
+        owner_agent_id: str,
+        installed_by: str | None = None,
+    ) -> SkillRegistry:
+        """Install a skill created in an agent workspace, then build/run/probe it.
+
+        Used by the agent-facing `register-skill` tool. The source directory is
+        copied into `data/installed_skills/{skill_id}`, a local git repository is
+        initialised for rollback support, and the container lifecycle is started.
+        """
+        # 1. Validate manifest and resolve skill_id
+        manifest = self._load_manifest(source_dir)
+        if skill_id is None:
+            skill_id = manifest.id
+        elif manifest.id != skill_id:
+            raise ValueError(
+                f"Manifest id '{manifest.id}' does not match requested skill_id '{skill_id}'"
+            )
+
+        skill_dir = self._skill_dir(skill_id)
+
+        # 2. Ownership check
+        async with get_db_session_manual() as db:
+            result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+            existing = result.scalar_one_or_none()
+            if existing and existing.owner_agent_id and existing.owner_agent_id != owner_agent_id:
+                raise PermissionError(
+                    f"Skill '{skill_id}' is owned by agent '{existing.owner_agent_id}'"
+                )
+
+        # 3. Copy source into installed skills directory, preserving any existing .git
+        if os.path.exists(skill_dir):
+            # Remove non-git contents so retries start clean without destroying history
+            for entry in Path(skill_dir).iterdir():
+                if entry.name == ".git":
+                    continue
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+        shutil.copytree(
+            source_dir,
+            skill_dir,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(".git", ".gitignore"),
+        )
+
+        # 4. Ensure local git repository exists and record the initial state
+        async with self._git_lock(skill_id):
+            git_dir = os.path.join(skill_dir, ".git")
+            if not os.path.isdir(git_dir):
+                await self._git_cmd(skill_id, "init", cwd=skill_dir, timeout=10.0)
+                await self._git_cmd(
+                    skill_id, "config", "user.email", "agent@isli.local", cwd=skill_dir, timeout=5.0
+                )
+                await self._git_cmd(
+                    skill_id, "config", "user.name", "ISLI Agent", cwd=skill_dir, timeout=5.0
+                )
+            await self._git_commit_skill(
+                skill_id, skill_dir, f"Install {skill_id} from agent workspace"
+            )
+            commit_sha = await self._git_cmd(
+                skill_id, "rev-parse", "HEAD", cwd=skill_dir, timeout=10.0
+            )
+
+        # 5. Upsert DB row with ownership
+        port = manifest.runtime.get("port", 8500)
+        base_url = (
+            f"http://skill-{skill_id}:{port}" if self._use_docker else f"http://localhost:{port}"
+        )
+
+        async with get_db_session_manual() as db:
+            result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+            skill = result.scalar_one_or_none()
+            if skill:
+                skill.name = manifest.name
+                skill.description = manifest.description
+                skill.version = manifest.version
+                skill.author = manifest.author
+                skill.category = manifest.category
+                skill.manifest = manifest.model_dump()
+                skill.base_url = base_url
+                skill.status = "pending"
+                skill.owner_agent_id = owner_agent_id
+                skill.installed_by = installed_by or skill.installed_by or owner_agent_id
+                skill.source_url = None
+                skill.source_ref = "main"
+                skill.installed_commit_sha = commit_sha
+                skill.previous_version = None
+                skill.previous_commit_sha = None
+                skill.previous_image_tag = None
+            else:
+                skill = SkillRegistry(
+                    id=skill_id,
+                    name=manifest.name,
+                    description=manifest.description,
+                    version=manifest.version,
+                    author=manifest.author,
+                    category=manifest.category,
+                    manifest=manifest.model_dump(),
+                    base_url=base_url,
+                    status="pending",
+                    owner_agent_id=owner_agent_id,
+                    installed_by=installed_by or owner_agent_id,
+                    source_url=None,
+                    source_ref="main",
+                    installed_commit_sha=commit_sha,
+                )
+                db.add(skill)
+            await db.commit()
+
+        # 6. Build/run via standard enable path
+        try:
+            await self.enable(skill_id)
+        except Exception as exc:
+            logger.error("scm.workspace_install_enable_failed", skill_id=skill_id, error=str(exc))
+            async with get_db_session_manual() as db:
+                result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+                skill = result.scalar_one_or_none()
+                if skill:
+                    skill.status = "error"
+                    skill.last_probe_status = "error"
+                    skill.last_probe_result = {"error": str(exc)}
+                    skill.last_probe_at = datetime.now(timezone.utc)
+                await db.commit()
+            raise RuntimeError(f"Failed to enable skill {skill_id}: {exc}") from exc
+
+        # Native dev has no real container to probe; enable() already marked active.
+        if not self._use_docker:
+            async with get_db_session_manual() as db:
+                result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+                skill = result.scalar_one_or_none()
+            await EventManager.emit(
+                "skill:enabled",
+                {
+                    "skill_id": skill_id,
+                    "skill_name": skill.name if skill else skill_id,
+                    "category": skill.category if skill else "custom",
+                    "tools": manifest.model_dump().get("tools", []),
+                },
+            )
+            logger.info(
+                "scm.workspace_install_success",
+                skill_id=skill_id,
+                version=manifest.version,
+                commit=commit_sha,
+            )
+            return skill  # type: ignore[return-value]
+
+        # 7. Probe with retry loop (max 30s)
+        probe_result = await self._probe_swap(skill_id, base_url)
+        if not probe_result["ok"]:
+            logger.error(
+                "scm.workspace_install_probe_failed",
+                skill_id=skill_id,
+                error=probe_result.get("error"),
+            )
+            await self.disable(skill_id)
+            async with get_db_session_manual() as db:
+                result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+                skill = result.scalar_one_or_none()
+                if skill:
+                    skill.status = "error"
+                    skill.last_probe_status = "error"
+                    skill.last_probe_result = probe_result
+                    skill.last_probe_at = datetime.now(timezone.utc)
+                await db.commit()
+            raise RuntimeError(
+                f"Health probe failed for skill {skill_id}: {probe_result.get('error')}"
+            )
+
+        # 8. Persist success
+        async with get_db_session_manual() as db:
+            result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+            skill = result.scalar_one_or_none()
+            if skill:
+                skill.status = "active"
+                skill.last_probe_status = "healthy"
+                skill.last_probe_result = probe_result.get("data")
+                skill.last_probe_at = datetime.now(timezone.utc)
+            await db.commit()
+
+        await EventManager.emit(
+            "skill:enabled",
+            {
+                "skill_id": skill_id,
+                "skill_name": skill.name,
+                "category": skill.category,
+                "tools": manifest.model_dump().get("tools", []),
+            },
+        )
+
+        logger.info(
+            "scm.workspace_install_success",
+            skill_id=skill_id,
+            version=manifest.version,
+            commit=commit_sha,
+        )
+        return skill  # type: ignore[return-value]
+
+    async def test_build(self, source_dir: str) -> dict[str, Any]:
+        """Validate a workspace skill manifest and run a dry-run Docker build."""
+        manifest = self._load_manifest(source_dir)
+        skill_id = manifest.id
+
+        if not self._use_docker:
+            return {
+                "success": True,
+                "skill_id": skill_id,
+                "manifest_valid": True,
+                "docker_available": False,
+                "note": "Docker unavailable in native dev mode; manifest validation only.",
+            }
+
+        image_tag = f"isli/skill-{skill_id}:test"
+        logger.info("scm.test_build", skill_id=skill_id, source_dir=source_dir)
+        try:
+            await asyncio.to_thread(
+                self._docker.images.build,
+                path=source_dir,
+                tag=image_tag,
+                rm=True,
+                nocache=False,
+                forcerm=True,
+            )
+            return {
+                "success": True,
+                "skill_id": skill_id,
+                "manifest_valid": True,
+                "docker_available": True,
+                "image_tag": image_tag,
+            }
+        except Exception as exc:
+            logger.error("scm.test_build_failed", skill_id=skill_id, error=str(exc))
+            return {
+                "success": False,
+                "skill_id": skill_id,
+                "manifest_valid": True,
+                "docker_available": True,
+                "error": str(exc),
+            }
+
+    async def update_from_workspace(
+        self,
+        skill_id: str | None,
+        source_dir: str,
+        owner_agent_id: str,
+    ) -> SkillRegistry:
+        """Update a workspace-installed skill with a clean sync and blue/green swap.
+
+        The old container stays running until the new container passes its health
+        probe. On failure the new container is removed, the git repo is rolled back
+        to the previous commit, and the original container remains active.
+        """
+        manifest = self._load_manifest(source_dir)
+        if skill_id is None:
+            skill_id = manifest.id
+
+        if not await self._acquire_skill_lock(skill_id, ttl=180):
+            raise RuntimeError("Update already in progress for this skill")
+
+        try:
+            skill = await self._get_skill(skill_id)
+            if not skill:
+                raise ValueError(f"Skill '{skill_id}' not found")
+            if skill.owner_agent_id and skill.owner_agent_id != owner_agent_id:
+                raise PermissionError(
+                    f"Skill '{skill_id}' is owned by agent '{skill.owner_agent_id}'"
+                )
+
+            if manifest.id != skill_id:
+                raise ValueError(
+                    f"Manifest id '{manifest.id}' does not match skill_id '{skill_id}'"
+                )
+
+            skill_dir = self._skill_dir(skill_id)
+            if not os.path.isdir(skill_dir):
+                raise ValueError(f"Skill directory '{skill_dir}' missing")
+
+            # Save rollback metadata from the currently-running version
+            prev_version = skill.version
+            prev_commit = skill.installed_commit_sha
+            prev_image = f"isli/skill-{skill_id}:{prev_version or 'latest'}"
+            new_version = manifest.version or "latest"
+            new_image_tag = f"isli/skill-{skill_id}:{new_version}"
+
+            # Clean sync: keep .git, replace everything else
+            self._clean_sync(Path(source_dir), Path(skill_dir))
+
+            # Commit the new state so we can roll back to the previous commit
+            async with self._git_lock(skill_id):
+                await self._git_commit_skill(
+                    skill_id, skill_dir, f"Update {skill_id} from agent workspace"
+                )
+                new_commit = await self._git_cmd(
+                    skill_id, "rev-parse", "HEAD", cwd=skill_dir, timeout=10.0
+                )
+
+            port = manifest.runtime.get("port", 8500)
+            old_container_name = f"skill-{skill_id}"
+            next_container_name = f"skill-{skill_id}-next"
+
+            if not self._use_docker:
+                # Native dev: update DB only, no container swap
+                async with get_db_session_manual() as db:
+                    result = await db.execute(
+                        select(SkillRegistry).where(SkillRegistry.id == skill_id)
+                    )
+                    row = result.scalar_one_or_none()
+                    if row:
+                        row.previous_version = prev_version
+                        row.previous_commit_sha = prev_commit
+                        row.previous_image_tag = prev_image
+                        row.version = new_version
+                        row.installed_commit_sha = new_commit
+                        row.status = "active"
+                        row.last_probe_status = "healthy"
+                    await db.commit()
+                await EventManager.emit(
+                    "skill:updated",
+                    {"skill_id": skill_id, "version": new_version, "status": "active"},
+                )
+                return row  # type: ignore[return-value]
+
+            # Docker mode: keep old container running, build and run next
+            logger.info("scm.workspace_update_building", skill_id=skill_id, image=new_image_tag)
+            try:
+                await asyncio.to_thread(
+                    self._docker.images.build,
+                    path=skill_dir,
+                    tag=new_image_tag,
+                    rm=True,
+                    forcerm=True,
+                )
+            except Exception as exc:
+                logger.error("scm.workspace_update_build_failed", skill_id=skill_id, error=str(exc))
+                # Roll back git to previous commit
+                async with self._git_lock(skill_id):
+                    try:
+                        await self._git_cmd(
+                            skill_id, "reset", "--hard", "HEAD~1", cwd=skill_dir, timeout=10.0
+                        )
+                    except Exception as git_exc:
+                        logger.warning(
+                            "scm.workspace_update_build_git_rollback_failed",
+                            skill_id=skill_id,
+                            error=str(git_exc),
+                        )
+                raise RuntimeError(f"Docker build failed for skill {skill_id}: {exc}") from exc
+
+            next_container: Any = None
+            try:
+                next_container = await asyncio.to_thread(
+                    self._docker.containers.run,
+                    new_image_tag,
+                    name=next_container_name,
+                    network=get_settings().skill_network,
+                    detach=True,
+                    environment={
+                        "PORT": str(port),
+                        "JWT_SECRET": get_settings().jwt_secret,
+                        "LOG_LEVEL": "info",
+                    },
+                    labels={"isli.skill.id": skill_id, "isli.managed": "true"},
+                    restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
+                )
+                next_base_url = f"http://{next_container_name}:{port}"
+            except Exception as exc:
+                logger.error("scm.workspace_update_run_failed", skill_id=skill_id, error=str(exc))
+                raise RuntimeError(f"Docker run failed for skill {skill_id}: {exc}") from exc
+
+            probe_result = await self._probe_swap(skill_id, next_base_url)
+            if not probe_result["ok"]:
+                logger.error(
+                    "scm.workspace_update_probe_failed",
+                    skill_id=skill_id,
+                    error=probe_result.get("error"),
+                )
+                # Remove failed next container
+                try:
+                    await asyncio.to_thread(next_container.stop, timeout=10)
+                    await asyncio.to_thread(next_container.remove, force=True)
+                except Exception:
+                    pass
+                # Roll back git to previous commit
+                async with self._git_lock(skill_id):
+                    try:
+                        await self._git_cmd(
+                            skill_id, "reset", "--hard", "HEAD~1", cwd=skill_dir, timeout=10.0
+                        )
+                    except Exception as git_exc:
+                        logger.warning(
+                            "scm.workspace_update_probe_git_rollback_failed",
+                            skill_id=skill_id,
+                            error=str(git_exc),
+                        )
+
+                # Record probe error but leave status active because old container is still running
+                async with get_db_session_manual() as db:
+                    result = await db.execute(
+                        select(SkillRegistry).where(SkillRegistry.id == skill_id)
+                    )
+                    row = result.scalar_one_or_none()
+                    if row:
+                        row.last_probe_status = "error"
+                        row.last_probe_result = probe_result
+                        row.last_probe_at = datetime.now(timezone.utc)
+                    await db.commit()
+                raise RuntimeError(
+                    f"Probe failed for updated skill {skill_id}: {probe_result.get('error')}"
+                )
+
+            # Swap succeeded: stop old container and rename next
+            logger.info(
+                "scm.workspace_update_swap_succeeded", skill_id=skill_id, new_version=new_version
+            )
+            try:
+                old_containers = await asyncio.to_thread(
+                    self._docker.containers.list,
+                    all=True,
+                    filters={"name": old_container_name},
+                )
+                for c in old_containers:
+                    if c.labels.get("isli.skill.id") == skill_id:
+                        await asyncio.to_thread(c.stop, timeout=10)
+                        await asyncio.to_thread(c.remove, force=True)
+            except Exception as exc:
+                logger.warning(
+                    "scm.workspace_update_old_stop_warning", skill_id=skill_id, error=str(exc)
+                )
+
+            try:
+                await asyncio.to_thread(next_container.rename, old_container_name)
+            except Exception as exc:
+                logger.warning(
+                    "scm.workspace_update_rename_warning", skill_id=skill_id, error=str(exc)
+                )
+
+            async with get_db_session_manual() as db:
+                result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+                row = result.scalar_one_or_none()
+                if row:
+                    row.previous_version = prev_version
+                    row.previous_commit_sha = prev_commit
+                    row.previous_image_tag = prev_image
+                    row.version = new_version
+                    row.installed_commit_sha = new_commit
+                    row.status = "active"
+                    row.last_probe_status = "healthy"
+                    row.last_probe_result = probe_result.get("data")
+                    row.last_probe_at = datetime.now(timezone.utc)
+
+                run = SkillRun(
+                    skill_id=skill_id,
+                    container_id=next_container.id,
+                    container_name=old_container_name,
+                    status="running",
+                    started_at=datetime.now(timezone.utc),
+                )
+                db.add(run)
+                await db.commit()
+
+            await EventManager.emit(
+                "skill:updated", {"skill_id": skill_id, "version": new_version, "status": "active"}
+            )
+            return row  # type: ignore[return-value]
+        finally:
+            await self._release_skill_lock(skill_id)
 
     # ── Enable / Build / Run ───────────────────────────────────────────────
 
@@ -423,6 +977,7 @@ class SkillContainerManager:
         host_port: int | None = None
         if not self._use_docker:
             import socket
+
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("", 0))
                 host_port = s.getsockname()[1]
@@ -506,7 +1061,10 @@ class SkillContainerManager:
                     db.add(run)
                     skill.status = "active"
                     skill.last_probe_status = "healthy"
-                    skill.last_probe_result = {"container_id": container.id, "container_name": container_name}
+                    skill.last_probe_result = {
+                        "container_id": container.id,
+                        "container_name": container_name,
+                    }
                     skill.last_probe_at = datetime.now(timezone.utc)
                 await db.commit()
         except Exception as exc:
@@ -558,7 +1116,9 @@ class SkillContainerManager:
                 skill.status = "disabled"
 
             result2 = await db.execute(
-                select(SkillRun).where(SkillRun.skill_id == skill_id, SkillRun.status.in_(["running", "pending"]))
+                select(SkillRun).where(
+                    SkillRun.skill_id == skill_id, SkillRun.status.in_(["running", "pending"])
+                )
             )
             for run in result2.scalars().all():
                 run.status = "stopped"
@@ -578,7 +1138,9 @@ class SkillContainerManager:
         if self._use_docker:
             try:
                 image_tag = f"isli/skill-{skill_id}"
-                images = await asyncio.to_thread(self._docker.images.list, filters={"reference": image_tag})
+                images = await asyncio.to_thread(
+                    self._docker.images.list, filters={"reference": image_tag}
+                )
                 for img in images:
                     await asyncio.to_thread(self._docker.images.remove, img.id, force=True)
             except Exception as exc:
@@ -607,7 +1169,9 @@ class SkillContainerManager:
                 resp.raise_for_status()
                 data = resp.json()
                 async with get_db_session_manual() as db:
-                    result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+                    result = await db.execute(
+                        select(SkillRegistry).where(SkillRegistry.id == skill_id)
+                    )
                     skill = result.scalar_one_or_none()
                     if skill:
                         skill.last_probe_status = "healthy"
@@ -643,7 +1207,9 @@ class SkillContainerManager:
                     skill_id, "ls-remote", skill.source_url, source_ref, timeout=10.0
                 )
             except RuntimeError as exc:
-                logger.warning("scm.check_update_ls_remote_failed", skill_id=skill_id, error=str(exc))
+                logger.warning(
+                    "scm.check_update_ls_remote_failed", skill_id=skill_id, error=str(exc)
+                )
                 raise RuntimeError(f"Failed to check remote: {exc}") from exc
 
             parts = remote_out.split()
@@ -654,7 +1220,9 @@ class SkillContainerManager:
             if skill.installed_commit_sha == latest_commit:
                 # No change — just update last_checked_at
                 async with get_db_session_manual() as db:
-                    result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+                    result = await db.execute(
+                        select(SkillRegistry).where(SkillRegistry.id == skill_id)
+                    )
                     row = result.scalar_one_or_none()
                     if row:
                         row.last_checked_at = datetime.now(timezone.utc)
@@ -676,8 +1244,15 @@ class SkillContainerManager:
                 if os.path.exists(tmp_dir):
                     shutil.rmtree(tmp_dir, ignore_errors=True)
                 await self._git_cmd(
-                    skill_id, "clone", "--depth", "1", "--branch", source_ref,
-                    skill.source_url, tmp_dir, timeout=30.0
+                    skill_id,
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    source_ref,
+                    skill.source_url,
+                    tmp_dir,
+                    timeout=30.0,
                 )
                 manifest = self._load_manifest(tmp_dir)
                 changelog = self._parse_changelog(tmp_dir)
@@ -708,7 +1283,9 @@ class SkillContainerManager:
 
     # ── Versioning: Update ───────────────────────────────────────────────────
 
-    async def update(self, skill_id: str, target_version: str | None = None, force: bool = False) -> SkillRegistry:
+    async def update(
+        self, skill_id: str, target_version: str | None = None, force: bool = False
+    ) -> SkillRegistry:
         """Pull new source, build new image, blue/green swap containers."""
         if not await self._acquire_skill_lock(skill_id, ttl=120):
             raise RuntimeError("Update already in progress for this skill")
@@ -726,7 +1303,9 @@ class SkillContainerManager:
             # Resolve target ref
             target_ref = source_ref
             if target_version:
-                target_ref = target_version if target_version.startswith("v") else f"v{target_version}"
+                target_ref = (
+                    target_version if target_version.startswith("v") else f"v{target_version}"
+                )
 
             # Save rollback state
             prev_version = skill.version
@@ -739,33 +1318,51 @@ class SkillContainerManager:
                     await self._git_cmd(
                         skill_id, "fetch", "origin", target_ref, cwd=skill_dir, timeout=30.0
                     )
-                    await self._git_cmd(skill_id, "checkout", target_ref, cwd=skill_dir, timeout=30.0)
+                    await self._git_cmd(
+                        skill_id, "checkout", target_ref, cwd=skill_dir, timeout=30.0
+                    )
                     # For branch refs, checkout alone leaves the local branch stale.
                     # Hard-reset to the fetched remote tip so the source actually advances.
                     is_tag = target_ref.startswith("v") or target_ref.startswith("refs/tags/")
                     if not is_tag:
                         await self._git_cmd(
-                            skill_id, "reset", "--hard", f"origin/{target_ref}",
-                            cwd=skill_dir, timeout=30.0,
+                            skill_id,
+                            "reset",
+                            "--hard",
+                            f"origin/{target_ref}",
+                            cwd=skill_dir,
+                            timeout=30.0,
                         )
                 else:
                     if os.path.exists(skill_dir):
                         shutil.rmtree(skill_dir, ignore_errors=True)
                     await self._git_cmd(
-                        skill_id, "clone", "--branch", target_ref, "--single-branch",
-                        skill.source_url, skill_dir, timeout=60.0
+                        skill_id,
+                        "clone",
+                        "--branch",
+                        target_ref,
+                        "--single-branch",
+                        skill.source_url,
+                        skill_dir,
+                        timeout=60.0,
                     )
-                new_commit = await self._git_cmd(skill_id, "rev-parse", "HEAD", cwd=skill_dir, timeout=10.0)
+                new_commit = await self._git_cmd(
+                    skill_id, "rev-parse", "HEAD", cwd=skill_dir, timeout=10.0
+                )
 
             manifest = self._load_manifest(skill_dir)
             if manifest.id != skill_id:
-                raise ValueError(f"Manifest id '{manifest.id}' does not match skill_id '{skill_id}'")
+                raise ValueError(
+                    f"Manifest id '{manifest.id}' does not match skill_id '{skill_id}'"
+                )
             new_version = manifest.version or "latest"
 
             # Native dev: just update DB, no container swap
             if not self._use_docker:
                 async with get_db_session_manual() as db:
-                    result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+                    result = await db.execute(
+                        select(SkillRegistry).where(SkillRegistry.id == skill_id)
+                    )
                     row = result.scalar_one_or_none()
                     if row:
                         row.previous_version = prev_version
@@ -776,9 +1373,10 @@ class SkillContainerManager:
                         row.status = "active"
                         row.last_probe_status = "healthy"
                     await db.commit()
-                await EventManager.emit("skill:updated", {
-                    "skill_id": skill_id, "version": new_version, "status": "active"
-                })
+                await EventManager.emit(
+                    "skill:updated",
+                    {"skill_id": skill_id, "version": new_version, "status": "active"},
+                )
                 return row  # type: ignore[return-value]
 
             # Docker mode: blue/green swap
@@ -791,9 +1389,7 @@ class SkillContainerManager:
             if prev_version:
                 rollback_tag = f"isli/skill-{skill_id}:rollback-{_time.time():.0f}"
                 try:
-                    await asyncio.to_thread(
-                        self._docker.images.get, prev_image
-                    )
+                    await asyncio.to_thread(self._docker.images.get, prev_image)
                     # Image exists — tag it
                     img = await asyncio.to_thread(self._docker.images.get, prev_image)
                     await asyncio.to_thread(img.tag, rollback_tag)
@@ -819,10 +1415,8 @@ class SkillContainerManager:
             except Exception as exc:
                 logger.error("scm.update_build_failed", skill_id=skill_id, error=str(exc))
                 # Attempt to restart old container
-                try:
+                with contextlib.suppress(Exception):
                     await self.enable(skill_id)
-                except Exception:
-                    pass
                 raise RuntimeError(f"Docker build failed for skill {skill_id}: {exc}") from exc
 
             # Run next container on the shared skill network
@@ -846,34 +1440,34 @@ class SkillContainerManager:
                 next_base_url = f"http://{next_container_name}:{port}"
             except Exception as exc:
                 logger.error("scm.update_run_failed", skill_id=skill_id, error=str(exc))
-                try:
+                with contextlib.suppress(Exception):
                     await self.enable(skill_id)
-                except Exception:
-                    pass
                 raise RuntimeError(f"Docker run failed for skill {skill_id}: {exc}") from exc
 
             # Probe next container
             probe_result = await self._probe_swap(skill_id, next_base_url)
             if not probe_result["ok"]:
-                logger.error("scm.update_probe_failed", skill_id=skill_id, error=probe_result["error"])
+                logger.error(
+                    "scm.update_probe_failed", skill_id=skill_id, error=probe_result["error"]
+                )
                 # Stop next container, restart old
-                try:
+                with contextlib.suppress(Exception):
                     await asyncio.to_thread(next_container.stop, timeout=10)
                     await asyncio.to_thread(next_container.remove, force=True)
-                except Exception:
-                    pass
-                try:
+                with contextlib.suppress(Exception):
                     await self.enable(skill_id)
-                except Exception:
-                    pass
                 async with get_db_session_manual() as db:
-                    result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+                    result = await db.execute(
+                        select(SkillRegistry).where(SkillRegistry.id == skill_id)
+                    )
                     row = result.scalar_one_or_none()
                     if row:
                         row.status = "error"
                         row.last_probe_status = "error"
                     await db.commit()
-                raise RuntimeError(f"Probe failed for updated skill {skill_id}: {probe_result['error']}")
+                raise RuntimeError(
+                    f"Probe failed for updated skill {skill_id}: {probe_result['error']}"
+                )
 
             # Swap succeeded: stop old container (already disabled), rename next
             logger.info("scm.update_swap_succeeded", skill_id=skill_id, new_version=new_version)
@@ -907,9 +1501,9 @@ class SkillContainerManager:
                 db.add(run)
                 await db.commit()
 
-            await EventManager.emit("skill:updated", {
-                "skill_id": skill_id, "version": new_version, "status": "active"
-            })
+            await EventManager.emit(
+                "skill:updated", {"skill_id": skill_id, "version": new_version, "status": "active"}
+            )
             return row  # type: ignore[return-value]
         finally:
             await self._release_skill_lock(skill_id)
@@ -936,17 +1530,25 @@ class SkillContainerManager:
             # Checkout previous commit under git lock
             async with self._git_lock(skill_id):
                 await self._git_cmd(skill_id, "checkout", prev_commit, cwd=skill_dir, timeout=30.0)
-                current_commit = await self._git_cmd(skill_id, "rev-parse", "HEAD", cwd=skill_dir, timeout=10.0)
+                current_commit = await self._git_cmd(
+                    skill_id, "rev-parse", "HEAD", cwd=skill_dir, timeout=10.0
+                )
                 if current_commit != prev_commit:
-                    raise RuntimeError(f"Rollback checkout failed: expected {prev_commit}, got {current_commit}")
+                    raise RuntimeError(
+                        f"Rollback checkout failed: expected {prev_commit}, got {current_commit}"
+                    )
 
             manifest = self._load_manifest(skill_dir)
             if manifest.id != skill_id:
-                raise ValueError(f"Manifest id '{manifest.id}' does not match skill_id '{skill_id}'")
+                raise ValueError(
+                    f"Manifest id '{manifest.id}' does not match skill_id '{skill_id}'"
+                )
 
             if not self._use_docker:
                 async with get_db_session_manual() as db:
-                    result = await db.execute(select(SkillRegistry).where(SkillRegistry.id == skill_id))
+                    result = await db.execute(
+                        select(SkillRegistry).where(SkillRegistry.id == skill_id)
+                    )
                     row = result.scalar_one_or_none()
                     if row:
                         row.version = prev_version
@@ -956,9 +1558,10 @@ class SkillContainerManager:
                         row.previous_image_tag = None
                         row.status = "active"
                     await db.commit()
-                await EventManager.emit("skill:updated", {
-                    "skill_id": skill_id, "version": prev_version, "status": "active"
-                })
+                await EventManager.emit(
+                    "skill:updated",
+                    {"skill_id": skill_id, "version": prev_version, "status": "active"},
+                )
                 return row  # type: ignore[return-value]
 
             # Docker rollback
@@ -987,7 +1590,9 @@ class SkillContainerManager:
                 # Probe via the container's Docker DNS name on the skill network.
                 next_base_url = f"http://{next_container_name}:{port}"
             except Exception as exc:
-                raise RuntimeError(f"Docker run failed during rollback for skill {skill_id}: {exc}") from exc
+                raise RuntimeError(
+                    f"Docker run failed during rollback for skill {skill_id}: {exc}"
+                ) from exc
 
             probe_result = await self._probe_swap(skill_id, next_base_url)
             if not probe_result["ok"]:
@@ -996,7 +1601,9 @@ class SkillContainerManager:
                     await asyncio.to_thread(next_container.remove, force=True)
                 except Exception:
                     pass
-                raise RuntimeError(f"Probe failed during rollback for skill {skill_id}: {probe_result['error']}")
+                raise RuntimeError(
+                    f"Probe failed during rollback for skill {skill_id}: {probe_result['error']}"
+                )
 
             try:
                 await asyncio.to_thread(next_container.rename, old_container_name)
@@ -1027,9 +1634,9 @@ class SkillContainerManager:
                 db.add(run)
                 await db.commit()
 
-            await EventManager.emit("skill:updated", {
-                "skill_id": skill_id, "version": prev_version, "status": "active"
-            })
+            await EventManager.emit(
+                "skill:updated", {"skill_id": skill_id, "version": prev_version, "status": "active"}
+            )
             return row  # type: ignore[return-value]
         finally:
             await self._release_skill_lock(skill_id)
@@ -1047,8 +1654,12 @@ class SkillContainerManager:
         rollback_tag = skill.previous_image_tag
         prefix = f"isli/skill-{skill_id}:"
         try:
-            images = await asyncio.to_thread(self._docker.images.list, filters={"reference": prefix})
-            sorted_images = sorted(images, key=lambda img: img.attrs.get("Created", ""), reverse=True)
+            images = await asyncio.to_thread(
+                self._docker.images.list, filters={"reference": prefix}
+            )
+            sorted_images = sorted(
+                images, key=lambda img: img.attrs.get("Created", ""), reverse=True
+            )
             protected = {active_tag}
             if rollback_tag:
                 protected.add(rollback_tag)
@@ -1066,6 +1677,7 @@ class SkillContainerManager:
 
 
 # ── Singleton façade that merges both managers ──────────────────────────────
+
 
 class _UnifiedSkillManager:
     """Exposes legacy DynamicSkillManager API while adding DB-backed external skills."""
@@ -1099,7 +1711,9 @@ class _UnifiedSkillManager:
         return await self._container.get_registry()
 
     # Container lifecycle passthroughs
-    async def install_from_git(self, skill_id: str, git_url: str, installed_by: str | None = None) -> SkillRegistry:
+    async def install_from_git(
+        self, skill_id: str, git_url: str, installed_by: str | None = None
+    ) -> SkillRegistry:
         return await self._container.install_from_git(skill_id, git_url, installed_by)
 
     async def enable(self, skill_id: str) -> None:
@@ -1120,7 +1734,9 @@ class _UnifiedSkillManager:
     async def check_update(self, skill_id: str) -> dict[str, Any]:
         return await self._container.check_update(skill_id)
 
-    async def update(self, skill_id: str, target_version: str | None = None, force: bool = False) -> SkillRegistry:
+    async def update(
+        self, skill_id: str, target_version: str | None = None, force: bool = False
+    ) -> SkillRegistry:
         return await self._container.update(skill_id, target_version, force)
 
     async def rollback(self, skill_id: str) -> SkillRegistry:
@@ -1128,6 +1744,31 @@ class _UnifiedSkillManager:
 
     async def cleanup_old_images(self, skill_id: str, keep_last: int = 2) -> None:
         return await self._container.cleanup_old_images(skill_id, keep_last)
+
+    def resolve_workspace_path(self, agent_id: str, relative_path: str) -> Path:
+        return self._container._resolve_agent_workspace_path(agent_id, relative_path)
+
+    async def install_from_workspace(
+        self,
+        skill_id: str | None,
+        source_dir: str,
+        owner_agent_id: str,
+        installed_by: str | None = None,
+    ) -> SkillRegistry:
+        return await self._container.install_from_workspace(
+            skill_id, source_dir, owner_agent_id, installed_by
+        )
+
+    async def test_build(self, source_dir: str) -> dict[str, Any]:
+        return await self._container.test_build(source_dir)
+
+    async def update_from_workspace(
+        self,
+        skill_id: str | None,
+        source_dir: str,
+        owner_agent_id: str,
+    ) -> SkillRegistry:
+        return await self._container.update_from_workspace(skill_id, source_dir, owner_agent_id)
 
 
 skill_manager = _UnifiedSkillManager()

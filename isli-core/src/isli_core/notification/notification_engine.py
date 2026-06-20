@@ -142,8 +142,8 @@ class NotificationEngine:
         },
         "session:message": {
             "category": "high",
-            "title_template": "New message{channel_suffix} from ISLI",
-            "body_template": None,
+            "title_template": "New message{channel_suffix} from {sender_name}",
+            "body_template": "{last_message_content}",
             "recipients": "alert_target",
             "channels": ["in_app", "web_push"],
         },
@@ -473,6 +473,24 @@ def _flatten_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if "agent" in payload and isinstance(payload["agent"], dict):
         for k, v in payload["agent"].items():
             flat.setdefault(k, v)
+
+    # Extract session message details if present
+    messages = payload.get("messages", [])
+    if messages and isinstance(messages, list):
+        latest = messages[-1]
+        if isinstance(latest, dict):
+            flat["last_message_content"] = latest.get("content", "")
+            flat["last_message_role"] = latest.get("role", "")
+    elif "message" in payload and isinstance(payload["message"], dict):
+        latest = payload["message"]
+        flat["last_message_content"] = latest.get("content", "")
+        flat["last_message_role"] = latest.get("role", "")
+
+    flat.setdefault("last_message_content", "")
+    flat.setdefault("last_message_role", "user")
+
+    sender_name = payload.get("user_id") or "User"
+    flat["sender_name"] = sender_name
 
     channel = payload.get("channel")
     if channel and channel != "web":

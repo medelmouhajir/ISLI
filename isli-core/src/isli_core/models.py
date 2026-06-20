@@ -698,6 +698,9 @@ class SkillRegistry(Base):
     last_probe_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     last_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     installed_by: Mapped[str | None] = mapped_column(String(64))
+    owner_agent_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False)
     # Versioning fields
@@ -717,6 +720,7 @@ class SkillRegistry(Base):
         Index("ix_skill_registry_status", "status"),
         Index("ix_skill_registry_category", "category"),
         Index("ix_skill_registry_update_policy", "update_policy"),
+        Index("ix_skill_registry_owner_agent_id", "owner_agent_id"),
     )
 
 

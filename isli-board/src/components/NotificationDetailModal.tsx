@@ -1,10 +1,11 @@
-import { Calendar, Hash, Bot, Layers, Check, Trash2, X } from 'lucide-react'
+import { Calendar, Hash, Bot, Layers, Check, Trash2, X, ExternalLink } from 'lucide-react'
 import { Modal } from '@/components/ui/Modal'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { JsonViewer } from '@/components/ui/registry/JsonViewer'
 import { cn } from '@/lib/utils'
 import type { NotificationItem } from '@/types'
+import { useNavigate } from 'react-router-dom'
 
 interface NotificationDetailModalProps {
   open: boolean
@@ -28,6 +29,8 @@ export function NotificationDetailModal({
   onDismiss,
   onClose,
 }: NotificationDetailModalProps) {
+  const navigate = useNavigate()
+
   if (!notification) return null
 
   const config = categoryConfig[notification.category] || categoryConfig.normal
@@ -148,6 +151,40 @@ export function NotificationDetailModal({
         </div>
         
         <div className="grid grid-cols-2 sm:flex sm:items-center gap-3">
+          {notification.session_id && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                navigate(`/chats?session=${notification.session_id}`)
+                onClose()
+              }}
+              className={cn(
+                "h-10 sm:h-9 text-[10px] font-mono-data uppercase tracking-widest rounded-none",
+                "border border-accent-cyan/40 bg-accent-cyan/5 text-accent-cyan hover:bg-accent-cyan hover:text-black transition-all",
+                "col-span-2 sm:col-span-1"
+              )}
+            >
+              <ExternalLink className="w-3.5 h-3.5 mr-2" /> Go_To_Session
+            </Button>
+          )}
+          {notification.task_id && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                navigate(`/kanban?task=${notification.task_id}`)
+                onClose()
+              }}
+              className={cn(
+                "h-10 sm:h-9 text-[10px] font-mono-data uppercase tracking-widest rounded-none",
+                "border border-accent-cyan/40 bg-accent-cyan/5 text-accent-cyan hover:bg-accent-cyan hover:text-black transition-all",
+                "col-span-2 sm:col-span-1"
+              )}
+            >
+              <ExternalLink className="w-3.5 h-3.5 mr-2" /> Go_To_Task
+            </Button>
+          )}
           {isUnread && (
             <Button
               variant="secondary"

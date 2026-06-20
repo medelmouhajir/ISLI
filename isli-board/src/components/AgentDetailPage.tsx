@@ -33,7 +33,6 @@ import type { Agent } from '@/types'
 
 function buildForm(agent: Agent | null, allAgents: Agent[]): Record<string, unknown> {
   if (!agent) return {}
-  const config = agent.config ?? {}
   const validPeerIds = new Set(allAgents.filter(a => !a.deleted_at).map(a => a.id))
   const known_agent_ids: string[] = (agent.known_agent_ids || []).filter(id => validPeerIds.has(id))
   return {
@@ -42,7 +41,6 @@ function buildForm(agent: Agent | null, allAgents: Agent[]): Record<string, unkn
     persona: agent.persona ?? '',
     known_agent_ids,
     channels: [...agent.channels],
-    config: JSON.stringify(config, null, 2),
   }
 }
 
@@ -164,7 +162,6 @@ export function AgentDetailPage() {
   }
 
   const [form, setForm] = useState<Record<string, unknown>>({})
-  const [jsonError, setJsonError] = useState<string | null>(null)
   const [savingSection, setSavingSection] = useState<string | null>(null)
   const [restarting, setRestarting] = useState(false)
   const [confirmModal, setConfirmModal] = useState<{
@@ -201,28 +198,12 @@ export function AgentDetailPage() {
     return sortedCurrent.some((id, i) => id !== sortedOriginal[i])
   }, [form, agent])
 
-  const advancedDirty = useMemo(() => {
-    if (!agent) return false
-    try {
-      const current = JSON.stringify(
-        JSON.parse(String(form.config || '{}')),
-        null,
-        2
-      )
-      const original = JSON.stringify(agent.config || {}, null, 2)
-      return current !== original
-    } catch {
-      return true
-    }
-  }, [form, agent])
-
-  const isAnyDirty = useMemo(() => overviewDirty || peersDirty || advancedDirty, [overviewDirty, peersDirty, advancedDirty])
+  const isAnyDirty = useMemo(() => overviewDirty || peersDirty, [overviewDirty, peersDirty])
   const lastLoadedId = useRef<string | undefined>(undefined)
 
   useEffect(() => {
     if (agent && (id !== lastLoadedId.current || !isAnyDirty)) {
       setForm(buildForm(agent, agents))
-      setJsonError(null)
       lastLoadedId.current = id
     }
   }, [agent, agents, id, isAnyDirty])
@@ -241,15 +222,6 @@ export function AgentDetailPage() {
     })
   }, [])
 
-  const handleJsonBlur = useCallback(() => {
-    try {
-      JSON.parse(String(form.config || '{}'))
-      setJsonError(null)
-    } catch (e) {
-      setJsonError(e instanceof Error ? e.message : 'Invalid JSON')
-    }
-  }, [form.config])
-
   // ── Per-section save handlers ──────────────────────────────────────────────
 
   const saveOverview = () => {
@@ -264,21 +236,6 @@ export function AgentDetailPage() {
       { id: agent.id, payload },
       { onSettled: () => setSavingSection(null) }
     )
-  }
-
-  const saveAdvanced = () => {
-    if (!agent) return
-    try {
-      const config = JSON.parse(String(form.config || '{}'))
-      setJsonError(null)
-      setSavingSection('advanced')
-      updateAgent.mutate(
-        { id: agent.id, payload: { config } },
-        { onSettled: () => setSavingSection(null) }
-      )
-    } catch (e) {
-      setJsonError(e instanceof Error ? e.message : 'Invalid JSON')
-    }
   }
 
   // ── Per-section reset handlers ─────────────────────────────────────────────
@@ -313,15 +270,6 @@ export function AgentDetailPage() {
       ...prev,
       known_agent_ids: [...(agent.known_agent_ids || [])],
     }))
-  }
-
-  const resetAdvanced = () => {
-    if (!agent) return
-    setForm((prev) => ({
-      ...prev,
-      config: JSON.stringify(agent.config || {}, null, 2),
-    }))
-    setJsonError(null)
   }
 
   const performDelete = async () => {
@@ -535,6 +483,17 @@ export function AgentDetailPage() {
                   <span className="text-sm font-bold text-text-primary group-hover:text-accent-cyan">MODEL_STRATEGY</span>
                 </div>
               </button>
+
+              <button
+                onClick={() => navigate(`/agents/${id}/config`)}
+                className="bg-bg-base hover:bg-accent-cyan/5 p-6 flex flex-col gap-3 group transition-all"
+              >
+                <FileJson className="w-5 h-5 text-text-muted group-hover:text-accent-cyan" />
+                <div className="flex flex-col text-left">
+                  <span className="text-[10px] text-text-muted tracking-widest font-bold">SYSTEM</span>
+                  <span className="text-sm font-bold text-text-primary group-hover:text-accent-cyan">RAW_CONFIG</span>
+                </div>
+              </button>
             </div>
           </section>
 
@@ -552,171 +511,137 @@ export function AgentDetailPage() {
                   <div className="h-px bg-border-dim w-full" />
                 </div>
 
-                <div className="p-8 border border-border-bright bg-bg-surface space-y-8">
-                  {/* Avatar Upload */}
-                  <div className="flex flex-col items-center gap-4 pb-8 border-b border-border-dim">
-                    <div className="relative group">
-                      <div className="w-32 h-32 bg-bg-elevated border-2 border-border-dim overflow-hidden flex items-center justify-center relative">
-                        {agent.picture ? (
-                          <img 
-                            src={`/api/v1/blobs/${agent.picture}`} 
-                            alt={agent.name} 
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <Bot className="w-12 h-12 text-text-muted opacity-20" />
-                        )}
+                <div className="p-8 border border-border-bright bg-bg-surface">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Left Panel: Profile Info / Telemetry Badge */}
+                    <div className="lg:col-span-1 flex flex-col items-center justify-between border-b lg:border-b-0 lg:border-r border-border-dim pb-8 lg:pb-0 lg:pr-8 gap-6">
+                      <div className="w-full flex flex-col items-center text-center space-y-4">
+                        <div className="relative group">
+                          <div className="w-32 h-32 bg-bg-elevated border border-border-bright overflow-hidden flex items-center justify-center relative shadow-inner">
+                            {agent.picture ? (
+                              <img 
+                                src={`/api/v1/blobs/${agent.picture}`} 
+                                alt={agent.name} 
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <Bot className="w-12 h-12 text-text-muted opacity-25" />
+                            )}
+                            
+                            <label className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
+                              <Camera className="w-6 h-6 text-white mb-2" />
+                              <span className="text-[10px] text-white font-bold uppercase tracking-widest">
+                                {uploadingPicture ? 'UPLOADING...' : 'CHANGE_IMAGE'}
+                              </span>
+                              <input 
+                                type="file" 
+                                className="hidden" 
+                                accept="image/*" 
+                                onChange={handleUploadPicture}
+                                disabled={uploadingPicture}
+                              />
+                            </label>
+                          </div>
+                          
+                          {uploadingPicture && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-bg-surface/50">
+                              <div className="w-6 h-6 border-2 border-accent-cyan/20 border-t-accent-cyan rounded-full animate-spin" />
+                            </div>
+                          )}
+                        </div>
                         
-                        <label className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
-                          <Camera className="w-6 h-6 text-white mb-2" />
-                          <span className="text-[10px] text-white font-bold uppercase tracking-widest">
-                            {uploadingPicture ? 'UPLOADING...' : 'CHANGE_IMAGE'}
-                          </span>
-                          <input 
-                            type="file" 
-                            className="hidden" 
-                            accept="image/*" 
-                            onChange={handleUploadPicture}
-                            disabled={uploadingPicture}
-                          />
-                        </label>
+                        <div className="space-y-1">
+                          <div className="text-sm font-bold text-text-primary uppercase tracking-wider">{agent.name}</div>
+                          <div className="text-[9px] text-text-muted uppercase tracking-[0.2em]">NODE_IDENTICON_v1.0</div>
+                        </div>
                       </div>
-                      
-                      {uploadingPicture && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-bg-surface/50">
-                          <div className="w-6 h-6 border-2 border-accent-cyan/20 border-t-accent-cyan rounded-full animate-spin" />
+
+                      {/* Read-only system metrics / telemetry */}
+                      <div className="w-full space-y-4 pt-6 border-t border-border-dim/50">
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[9px] text-text-muted uppercase tracking-widest font-bold">Node Address (ID)</span>
+                          <span className="text-[11px] text-text-secondary font-mono truncate select-all">{agent.id}</span>
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[9px] text-text-muted uppercase tracking-widest font-bold">Initialization Date</span>
+                          <span className="text-[11px] text-text-secondary tabular-nums font-mono">{new Date(agent.created_at).toLocaleString()}</span>
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[9px] text-text-muted uppercase tracking-widest font-bold">Last Synced</span>
+                          <span className="text-[11px] text-text-secondary tabular-nums font-mono">{new Date(agent.updated_at).toLocaleString()}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Right Panel: Fields Form */}
+                    <div className="lg:col-span-2 space-y-6 flex flex-col justify-between h-full">
+                      <div className="space-y-6">
+                        <div className="space-y-2">
+                          <Label className="text-[10px] tracking-widest text-text-muted uppercase font-bold">Display Name</Label>
+                          <Input
+                            value={String(form.name || '')}
+                            onChange={(e) => setField('name', e.target.value)}
+                            placeholder="Enter agent name"
+                            className="bg-bg-base border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12 focus:ring-0 focus:outline-none transition-all"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-[10px] tracking-widest text-text-muted uppercase font-bold">Description</Label>
+                          <Textarea
+                            value={String(form.description || '')}
+                            onChange={(e) => setField('description', e.target.value)}
+                            placeholder="What is the primary purpose of this agent?"
+                            rows={3}
+                            className="bg-bg-base border-border-bright focus:border-accent-cyan text-text-primary rounded-none resize-none p-4 focus:ring-0 focus:outline-none transition-all"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-[10px] tracking-widest text-text-muted uppercase font-bold">Behavioral Persona</Label>
+                          <Textarea
+                            value={String(form.persona || '')}
+                            onChange={(e) => setField('persona', e.target.value)}
+                            placeholder="Define the agent's personality, tone, and specific instructions..."
+                            rows={8}
+                            className="bg-bg-base border-border-bright focus:border-accent-cyan text-text-primary rounded-none resize-none p-4 leading-relaxed focus:ring-0 focus:outline-none transition-all"
+                          />
+                        </div>
+                      </div>
+
+                      {overviewDirty && (
+                        <div className="pt-6 border-t border-border-dim flex justify-end gap-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            onClick={resetOverview}
+                            disabled={savingSection === 'overview'}
+                            className="text-text-muted hover:text-text-primary rounded-none px-6 font-bold text-xs tracking-widest"
+                          >
+                            DISCARD
+                          </Button>
+                          <Button
+                            type="button"
+                            onClick={saveOverview}
+                            disabled={savingSection === 'overview'}
+                            className="bg-accent-cyan text-black hover:opacity-90 rounded-none px-8 font-bold text-xs tracking-widest"
+                          >
+                            {savingSection === 'overview' ? 'SYNCING...' : 'COMMIT_CHANGES'}
+                          </Button>
                         </div>
                       )}
                     </div>
-                    <p className="text-[9px] text-text-muted uppercase tracking-[0.2em]">NODE_IDENTICON_v1.0</p>
                   </div>
-
-                  <div className="space-y-2">
-                    <Label className="text-[10px] tracking-widest text-text-muted uppercase">Display Name</Label>
-                    <Input
-                      value={String(form.name || '')}
-                      onChange={(e) => setField('name', e.target.value)}
-                      placeholder="Enter agent name"
-                      className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none h-12"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="text-[10px] tracking-widest text-text-muted uppercase">Description</Label>
-                    <Textarea
-                      value={String(form.description || '')}
-                      onChange={(e) => setField('description', e.target.value)}
-                      placeholder="What is the primary purpose of this agent?"
-                      rows={3}
-                      className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none resize-none p-4"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="text-[10px] tracking-widest text-text-muted uppercase">Behavioral Persona</Label>
-                    <Textarea
-                      value={String(form.persona || '')}
-                      onChange={(e) => setField('persona', e.target.value)}
-                      placeholder="Define the agent's personality, tone, and specific instructions..."
-                      rows={8}
-                      className="bg-bg-surface border-border-bright focus:border-accent-cyan text-text-primary rounded-none resize-none p-4 leading-relaxed"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pt-8 border-t border-border-dim">
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[9px] text-text-muted uppercase tracking-widest">Initialization Date</span>
-                      <span className="text-xs text-text-secondary tabular-nums">{new Date(agent.created_at).toLocaleString()}</span>
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[9px] text-text-muted uppercase tracking-widest">Last Synced</span>
-                      <span className="text-xs text-text-secondary tabular-nums">{new Date(agent.updated_at).toLocaleString()}</span>
-                    </div>
-                  </div>
-
-                  {overviewDirty && (
-                    <div className="pt-6 border-t border-border-dim flex justify-end gap-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        onClick={resetOverview}
-                        disabled={savingSection === 'overview'}
-                        className="text-text-muted hover:text-text-primary rounded-none px-6"
-                      >
-                        DISCARD
-                      </Button>
-                      <Button
-                        type="button"
-                        onClick={saveOverview}
-                        disabled={savingSection === 'overview'}
-                        className="bg-accent-cyan text-black hover:opacity-90 rounded-none px-8 font-bold text-xs tracking-widest"
-                      >
-                        {savingSection === 'overview' ? 'SYNCING...' : 'COMMIT_CHANGES'}
-                      </Button>
-                    </div>
-                  )}
                 </div>
               </div>
             </div>
 
             {/* Right Column: Advanced, Danger */}
             <div className="space-y-12">
-              {/* Advanced Config Card */}
-              <div className="space-y-6">
-                <div className="space-y-1">
-                  <h2 className="text-sm font-bold tracking-[0.2em] text-text-secondary uppercase flex items-center gap-3">
-                    <FileJson className="w-4 h-4" />
-                    03 // RAW_CONFIGURATION
-                  </h2>
-                  <div className="h-px bg-border-dim w-full" />
-                </div>
-
-                <div className="p-8 border border-border-bright bg-bg-surface space-y-6">
-                  <div className="space-y-2">
-                    <Label className="text-[10px] tracking-widest text-text-muted uppercase flex justify-between">
-                      Internal State (JSON)
-                      {jsonError && <span className="text-accent-red font-bold">PARSING_ERROR</span>}
-                    </Label>
-                    <Textarea
-                      value={String(form.config || '{}')}
-                      onChange={(e) => setField('config', e.target.value)}
-                      onBlur={handleJsonBlur}
-                      rows={10}
-                      className={cn(
-                        "bg-bg-surface border-border-bright focus:border-accent-cyan text-text-secondary rounded-none resize-none font-mono text-[11px] leading-relaxed p-4",
-                        jsonError && "border-accent-red focus:border-accent-red"
-                      )}
-                    />
-                  </div>
-
-                  {advancedDirty && (
-                    <div className="pt-6 border-t border-border-dim flex justify-end gap-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        onClick={resetAdvanced}
-                        disabled={savingSection === 'advanced' || !!jsonError}
-                        className="text-text-muted hover:text-text-primary rounded-none px-6"
-                      >
-                        DISCARD
-                      </Button>
-                      <Button
-                        type="button"
-                        onClick={saveAdvanced}
-                        disabled={savingSection === 'advanced' || !!jsonError}
-                        className="bg-accent-cyan text-black hover:opacity-90 rounded-none px-8 font-bold text-xs tracking-widest"
-                      >
-                        {savingSection === 'advanced' ? 'SYNCING...' : 'COMMIT_CHANGES'}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
               {/* Known Agents / Delegation Card */}
               <div className="space-y-6">
                 <div className="space-y-1">
                   <h2 className="text-sm font-bold tracking-[0.2em] text-text-secondary uppercase flex items-center gap-3">
                     <Users className="w-4 h-4" />
-                    04 // DELEGATION_MAP
+                    02 // DELEGATION_MAP
                   </h2>
                   <div className="h-px bg-border-dim w-full" />
                 </div>

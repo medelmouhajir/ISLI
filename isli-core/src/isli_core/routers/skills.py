@@ -2,35 +2,42 @@ import asyncio
 import base64
 import json
 import os
-import subprocess
+from datetime import timezone
 from typing import Any
+from uuid import uuid4
 
+import httpx
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import httpx
-import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from isli_core.auth import create_internal_token, SkillProxyAuth, require_admin_auth
+from isli_core.auth import (
+    SkillProxyAuth,
+    create_internal_token,
+    require_admin_auth,
+    verify_internal_token,
+)
+from isli_core.config import get_settings
+from isli_core.db import get_db
+from isli_core.event_manager import EventManager
+from isli_core.file_tokens import consume_file_token, create_file_token
+from isli_core.memory.chroma_client import ChromaMemoryClient
+from isli_core.memory.keeper_client import KeeperClient
+from isli_core.redis_client import get_redis
 from isli_core.security.content_scanner import ContentScanner
 from isli_core.security.policy_engine import PolicyEngine
-from isli_core.db import get_db
-from isli_core.redis_client import get_redis
-from isli_core.file_tokens import create_file_token, consume_file_token
-from isli_core.memory.keeper_client import KeeperClient
-from isli_core.memory.chroma_client import ChromaMemoryClient
 from isli_core.services.skill_manager import skill_manager
-from isli_core.config import get_settings
-from isli_core.event_manager import EventManager
-from sqlalchemy.ext.asyncio import AsyncSession
-from uuid import uuid4
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/skills", tags=["skills"])
 
+
 class SkillInstallRequest(BaseModel):
     skill_id: str
     git_url: str
+
 
 # Consolidated upstream URLs — replaces ~25 SKILL_*_URL env vars.
 # In Docker Compose: SKILLS_URL, WORKSPACE_URL, AUDIO_URL, KEEPER_URL, CHANNELS_URL.
@@ -271,17 +278,31 @@ SKILL_METADATA: dict[str, dict[str, Any]] = {
         "category": "content",
     },
     "test-skill": {
-        "description": "Dry-run test dynamic skill code in a sandbox.",
+        "description": (
+            "Dry-run build a USR skill from a workspace directory. "
+            "Validates isli-skill.yaml and the Dockerfile without starting a container."
+        ),
+        "hint": "Validate a skill directory before registration.",
         "type": "external",
         "category": "engineering",
     },
     "register-skill": {
-        "description": "Register a new dynamic skill after successful testing.",
+        "description": (
+            "Install a USR skill from an agent workspace directory into the runtime. "
+            "Builds and starts the container and probes /health. "
+            "Only the owning agent may update the same skill_id."
+        ),
+        "hint": "Install a skill from the agent workspace after testing.",
         "type": "external",
         "category": "engineering",
     },
     "update-skill": {
-        "description": "Update metadata of an existing dynamic skill.",
+        "description": (
+            "Update an installed USR skill from an agent workspace directory "
+            "with a clean sync, blue/green container swap, and automatic rollback "
+            "on probe failure."
+        ),
+        "hint": "Redeploy an existing skill from the agent workspace.",
         "type": "external",
         "category": "engineering",
     },
@@ -495,6 +516,30 @@ class SkillPatchRequest(BaseModel):
     source_ref: str | None = None
 
 
+class SkillWorkspaceRequest(BaseModel):
+    workspace_path: str
+    agent_id: str | None = None
+
+
+def _caller_agent_id(request: Request, body_agent_id: str | None = None) -> str | None:
+    """Extract the calling agent id from internal or agent JWT, with dev fallback."""
+    token = request.headers.get("X-Internal-Auth")
+    if not token:
+        bearer = request.headers.get("Authorization", "")
+        if bearer.startswith("Bearer "):
+            token = bearer[7:]
+    if token:
+        try:
+            payload = verify_internal_token(token)
+            return payload.get("sub")
+        except Exception as exc:
+            logger.warning("skills.caller_token_verify_failed", error=str(exc))
+            return None
+    if get_settings().isli_env == "development" and not request.headers.get("X-Internal-Auth"):
+        return body_agent_id
+    return None
+
+
 @router.get("", response_model=list[SkillMetadataOut])
 async def list_skills():
     """Return metadata for all registered skills.
@@ -624,6 +669,7 @@ async def install_and_enable_skill(
 ):
     """Install a skill from git and immediately build/start the container."""
     import time
+
     start_time = time.monotonic()
     try:
         skill = await skill_manager.install_from_git(
@@ -692,6 +738,142 @@ async def install_and_enable_skill(
         "category": skill.category,
         "build_time_ms": build_time_ms,
         "probe_ok": True,
+    }
+
+
+@router.post("/test-skill/test")
+async def test_skill_usr(request: SkillWorkspaceRequest, req: Request) -> dict[str, Any]:
+    """Dry-run build a workspace skill using the USR manifest/Dockerfile."""
+    caller = _caller_agent_id(req, request.agent_id)
+    if not caller:
+        raise HTTPException(status_code=401, detail="Could not identify calling agent")
+    if not request.workspace_path:
+        raise HTTPException(status_code=400, detail="workspace_path is required")
+
+    try:
+        source_dir = skill_manager.resolve_workspace_path(caller, request.workspace_path)
+    except PermissionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("skills.test.resolve_failed", error=str(exc))
+        raise HTTPException(status_code=400, detail=f"Invalid workspace path: {exc}") from exc
+
+    if not source_dir.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Skill directory not found: {request.workspace_path}",
+        )
+
+    try:
+        result = await skill_manager.test_build(str(source_dir))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("skills.test.failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Skill test failed: {exc}") from exc
+
+    return result
+
+
+@router.post("/register-skill/register")
+async def register_skill_usr(request: SkillWorkspaceRequest, req: Request) -> dict[str, Any]:
+    """Register a workspace skill by installing it into the USR lifecycle."""
+    caller = _caller_agent_id(req, request.agent_id)
+    if not caller:
+        raise HTTPException(status_code=401, detail="Could not identify calling agent")
+    if not request.workspace_path:
+        raise HTTPException(status_code=400, detail="workspace_path is required")
+
+    try:
+        source_dir = skill_manager.resolve_workspace_path(caller, request.workspace_path)
+    except PermissionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("skills.register.resolve_failed", error=str(exc))
+        raise HTTPException(status_code=400, detail=f"Invalid workspace path: {exc}") from exc
+
+    if not source_dir.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Skill directory not found: {request.workspace_path}",
+        )
+
+    try:
+        skill = await skill_manager.install_from_workspace(
+            skill_id=None,  # will be read from manifest
+            source_dir=str(source_dir),
+            owner_agent_id=caller,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": str(exc), "phase": "install"},
+        ) from exc
+    except Exception as exc:
+        logger.error("skills.register.failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Skill registration failed: {exc}") from exc
+
+    return {
+        "status": skill.status,
+        "skill_id": skill.id,
+        "name": skill.name,
+        "version": skill.version,
+        "category": skill.category,
+    }
+
+
+@router.post("/update-skill/update")
+async def update_skill_usr(request: SkillWorkspaceRequest, req: Request) -> dict[str, Any]:
+    """Update a workspace-installed skill with a clean sync and blue/green swap."""
+    caller = _caller_agent_id(req, request.agent_id)
+    if not caller:
+        raise HTTPException(status_code=401, detail="Could not identify calling agent")
+    if not request.workspace_path:
+        raise HTTPException(status_code=400, detail="workspace_path is required")
+
+    try:
+        source_dir = skill_manager.resolve_workspace_path(caller, request.workspace_path)
+    except PermissionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("skills.update.resolve_failed", error=str(exc))
+        raise HTTPException(status_code=400, detail=f"Invalid workspace path: {exc}") from exc
+
+    if not source_dir.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Skill directory not found: {request.workspace_path}",
+        )
+
+    try:
+        skill = await skill_manager.update_from_workspace(
+            skill_id=None,  # will be read from manifest
+            source_dir=str(source_dir),
+            owner_agent_id=caller,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": str(exc), "phase": "update"},
+        ) from exc
+    except Exception as exc:
+        logger.error("skills.update.failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Skill update failed: {exc}") from exc
+
+    return {
+        "status": skill.status,
+        "skill_id": skill.id,
+        "name": skill.name,
+        "version": skill.version,
+        "category": skill.category,
     }
 
 
@@ -785,7 +967,9 @@ async def update_skill(
 ):
     """Pull new source, build new image, and perform a blue/green container swap."""
     try:
-        skill = await skill_manager.update(skill_id, target_version=request.target_version, force=request.force)
+        skill = await skill_manager.update(
+            skill_id, target_version=request.target_version, force=request.force
+        )
         return {
             "status": "updated",
             "skill_id": skill.id,
@@ -795,7 +979,10 @@ async def update_skill(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=409 if "already in progress" in str(e) or "pinned" in str(e) else 502, detail=str(e)) from e
+        raise HTTPException(
+            status_code=409 if "already in progress" in str(e) or "pinned" in str(e) else 502,
+            detail=str(e),
+        ) from e
 
 
 @router.post("/{skill_id}/rollback", response_model=SkillRollbackOut)
@@ -815,7 +1002,9 @@ async def rollback_skill(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except RuntimeError as e:
-        raise HTTPException(status_code=409 if "already in progress" in str(e) else 502, detail=str(e)) from e
+        raise HTTPException(
+            status_code=409 if "already in progress" in str(e) else 502, detail=str(e)
+        ) from e
 
 
 @router.get("/{skill_id}/versions")
@@ -826,13 +1015,20 @@ async def list_skill_versions(
 ):
     """List available git tags for a skill."""
     from isli_core.models import SkillRegistry as SkillRegistryModel
+
     result = await db.execute(select(SkillRegistryModel).where(SkillRegistryModel.id == skill_id))
     skill = result.scalar_one_or_none()
     if not skill or not skill.source_url:
-        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' not found or has no source_url")
+        raise HTTPException(
+            status_code=404, detail=f"Skill '{skill_id}' not found or has no source_url"
+        )
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "ls-remote", "--tags", "--refs", skill.source_url,
+            "git",
+            "ls-remote",
+            "--tags",
+            "--refs",
+            skill.source_url,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -846,7 +1042,7 @@ async def list_skill_versions(
                 tag = parts[1].replace("refs/tags/", "")
                 tags.append(tag)
         return sorted(set(tags))
-    except asyncio.TimeoutError:
+    except TimeoutError:
         raise HTTPException(status_code=504, detail="git ls-remote timed out")
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
@@ -873,21 +1069,28 @@ async def consume_file(token: str):
     # Internal auth for workspace
     settings = get_settings()
     ws_token = create_internal_token("core-api", scopes=["workspace"], expires_minutes=1)
-    
+
     # Forward the request to workspace
     url = f"{settings.workspace_url}/download"
     params = {
         "agent_id": scope_id,  # Workspace /download expects agent_id as effective_scope_id
         "path": path,
         "scope": scope,
-        "scope_id": scope_id
+        "scope_id": scope_id,
     }
-    
+
     async def _stream_file():
         async with httpx.AsyncClient(timeout=600.0) as client:
-            async with client.stream("GET", url, params=params, headers={"X-Internal-Auth": ws_token}) as resp:
+            async with client.stream(
+                "GET", url, params=params, headers={"X-Internal-Auth": ws_token}
+            ) as resp:
                 if resp.status_code != 200:
-                    logger.error("skills.consume_file_workspace_failed", status=resp.status_code, token=token, path=path)
+                    logger.error(
+                        "skills.consume_file_workspace_failed",
+                        status=resp.status_code,
+                        token=token,
+                        path=path,
+                    )
                     return
                 async for chunk in resp.aiter_bytes():
                     yield chunk
@@ -904,9 +1107,8 @@ async def patch_skill(
 ):
     """Update mutable skill metadata (update_policy, source_ref, etc.)."""
     from isli_core.models import SkillRegistry as SkillRegistryModel
-    result = await db.execute(
-        select(SkillRegistryModel).where(SkillRegistryModel.id == skill_id)
-    )
+
+    result = await db.execute(select(SkillRegistryModel).where(SkillRegistryModel.id == skill_id))
     skill = result.scalar_one_or_none()
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' not found")
@@ -956,7 +1158,10 @@ async def skill_proxy(
         SkillProxyAuth.verify(request)
     except HTTPException:
         # In dev mode ONLY, allow unauthenticated if no header is present
-        if get_settings().isli_env == "development" and request.headers.get("X-Internal-Auth") is None:
+        if (
+            get_settings().isli_env == "development"
+            and request.headers.get("X-Internal-Auth") is None
+        ):
             logger.warning("skills.dev_mode_unauthenticated", skill=skill_name)
         else:
             raise
@@ -974,9 +1179,7 @@ async def skill_proxy(
 
         try:
             body_json = (
-                json.loads(body_bytes.decode("utf-8", errors="ignore"))
-                if body_bytes
-                else {}
+                json.loads(body_bytes.decode("utf-8", errors="ignore")) if body_bytes else {}
             )
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail="Invalid JSON body") from e
@@ -1009,7 +1212,9 @@ async def skill_proxy(
     # Inline handlers for memory skills (executed directly in Core, no external proxy)
     if base_url == "inline":
         try:
-            body_json = json.loads(body_bytes.decode("utf-8", errors="ignore")) if body_bytes else {}
+            body_json = (
+                json.loads(body_bytes.decode("utf-8", errors="ignore")) if body_bytes else {}
+            )
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
 
@@ -1044,7 +1249,12 @@ async def skill_proxy(
                 await chroma.delete_fact(collection_name=collection_name, fact_id=fact_id)
                 return {"status": "deleted", "fact_id": fact_id}
             except Exception as exc:
-                logger.error("skills.memory_delete_failed", agent_id=agent_id, fact_id=fact_id, error=str(exc))
+                logger.error(
+                    "skills.memory_delete_failed",
+                    agent_id=agent_id,
+                    fact_id=fact_id,
+                    error=str(exc),
+                )
                 raise HTTPException(status_code=500, detail=f"Failed to delete memory: {exc}")
 
         if skill_name == "memory-search" and action == "search":
@@ -1061,7 +1271,12 @@ async def skill_proxy(
                 )
                 return results
             except Exception as exc:
-                logger.error("skills.memory_search_failed", agent_id=agent_id, query=query_text, error=str(exc))
+                logger.error(
+                    "skills.memory_search_failed",
+                    agent_id=agent_id,
+                    query=query_text,
+                    error=str(exc),
+                )
                 raise HTTPException(status_code=500, detail="Failed to search memory")
 
         if skill_name == "send-message" and action == "send":
@@ -1071,19 +1286,28 @@ async def skill_proxy(
             text = body_json.get("text")
             audio_b64 = body_json.get("audio_b64")
             if not all([agent_id, channel, channel_user_id, text]):
-                raise HTTPException(status_code=400, detail="Missing required fields: agent_id, channel, channel_user_id, text")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Missing required fields: agent_id, channel, channel_user_id, text",
+                )
 
             # Validate audio_b64 size at schema level (5 MB raw ~ 6.7 MB base64)
             if audio_b64 and len(audio_b64) > 6_700_000:
-                raise HTTPException(status_code=413, detail="audio_b64 exceeds maximum size of 5 MB decoded")
+                raise HTTPException(
+                    status_code=413, detail="audio_b64 exceeds maximum size of 5 MB decoded"
+                )
+
+            from datetime import datetime, timedelta
 
             from sqlalchemy import select
-            from isli_core.models import Agent, Session, ChannelMessage
+
+            from isli_core.models import Agent, ChannelMessage, Session
             from isli_core.retry import exponential_backoff
-            from datetime import datetime, timezone, timedelta
 
             # 1. Verify agent exists and channel is assigned
-            result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
+            result = await db.execute(
+                select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None))
+            )
             agent = result.scalar_one_or_none()
             if not agent:
                 raise HTTPException(status_code=404, detail="Agent not found")
@@ -1093,11 +1317,15 @@ async def skill_proxy(
             # 2. Find or create canonical session (same convention as channels.py webhook)
             session_id = f"sess_{channel}_{agent_id}_{channel_user_id}"
             now = datetime.now(timezone.utc)
-            result = await db.execute(select(Session).where(Session.id == session_id, Session.deleted_at.is_(None)))
+            result = await db.execute(
+                select(Session).where(Session.id == session_id, Session.deleted_at.is_(None))
+            )
             sess = result.scalar_one_or_none()
 
             if not sess:
-                soft_deleted_result = await db.execute(select(Session).where(Session.id == session_id))
+                soft_deleted_result = await db.execute(
+                    select(Session).where(Session.id == session_id)
+                )
                 soft_deleted = soft_deleted_result.scalar_one_or_none()
                 if soft_deleted:
                     soft_deleted.deleted_at = None
@@ -1138,6 +1366,7 @@ async def skill_proxy(
                         audio_b64_for_channels = None
                     else:
                         from isli_core.routers.workspaces import upload_bytes_to_workspace
+
                         audio_filename = f"{uuid4()}.wav"
                         workspace_path = f"_attachments/audio/{session_id}/{audio_filename}"
                         await upload_bytes_to_workspace(
@@ -1155,7 +1384,9 @@ async def skill_proxy(
                             size=len(audio_bytes),
                         )
                 except Exception as exc:
-                    logger.warning("skills.send_message_audio_upload_failed", agent_id=agent_id, error=str(exc))
+                    logger.warning(
+                        "skills.send_message_audio_upload_failed", agent_id=agent_id, error=str(exc)
+                    )
                     audio_b64_for_channels = None
 
             msg = {"role": "assistant", "content": text, "timestamp": now.isoformat()}
@@ -1199,16 +1430,27 @@ async def skill_proxy(
                         resp = await client.post(
                             f"{settings.channels_url}/send",
                             json=payload_channels,
-                            headers={"X-Internal-Auth": create_internal_token("core", scopes=["channels:send"], expires_minutes=5)},
+                            headers={
+                                "X-Internal-Auth": create_internal_token(
+                                    "core", scopes=["channels:send"], expires_minutes=5
+                                )
+                            },
                             timeout=10.0,
                         )
                         resp.raise_for_status()
 
                 try:
                     from isli_core.dynamic_config import get_setting
-                    max_retries = await get_setting(db, "default_max_retries", scope="general", default=3)
-                    base_delay = await get_setting(db, "default_base_delay_seconds", scope="general", default=1.0)
-                    max_delay = await get_setting(db, "default_max_delay_seconds", scope="general", default=10.0)
+
+                    max_retries = await get_setting(
+                        db, "default_max_retries", scope="general", default=3
+                    )
+                    base_delay = await get_setting(
+                        db, "default_base_delay_seconds", scope="general", default=1.0
+                    )
+                    max_delay = await get_setting(
+                        db, "default_max_delay_seconds", scope="general", default=10.0
+                    )
                     await exponential_backoff(
                         _send_to_channels,
                         max_retries=max_retries,
@@ -1216,12 +1458,15 @@ async def skill_proxy(
                         max_delay=max_delay,
                     )
                 except Exception as exc:
-                    logger.error("skills.send_message_failed", agent_id=agent_id, channel=channel, error=str(exc))
+                    logger.error(
+                        "skills.send_message_failed",
+                        agent_id=agent_id,
+                        channel=channel,
+                        error=str(exc),
+                    )
             else:
                 logger.debug(
-                    "skills.send_message.skip_external_forward",
-                    agent_id=agent_id,
-                    channel=channel
+                    "skills.send_message.skip_external_forward", agent_id=agent_id, channel=channel
                 )
 
             return {"status": "sent", "session_id": session_id}
@@ -1234,7 +1479,9 @@ async def skill_proxy(
             priority = body_json.get("priority", "normal")
 
             if not all([agent_id, user_id, title]):
-                raise HTTPException(status_code=400, detail="Missing required fields: agent_id, user_id, title")
+                raise HTTPException(
+                    status_code=400, detail="Missing required fields: agent_id, user_id, title"
+                )
 
             # Rate limit check (same logic as notifications router)
             AGENT_NOTIFY_RATE_LIMIT = 20
@@ -1245,14 +1492,18 @@ async def skill_proxy(
                 if count == 1:
                     await redis.expire(rate_key, 3600)
                 if count > AGENT_NOTIFY_RATE_LIMIT:
-                    raise HTTPException(status_code=429, detail="Notification rate limit exceeded for this agent (max 20/hour per user)")
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Notification rate limit exceeded for this agent (max 20/hour per user)",
+                    )
             except HTTPException:
                 raise
             except Exception as exc:
                 logger.warning("skills.notify_user_rate_limit_redis_failed", error=str(exc))
 
+            from datetime import datetime
+
             from isli_core.models import Notification
-            from datetime import datetime, timezone
 
             notif = Notification(
                 user_id=user_id,
@@ -1268,6 +1519,7 @@ async def skill_proxy(
 
             # Emit WS event
             from isli_core.event_manager import EventManager
+
             await EventManager.emit(
                 "notification:new",
                 {
@@ -1291,10 +1543,15 @@ async def skill_proxy(
             target_path = body_json.get("target_path")
             delete_source = body_json.get("delete_source", False)
             if not all([agent_id, workspace_id, source_path, target_path]):
-                raise HTTPException(status_code=400, detail="Missing required fields: agent_id, workspace_id, source_path, target_path")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Missing required fields: agent_id, workspace_id, source_path, target_path",
+                )
 
             from sqlalchemy import select
+
             from isli_core.models import SharedWorkspace
+
             result = await db.execute(
                 select(SharedWorkspace).where(
                     SharedWorkspace.id == workspace_id,
@@ -1305,7 +1562,9 @@ async def skill_proxy(
             if not workspace:
                 raise HTTPException(status_code=404, detail="Shared workspace not found")
             if agent_id != workspace.owner_id and agent_id not in (workspace.members or []):
-                raise HTTPException(status_code=403, detail="Access denied to this shared workspace")
+                raise HTTPException(
+                    status_code=403, detail="Access denied to this shared workspace"
+                )
 
             settings = get_settings()
             url = f"{settings.workspace_url}/shared/promote"
@@ -1329,6 +1588,7 @@ async def skill_proxy(
                     raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
             from isli_core.audit_writer import AuditWriter
+
             await AuditWriter.write(
                 db,
                 actor_type="agent",
@@ -1345,10 +1605,14 @@ async def skill_proxy(
             agent_id = body_json.get("agent_id")
             workspace_id = body_json.get("workspace_id")
             if not all([agent_id, workspace_id]):
-                raise HTTPException(status_code=400, detail="Missing required fields: agent_id, workspace_id")
+                raise HTTPException(
+                    status_code=400, detail="Missing required fields: agent_id, workspace_id"
+                )
 
             from sqlalchemy import select
+
             from isli_core.models import SharedWorkspace
+
             result = await db.execute(
                 select(SharedWorkspace).where(
                     SharedWorkspace.id == workspace_id,
@@ -1359,7 +1623,9 @@ async def skill_proxy(
             if not workspace:
                 raise HTTPException(status_code=404, detail="Shared workspace not found")
             if agent_id != workspace.owner_id and agent_id not in (workspace.members or []):
-                raise HTTPException(status_code=403, detail="Access denied to this shared workspace")
+                raise HTTPException(
+                    status_code=403, detail="Access denied to this shared workspace"
+                )
 
             return {
                 "workspace_id": workspace.id,
@@ -1378,8 +1644,8 @@ async def skill_proxy(
             if not secret_name:
                 raise HTTPException(status_code=400, detail="Missing name in request body")
 
-            from isli_core.secrets_service import get_secret_value
             from isli_core.audit_writer import AuditWriter
+            from isli_core.secrets_service import get_secret_value
 
             # Verify secret exists for this agent
             exists = await get_secret_value(db, agent_id, secret_name)
@@ -1405,8 +1671,9 @@ async def skill_proxy(
             if not title:
                 raise HTTPException(status_code=400, detail="Missing title in request body")
 
-            from isli_core.routers.tasks import _create_task_core, TaskCreate, TaskOut
             from datetime import datetime
+
+            from isli_core.routers.tasks import TaskCreate, TaskOut, _create_task_core
 
             scheduled_at_raw = body_json.get("scheduled_at")
             scheduled_at: datetime | None = None
@@ -1414,7 +1681,9 @@ async def skill_proxy(
                 try:
                     scheduled_at = datetime.fromisoformat(scheduled_at_raw.replace("Z", "+00:00"))
                 except ValueError as exc:
-                    raise HTTPException(status_code=400, detail=f"Invalid scheduled_at format: {exc}")
+                    raise HTTPException(
+                        status_code=400, detail=f"Invalid scheduled_at format: {exc}"
+                    )
 
             payload = TaskCreate(
                 title=title,
@@ -1438,16 +1707,17 @@ async def skill_proxy(
             }
 
         if skill_name == "list-kanban-tasks" and action == "list":
+            from sqlalchemy import select
+
             from isli_core.models import Task
             from isli_core.routers.tasks import TaskOut
-            from sqlalchemy import select
 
             stmt = select(Task).where(Task.deleted_at.is_(None))
             if body_json.get("status"):
                 stmt = stmt.where(Task.status == body_json.get("status"))
             if body_json.get("assignee_id"):
                 stmt = stmt.where(Task.agent_id == body_json.get("assignee_id"))
-            
+
             # Use tags if provided in body
             tags = body_json.get("tags")
             if tags:
@@ -1465,14 +1735,17 @@ async def skill_proxy(
             task_id = body_json.get("task_id")
             if not task_id:
                 raise HTTPException(status_code=400, detail="Missing task_id in request body")
-            
-            from isli_core.models import Task
-            from isli_core.routers.tasks import TaskOut, VALID_STATUSES
-            from isli_core.event_manager import EventManager
-            from isli_core.audit_writer import AuditWriter
-            from datetime import datetime, timezone
 
-            result = await db.execute(select(Task).where(Task.id == task_id, Task.deleted_at.is_(None)))
+            from datetime import datetime
+
+            from isli_core.audit_writer import AuditWriter
+            from isli_core.event_manager import EventManager
+            from isli_core.models import Task
+            from isli_core.routers.tasks import VALID_STATUSES, TaskOut
+
+            result = await db.execute(
+                select(Task).where(Task.id == task_id, Task.deleted_at.is_(None))
+            )
             task = result.scalar_one_or_none()
             if not task:
                 raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
@@ -1490,13 +1763,16 @@ async def skill_proxy(
                         task.started_at = datetime.now(timezone.utc)
                     if new_status in ("done", "failed"):
                         task.completed_at = datetime.now(timezone.utc)
-                    
-                    await EventManager.emit("task:moved", {
-                        "task_id": task_id,
-                        "from": old_status,
-                        "to": new_status,
-                        "task": TaskOut.model_validate(task).model_dump(mode="json")
-                    })
+
+                    await EventManager.emit(
+                        "task:moved",
+                        {
+                            "task_id": task_id,
+                            "from": old_status,
+                            "to": new_status,
+                            "task": TaskOut.model_validate(task).model_dump(mode="json"),
+                        },
+                    )
 
             new_priority = body_json.get("new_priority")
             if new_priority is not None:
@@ -1515,23 +1791,32 @@ async def skill_proxy(
                 task.version += 1
                 await db.commit()
                 await db.refresh(task)
-                
+
                 await AuditWriter.write(
-                    db, actor_type="agent", actor_id=agent_id, action="update_task_skill",
-                    target_type="task", target_id=task.id,
+                    db,
+                    actor_type="agent",
+                    actor_id=agent_id,
+                    action="update_task_skill",
+                    target_type="task",
+                    target_id=task.id,
                     payload={"changes": changes, "comment": comment},
                 )
                 await db.commit()
-                
-                await EventManager.emit("task:updated", {
-                    "task_id": task_id,
-                    "changes": changes,
-                    "task": TaskOut.model_validate(task).model_dump(mode="json")
-                })
+
+                await EventManager.emit(
+                    "task:updated",
+                    {
+                        "task_id": task_id,
+                        "changes": changes,
+                        "task": TaskOut.model_validate(task).model_dump(mode="json"),
+                    },
+                )
 
             return {"status": "success", "task_id": task_id, "updated": bool(changes)}
 
-        raise HTTPException(status_code=404, detail=f"Action '{action}' not found for skill '{skill_name}'")
+        raise HTTPException(
+            status_code=404, detail=f"Action '{action}' not found for skill '{skill_name}'"
+        )
 
     body = body_bytes
     body_text = body.decode("utf-8", errors="ignore") if body else ""
@@ -1561,9 +1846,9 @@ async def skill_proxy(
                         break
 
         if secret_fields:
-            from isli_core.secrets_service import get_secret_value
             from isli_core.audit_writer import AuditWriter
-            
+            from isli_core.secrets_service import get_secret_value
+
             modified = False
             for field in secret_fields:
                 val = body_json.get(field)
@@ -1573,7 +1858,7 @@ async def skill_proxy(
                     if secret_val:
                         body_json[field] = secret_val
                         modified = True
-                        
+
                         # Audit the injection
                         await AuditWriter.write(
                             session=db,
@@ -1593,8 +1878,9 @@ async def skill_proxy(
 
         if file_fields:
             from isli_core.audit_writer import AuditWriter
+
             redis = await get_redis()
-            
+
             modified_files = False
             for field in file_fields:
                 val = body_json.get(field)
@@ -1604,13 +1890,13 @@ async def skill_proxy(
                     if len(parts) == 3:
                         f_scope, f_scope_id, f_path = parts
                         token = await create_file_token(redis, f_scope, f_scope_id, f_path)
-                        
+
                         # Construct proxy URL
                         # Note: We use the request's base URL so the skill can reach core back
                         proxy_url = f"{str(request.base_url).rstrip('/')}/v1/skills/consume-file?token={token}"
                         body_json[field] = proxy_url
                         modified_files = True
-                        
+
                         # Audit the injection
                         await AuditWriter.write(
                             session=db,
@@ -1619,7 +1905,12 @@ async def skill_proxy(
                             action="file.inject",
                             target_type="skill",
                             target_id=f"{skill_name}:{action}",
-                            payload={"field": field, "scope": f_scope, "scope_id": f_scope_id, "path": f_path},
+                            payload={
+                                "field": field,
+                                "scope": f_scope,
+                                "scope_id": f_scope_id,
+                                "path": f_path,
+                            },
                         )
 
             if modified_files:
@@ -1666,8 +1957,8 @@ async def skill_proxy(
         "Content-Type": request.headers.get("Content-Type", "application/json"),
     }
 
-    from isli_core.verification.grounding import GroundingVerifier
     from isli_core.telemetry import get_verification_failure_counter
+    from isli_core.verification.grounding import GroundingVerifier
 
     url = f"{base_url}/{action}"
 
@@ -1686,13 +1977,17 @@ async def skill_proxy(
         # Avoid double-counting if the skill is already hosted by isli-skills (8100)
         SKILLS_SERVICE_URL = os.getenv("SKILL_WEB_FETCH_URL", "http://localhost:8100").rstrip("/")
         if result.is_valid and ":8100" not in base_url:
+
             async def _notify_usage():
                 async with httpx.AsyncClient() as client:
-                    token = create_internal_token("core-api", scopes=["skill:telemetry"], expires_minutes=1)
+                    token = create_internal_token(
+                        "core-api", scopes=["skill:telemetry"], expires_minutes=1
+                    )
                     await client.post(
                         f"{SKILLS_SERVICE_URL}/skills/{skill_name}/usage",
-                        headers={"X-Internal-Auth": token}
+                        headers={"X-Internal-Auth": token},
                     )
+
             asyncio.create_task(_notify_usage())
 
         # Phase 2: Local Skill Cleaning (Signal Harvesting)
@@ -1701,8 +1996,7 @@ async def skill_proxy(
             logger.info("skills.harvesting.cleaning", skill=skill_name)
             # Use the action or a generic goal for cleaning
             cleaned = await KeeperClient.clean_skill_output(
-                str(raw),
-                goal=f"Extract relevant data for action '{action}'"
+                str(raw), goal=f"Extract relevant data for action '{action}'"
             )
             return {"status": "ok", "skill": skill_name, "action": action, "result": cleaned}
 
@@ -1712,6 +2006,7 @@ async def skill_proxy(
 
     if not result.is_valid:
         from isli_core.telemetry import get_skill_invocation_error_counter
+
         reason_lower = result.reason.lower() if result.reason else ""
 
         # Preserve 4xx client errors so the agent knows it sent bad arguments
@@ -1729,13 +2024,13 @@ async def skill_proxy(
             get_skill_invocation_error_counter().add(
                 1, {"skill": skill_name, "reason": "http_error"}
             )
-        elif "unreachable" in reason_lower or "connect" in reason_lower or "timeout" in reason_lower:
+        elif (
+            "unreachable" in reason_lower or "connect" in reason_lower or "timeout" in reason_lower
+        ):
             get_skill_invocation_error_counter().add(
                 1, {"skill": skill_name, "reason": "unreachable"}
             )
-        get_verification_failure_counter().add(
-            1, {"skill": skill_name, "reason": result.reason}
-        )
+        get_verification_failure_counter().add(1, {"skill": skill_name, "reason": result.reason})
         logger.error("skills.verification_failed", skill=skill_name, reason=result.reason)
         raise HTTPException(
             status_code=status_code,

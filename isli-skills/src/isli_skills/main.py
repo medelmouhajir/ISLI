@@ -90,34 +90,6 @@ def validate_skill_code(code: str) -> None:
         raise HTTPException(status_code=400, detail="Skill code exceeds maximum complexity (500 lines)")
 
 
-class RegisterSkill(BaseModel):
-    name: str
-    endpoint: str | None = None
-    workspace_path: str | None = None
-    agent_id: str | None = None
-    health_endpoint: str | None = None
-    description: str | None = None
-    category: str | None = None
-    usage_count: int = 0
-    last_used_at: str | None = None
-    created_at: str | None = None
-
-
-class UpdateSkillRequest(BaseModel):
-    name: str
-    endpoint: str | None = None
-    workspace_path: str | None = None
-    agent_id: str | None = None
-    health_endpoint: str | None = None
-    description: str | None = None
-    category: str | None = None
-
-
-class TestSkillRequest(BaseModel):
-    code: str
-    payload: dict[str, Any]
-
-
 class DebugRequest(BaseModel):
     code: str
     payload: dict[str, Any] = {}
@@ -346,61 +318,32 @@ async def list_skills(auth: dict = Depends(require_internal_auth)):
     return {"skills": list(SKILL_REGISTRY.values())}
 
 
-@app.post("/register", status_code=201)
-@app.post("/skills", status_code=201)
-async def register_skill(skill: RegisterSkill, auth: dict = Depends(require_internal_auth)):
-    if skill.name in SKILL_REGISTRY:
-        # Update existing skill
-        logger.info("skills.updating", name=skill.name)
-        existing = SKILL_REGISTRY[skill.name]
-        skill.usage_count = existing.get("usage_count", 0)
-        skill.last_used_at = existing.get("last_used_at")
-        skill.created_at = existing.get("created_at")
-    
-    if not skill.created_at:
-        skill.created_at = datetime.now(timezone.utc).isoformat()
-    
-    SKILL_REGISTRY[skill.name] = skill.model_dump()
-    save_registry()
-    logger.info("skills.registered", name=skill.name, endpoint=skill.endpoint)
-    return {"status": "registered", "skill": skill.model_dump()}
+@app.post("/register", status_code=410)
+@app.post("/skills", status_code=410)
+async def register_skill_legacy(auth: dict = Depends(require_internal_auth)):
+    """Deprecated: agent skill creation now flows through Core's USR lifecycle."""
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy AST-based skill registration is deprecated. Use Core /v1/skills/register-skill/register.",
+    )
 
 
-@app.post("/update")
-async def update_skill(body: UpdateSkillRequest, auth: dict = Depends(require_internal_auth)):
-    if body.name not in SKILL_REGISTRY:
-        raise HTTPException(status_code=404, detail=f"Skill '{body.name}' not found")
-
-    existing = SKILL_REGISTRY[body.name]
-    updated = dict(existing)
-    if body.endpoint is not None:
-        updated["endpoint"] = body.endpoint
-    if body.workspace_path is not None:
-        updated["workspace_path"] = body.workspace_path
-    if body.agent_id is not None:
-        updated["agent_id"] = body.agent_id
-    if body.health_endpoint is not None:
-        updated["health_endpoint"] = body.health_endpoint
-    if body.description is not None:
-        updated["description"] = body.description
-    if body.category is not None:
-        updated["category"] = body.category
-
-    SKILL_REGISTRY[body.name] = updated
-    save_registry()
-    logger.info("skills.updated", name=body.name)
-    return {"status": "updated", "skill": updated}
+@app.post("/update", status_code=410)
+async def update_skill_legacy(auth: dict = Depends(require_internal_auth)):
+    """Deprecated: agent skill updates now flow through Core's USR lifecycle."""
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy AST-based skill update is deprecated. Use Core /v1/skills/update-skill/update.",
+    )
 
 
-@app.post("/test")
-async def test_skill(request: TestSkillRequest, auth: dict = Depends(require_internal_auth)):
-    """Dry-run endpoint for testing dynamic skill code without registration."""
-    logger.info("skills.test_request")
-    try:
-        result = await execute_dynamic_code(request.code, request.payload)
-        return {"success": True, "result": result}
-    except Exception as exc:
-        return {"success": False, "error": str(exc)}
+@app.post("/test", status_code=410)
+async def test_skill_legacy(auth: dict = Depends(require_internal_auth)):
+    """Deprecated: agent skill testing now flows through Core's USR lifecycle."""
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy AST-based skill testing is deprecated. Use Core /v1/skills/test-skill/test.",
+    )
 
 
 @app.post("/debug")
