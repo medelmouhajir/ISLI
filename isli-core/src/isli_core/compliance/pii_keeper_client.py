@@ -1,11 +1,12 @@
 """Thin Core client for Keeper PII mesh endpoints."""
 
-import structlog
 from typing import Any
-import httpx
 
-from isli_core.config import get_settings
+import httpx
+import structlog
+
 from isli_core.auth import create_internal_token
+from isli_core.config import get_settings
 
 logger = structlog.get_logger()
 
@@ -29,6 +30,7 @@ class PIIKeeperClient:
         agent_id: str,
         messages: list[dict[str, Any]],
         context_summary: str,
+        task_description: str | None = None,
         mode: str = "full",
         use_slm: bool = True,
         memory_similarity_threshold: float = 0.4,
@@ -40,6 +42,7 @@ class PIIKeeperClient:
             "agent_id": agent_id,
             "messages": messages,
             "context_summary": context_summary,
+            "task_description": task_description,
             "mode": mode,
             "use_slm": use_slm,
             "memory_similarity_threshold": memory_similarity_threshold,
@@ -52,7 +55,11 @@ class PIIKeeperClient:
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPStatusError as exc:
-            logger.error("pii_keeper_client.session_prep_http_error", status=exc.response.status_code, detail=exc.response.text[:200])
+            logger.error(
+                "pii_keeper_client.session_prep_http_error",
+                status=exc.response.status_code,
+                detail=exc.response.text[:200],
+            )
             raise
         except httpx.RequestError as exc:
             logger.error("pii_keeper_client.session_prep_request_error", error=str(exc))

@@ -63,6 +63,8 @@ def _set_cached(request: SessionPrepRequest, response: dict) -> None:
 def _assemble_combined_text(request: SessionPrepRequest) -> str:
     """Concatenate all text the SLM needs to analyze."""
     parts: list[str] = []
+    if request.task_description:
+        parts.append(f"Task:\n{request.task_description}")
     if request.context_summary:
         parts.append(f"Previous context:\n{request.context_summary}")
     for msg in request.messages[-10:]:

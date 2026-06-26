@@ -1,0 +1,27 @@
+- send_message: Send a proactive message to a user through one of the agent's assigned channels (e.g., telegram). The agent must have the channel in its assigned channels list.
+- create_engineering_plan: Generate a structured implementation plan (PLAN.md) before starting complex tasks.
+- create_kanban_task: Create a task on the Kanban board, optionally assigned to yourself or another agent. Supports one-off scheduling via scheduled_at (ISO 8601 datetime) or recurring execution via cron_expression (standard 5-field cron). Assigning a task to yourself with a future scheduled_at acts as a self-reminder/wake-up call. scheduled_at and cron_expression are mutually exclusive — set one or neither, not both.
+- memory_save: Save a fact to the agent's long-term semantic memory. Use this to remember important information for later retrieval.
+- memory_delete: Delete a previously saved fact from the agent's semantic memory by its fact ID.
+- memory_search: Search the agent's semantic memory for facts relevant to a query.
+- get_secret: Retrieve a secure reference ID for a secret from your vault by name. This tool returns a placeholder string in the format [[secret:name]]. You MUST pass this exact placeholder as an argument to other tools (like web_search or db_query) that require credentials. Do NOT attempt to 'expand' or guess the secret value yourself. Example: api_key=get_secret('my_key').
+- web_fetch: Fetch the content of a website or API from a URL.
+- web_search: Search the web for information using a query.
+- file_read: Read the contents of a file from the agent's workspace.
+- file_write: Write content to a file in the agent's workspace. Creates parent directories if needed.
+- file_list: List files and directories in a path within the agent's workspace.
+- file_delete: Delete a file from the agent's workspace. Directories cannot be deleted with this tool.
+- search_moroccan_law: Searches Moroccan law PDFs for specific keywords and returns matching snippets and article numbers.
+- shared_promote_file_workspace: Promote a file from your own agent workspace into a shared project workspace.
+- shared_file_read: Read a file from a shared project workspace that you are a member of.
+- shared_file_write: Write content to a file in a shared project workspace. Operations are atomic.
+- shared_file_list: List files and directories in a shared project workspace.
+- shared_workspace_search: Search file names and/or contents across a shared project workspace.
+- shared_workspace_info: Return shared workspace metadata: name, members, root path, and quota.
+- ui_components: Render a structured UI component (table, card, button_group, comparison_table, form, json_viewer, status_timeline, metric_grid, file_card) inline in the chat stream. Provide an action_id to receive user interactions.
+- speech_to_text: Transcribe an audio file to text. Use when you receive an audio attachment from web, email, or workspace and need its text content. For Telegram voice messages, the adapter already transcribes them.
+- search_workspace_file: Search for a regex or string within a single file in the agent workspace and return line matches.
+- describe_workspace_file: Provide structure and stats for a specific file in the agent workspace to aid navigation.
+- generate_document: Generate a PDF, DOCX, or XLSX document and save it to the workspace.
+- get_current_datetime: Return the current UTC date and time.
+- stage_reply_attachment: Stage a file from the agent's workspace (or a shared workspace) to be returned as an attachment in the next reply to the user. Provide the workspace file path and an optional caption. Up to 5 attachments per reply.

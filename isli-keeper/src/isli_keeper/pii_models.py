@@ -1,6 +1,7 @@
 """Pydantic models for the unified session-prep / PII mesh endpoints."""
 
 from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -9,6 +10,7 @@ class SessionPrepRequest(BaseModel):
     agent_id: str
     messages: list[dict[str, Any]] = []
     context_summary: str = ""
+    task_description: str | None = None  # Explicit work order for Kanban tasks
     mode: str = "full"  # "full" = context + PII | "pii_only" = just anonymize
     use_slm: bool = True
     memory_similarity_threshold: float = 0.4

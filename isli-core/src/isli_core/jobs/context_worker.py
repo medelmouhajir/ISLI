@@ -181,7 +181,12 @@ class ContextWorker:
         else:
             logger.info("context_worker.cache_miss", type=type_, id=id_)
             try:
-                original_summary, scrubbed_summary, token_map, relevant_skills = await self._call_keeper(
+                (
+                    original_summary,
+                    scrubbed_summary,
+                    token_map,
+                    relevant_skills,
+                ) = await self._call_keeper(
                     agent_id,
                     task_description,
                     session_id,
@@ -197,7 +202,8 @@ class ContextWorker:
                 await acknowledge(STREAM_NAME, GROUP_NAME, message_id)
                 return
 
-            # Legacy path fallback: if Keeper didn't return relevant_skills, call standalone classifier
+            # Legacy path fallback: if Keeper didn't return relevant_skills,
+            # call standalone classifier
             if not relevant_skills:
                 user_message = task_description
                 if not user_message and session_id:
@@ -205,7 +211,10 @@ class ContextWorker:
                         sess = await db_session.get(Session, session_id)
                         if sess and sess.messages:
                             last_msg = sess.messages[-1]
-                            user_message = last_msg.get("content", "") if last_msg.get("role") == "user" else ""
+                            if last_msg.get("role") == "user":
+                                user_message = last_msg.get("content", "")
+                            else:
+                                user_message = ""
                 if user_message:
                     # Reuse available_skills built inside _call_keeper by querying agent again
                     async with async_session() as db_session:
@@ -223,7 +232,11 @@ class ContextWorker:
                         available_skills=avail,
                         agent_id=agent_id,
                     )
-                    logger.info("context_worker.intent_classified_standalone", agent_id=agent_id, relevant_skills=relevant_skills)
+                    logger.info(
+                        "context_worker.intent_classified_standalone",
+                        agent_id=agent_id,
+                        relevant_skills=relevant_skills,
+                    )
 
             if scrubbed_summary:
                 cache_value = scrubbed_summary
@@ -245,7 +258,14 @@ class ContextWorker:
         if scrubbed_summary:
             try:
                 await self._on_success(
-                    type_, id_, original_summary, scrubbed_summary, token_map, payload, message_id, relevant_skills
+                    type_,
+                    id_,
+                    original_summary,
+                    scrubbed_summary,
+                    token_map,
+                    payload,
+                    message_id,
+                    relevant_skills,
                 )
                 await acknowledge(STREAM_NAME, GROUP_NAME, message_id)
             except Exception as exc:
@@ -325,6 +345,7 @@ class ContextWorker:
                         agent_id=agent_id,
                         messages=messages,
                         context_summary=sess.context_summary or "" if sess else "",
+                        task_description=task_description,
                         mode="full",
                         use_slm=agent_config.get("pii_use_slm", True),
                         memory_similarity_threshold=memory_similarity_threshold,
@@ -339,7 +360,11 @@ class ContextWorker:
                         relevant_skills = []
                     return original_summary, scrubbed_summary, token_map, relevant_skills
                 except Exception as exc:
-                    logger.error("context_worker.pii_mesh_failed", error=str(exc), agent_id=agent_id)
+                    logger.error(
+                        "context_worker.pii_mesh_failed",
+                        error=str(exc),
+                        agent_id=agent_id,
+                    )
                     # Degrade to legacy path
                     pass
 

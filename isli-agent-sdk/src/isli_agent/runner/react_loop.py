@@ -198,7 +198,8 @@ class ReActLoop:
             system_prompt = runner._prompt_assembler.assemble(
                 context_summary, relevant_skills=relevant_skills, task_mode=True
             )
-            messages = [{"role": "user", "content": task_data.get("input", "")}]
+            work_order = self._build_task_work_order(task_data)
+            messages = [{"role": "user", "content": work_order}]
 
             # PII Mesh: anonymize before LLM
             stream_id = task_data.get("session_id") or task_id
@@ -692,6 +693,30 @@ class ReActLoop:
         finally:
             runner._inflight_sessions.discard(session_id)
             await runner._lifecycle.notify_session_ready(session_id)
+
+
+    @staticmethod
+    def _build_task_work_order(task_data: dict) -> str:
+        """Build the user-facing work order for a Kanban task.
+
+        ``input`` is the explicit execution payload from programmatic or agent
+        callers (e.g. ``create_kanban_task``). When empty, the Board-created
+        case is assumed and the work order is derived from ``description`` /
+        ``title``.
+        """
+        task_input = task_data.get("input", "")
+        if task_input:
+            return task_input
+
+        title = task_data.get("title", "")
+        description = task_data.get("description", "")
+        if description and description != title:
+            if title:
+                return f"Task: {title}\n\n{description}"
+            return description
+        if title:
+            return f"Task: {title}"
+        return ""
 
 
 class _LoopTerminated(Exception):
